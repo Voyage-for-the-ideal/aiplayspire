@@ -1,0 +1,9 @@
+{
+  "title": "CommunicationMod",
+  "description": "A mod that exposes game state via HTTP and accepts commands.",
+  "visibility": "private",
+  "workshop_id": "3676237138",
+  "tags": [
+    "Utility"
+  ]
+}
