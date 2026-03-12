@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.py[cod]
+.env
+
+# Java / Maven build outputs
+target/
+*.class
+
+# IDE files
+.idea/
+.vscode/
