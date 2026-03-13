@@ -290,9 +290,112 @@ public class ChoiceScreenUtils {
         ArrayList<String> choices = new ArrayList<>();
         ArrayList<MapRoomNode> nodes = getMapScreenNodeChoices();
         for (MapRoomNode node : nodes) {
-            choices.add("x=" + node.x + ",y=" + node.y + " " + node.getRoomSymbol(true));
+            choices.add(describeMapNodeForHuman(node));
         }
         return choices;
+    }
+
+    public static ArrayList<MapRoomNode> getVisibleMapRowNodes(int rowIndex) {
+        ArrayList<MapRoomNode> visibleNodes = new ArrayList<>();
+        if (AbstractDungeon.map == null || rowIndex < 0 || rowIndex >= AbstractDungeon.map.size()) {
+            return visibleNodes;
+        }
+
+        for (MapRoomNode node : AbstractDungeon.map.get(rowIndex)) {
+            if (isVisibleMapNode(node)) {
+                visibleNodes.add(node);
+            }
+        }
+        return visibleNodes;
+    }
+
+    public static boolean isVisibleMapNode(MapRoomNode node) {
+        if (node == null) {
+            return false;
+        }
+        String symbol = node.getRoomSymbol(true);
+        if (symbol == null || symbol.isEmpty() || symbol.equals("*")) {
+            return false;
+        }
+        if (node.hasEdges()) {
+            return true;
+        }
+        if (AbstractDungeon.currMapNode != null && node.x == AbstractDungeon.currMapNode.x && node.y == AbstractDungeon.currMapNode.y) {
+            return true;
+        }
+        return hasIncomingMapEdge(node);
+    }
+
+    private static boolean hasIncomingMapEdge(MapRoomNode targetNode) {
+        if (AbstractDungeon.map == null || targetNode == null) {
+            return false;
+        }
+
+        for (ArrayList<MapRoomNode> row : AbstractDungeon.map) {
+            for (MapRoomNode sourceNode : row) {
+                if (sourceNode == null) {
+                    continue;
+                }
+                if (sourceNode.isConnectedTo(targetNode) || sourceNode.wingedIsConnectedTo(targetNode)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    public static int getMapNodeLaneIndexFromLeft(MapRoomNode node) {
+        if (node == null) {
+            return -1;
+        }
+
+        ArrayList<MapRoomNode> rowNodes = getVisibleMapRowNodes(node.y);
+        for (int i = 0; i < rowNodes.size(); i++) {
+            MapRoomNode rowNode = rowNodes.get(i);
+            if (rowNode.x == node.x && rowNode.y == node.y) {
+                return i + 1;
+            }
+        }
+        return -1;
+    }
+
+    public static String getRoomTypeLabel(String symbol) {
+        if (symbol == null || symbol.isEmpty()) {
+            return "未知";
+        }
+
+        switch (symbol) {
+            case "M":
+                return "怪物房";
+            case "E":
+                return "精英房";
+            case "R":
+                return "休息点";
+            case "$":
+                return "商店";
+            case "?":
+                return "事件房";
+            case "T":
+                return "宝箱房";
+            case "B":
+                return "Boss";
+            default:
+                return symbol;
+        }
+    }
+
+    public static String describeMapNodeForHuman(MapRoomNode node) {
+        if (node == null) {
+            return "未知房间";
+        }
+
+        int laneIndex = getMapNodeLaneIndexFromLeft(node);
+        String symbol = node.getRoomSymbol(true);
+        String roomType = getRoomTypeLabel(symbol);
+        if (laneIndex > 0) {
+            return "第" + laneIndex + "个房间(" + roomType + ")";
+        }
+        return roomType;
     }
 
     public static ArrayList<MapRoomNode> getMapScreenNodeChoices() {

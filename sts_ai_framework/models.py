@@ -45,6 +45,12 @@ class MonsterState(BaseModel):
     block: int
     intent: str
     index: Optional[int] = None # Filled by client
+    move: Optional["MonsterMoveState"] = None
+
+
+class MonsterMoveState(BaseModel):
+    damage: Optional[int] = None
+    hits: Optional[int] = None
 
 class PotionState(BaseModel):
     index: int
@@ -54,6 +60,47 @@ class PotionState(BaseModel):
     can_use: bool = False
     can_discard: bool = False
     requires_target: bool = False
+
+
+class MapEdgeState(BaseModel):
+    x: int
+    y: int
+    winged: bool = False
+
+
+class MapNodeState(BaseModel):
+    x: int
+    y: int
+    symbol: str = "?"
+    lane_index_from_left: int = -1
+    human_label: str = ""
+    is_current: bool = False
+    children: List[MapEdgeState] = []
+
+
+class MapChoiceState(BaseModel):
+    choice_index: int
+    x: int
+    y: int
+    symbol: str = "?"
+    lane_index_from_left: int = -1
+    human_label: str = ""
+    winged: bool = False
+
+
+class CurrentMapNodeState(BaseModel):
+    x: int
+    y: int
+    symbol: str = "?"
+    lane_index_from_left: int = -1
+    human_label: str = ""
+
+
+class MapPositionState(BaseModel):
+    floor: int
+    lane_index_from_left: int
+    symbol: str = "?"
+    human_label: str = ""
 
 class GameState(BaseModel):
     player: PlayerState
@@ -69,6 +116,13 @@ class GameState(BaseModel):
     floor: int
     act: int
     room_phase: str
+    first_room_chosen: bool = False
+    map_ascii: str = ""
+    map_position: Optional[MapPositionState] = None
+    map_choices_human: List[str] = []
+    map_nodes: List[MapNodeState] = []
+    current_map_node: Optional[CurrentMapNodeState] = None
+    current_map_choices: List[MapChoiceState] = []
     screen_type: Optional[str] = "NONE"
     choice_list: Optional[List[str]] = []
     can_proceed: bool = False

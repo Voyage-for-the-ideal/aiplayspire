@@ -1,11 +1,12 @@
 import json
 import os
 import re
-from typing import Optional, List, Tuple
+import time
+from typing import Optional, List, Tuple, Dict, Set
 from litellm import completion
 from pydantic import ValidationError
 from .agent_base import Agent
-from .models import GameState, GameAction, ActionType, Card
+from .models import GameState, GameAction, ActionType, Card, MapNodeState
 from .knowledge_base import KnowledgeBase
 import colorama
 from colorama import Fore, Style
@@ -13,10 +14,11 @@ from colorama import Fore, Style
 colorama.init()
 
 class LLMAgent(Agent):
-    def __init__(self, model_name: str = "gpt-4o", knowledge_base: Optional[KnowledgeBase] = None, game_client = None):
+    def __init__(self, model_name: str = "gpt-4o", knowledge_base: Optional[KnowledgeBase] = None, game_client = None, debug_prompt_file: Optional[str] = None):
         self.model_name = model_name
         self.knowledge_base = knowledge_base or KnowledgeBase()
         self.game_client = game_client
+        self.debug_prompt_file = debug_prompt_file
         self.history = [] # 如果需要上下文记忆，可以保存历史记录
         self.last_screen_type = None
 
@@ -179,6 +181,154 @@ class LLMAgent(Agent):
 
         return self._resolve_card_info(choice_text, choice_text)
 
+    def _build_map_index(self, state: GameState) -> Dict[Tuple[int, int], MapNodeState]:
+        index: Dict[Tuple[int, int], MapNodeState] = {}
+        for node in state.map_nodes:
+            index[(node.x, node.y)] = node
+        return index
+
+    def _get_map_choice_display_text(self, state: GameState, choice_index: int, choice_text: str) -> str:
+        if state.screen_type != "MAP":
+            return choice_text
+
+        if choice_index < len(state.map_choices_human) and state.map_choices_human[choice_index]:
+            return state.map_choices_human[choice_index]
+
+        for item in state.current_map_choices:
+            if item.choice_index == choice_index and item.human_label:
+                return item.human_label
+
+        return choice_text
+
+    def _parse_map_choice_coords(self, choice_text: str) -> Optional[Tuple[int, int]]:
+        match = re.search(r"x\s*=\s*(-?\d+)\s*,\s*y\s*=\s*(-?\d+)", choice_text)
+        if not match:
+            return None
+        return int(match.group(1)), int(match.group(2))
+
+    def _symbol_bucket(self, symbol: str) -> str:
+        if not symbol:
+            return "other"
+        s = symbol.strip().upper()
+        if s == "M":
+            return "monster"
+        if s == "E":
+            return "elite"
+        if s == "R":
+            return "rest"
+        if s == "$":
+            return "shop"
+        if s == "?":
+            return "event"
+        if s == "T":
+            return "treasure"
+        if s == "B":
+            return "boss"
+        return "other"
+
+    def _summarize_map_from_node(self, state: GameState, start: Tuple[int, int]) -> str:
+        node_index = self._build_map_index(state)
+        if start not in node_index:
+            return "无可用路线数据"
+
+        queue: List[Tuple[Tuple[int, int], int]] = [(start, 0)]
+        visited: Set[Tuple[int, int]] = set()
+        bucket_counts = {
+            "monster": 0,
+            "elite": 0,
+            "rest": 0,
+            "shop": 0,
+            "event": 0,
+            "treasure": 0,
+            "boss": 0,
+            "other": 0,
+        }
+        max_depth = 0
+        min_to_rest: Optional[int] = None
+        min_to_shop: Optional[int] = None
+        min_to_elite: Optional[int] = None
+
+        while queue:
+            key, dist = queue.pop(0)
+            if key in visited:
+                continue
+            visited.add(key)
+
+            node = node_index.get(key)
+            if not node:
+                continue
+
+            bucket = self._symbol_bucket(node.symbol)
+            bucket_counts[bucket] += 1
+            max_depth = max(max_depth, dist)
+
+            if bucket == "rest" and min_to_rest is None:
+                min_to_rest = dist
+            if bucket == "shop" and min_to_shop is None:
+                min_to_shop = dist
+            if bucket == "elite" and min_to_elite is None:
+                min_to_elite = dist
+
+            for edge in node.children:
+                next_key = (edge.x, edge.y)
+                if next_key not in visited:
+                    queue.append((next_key, dist + 1))
+
+        def _fmt(value: Optional[int]) -> str:
+            return f"{value}步" if value is not None else "无"
+
+        parts = []
+        parts.append(f"最近火堆:{_fmt(min_to_rest)}")
+        parts.append(f"商店:{_fmt(min_to_shop)}")
+        parts.append(f"精英:{_fmt(min_to_elite)}")
+        return " ".join(parts)
+
+    def _build_map_choice_summary(self, state: GameState, choice_index: int, choice_text: str) -> Optional[str]:
+        if state.screen_type != "MAP" or not state.map_nodes:
+            return None
+
+        start: Optional[Tuple[int, int]] = None
+        for item in state.current_map_choices:
+            if item.choice_index == choice_index:
+                start = (item.x, item.y)
+                break
+
+        if start is None:
+            start = self._parse_map_choice_coords(choice_text)
+
+        if start is None:
+            return None
+
+        return self._summarize_map_from_node(state, start)
+
+    def _write_debug_prompt(self, state: GameState, prompt: str) -> None:
+        if not self.debug_prompt_file:
+            return
+
+        try:
+            parent_dir = os.path.dirname(self.debug_prompt_file)
+            if parent_dir:
+                os.makedirs(parent_dir, exist_ok=True)
+
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            content = (
+                f"时间: {timestamp}\n"
+                f"楼层: {state.floor}\n"
+                f"阶段: {state.act}\n"
+                f"屏幕: {state.screen_type}\n"
+                f"房间阶段: {state.room_phase}\n"
+                f"\n===== PROMPT BEGIN =====\n"
+                f"{prompt}\n"
+                f"===== PROMPT END =====\n"
+            )
+
+            tmp_path = self.debug_prompt_file + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            os.replace(tmp_path, self.debug_prompt_file)
+        except Exception as exc:
+            print(Fore.YELLOW + f"写入 Prompt 调试文件失败: {exc}" + Style.RESET_ALL)
+
 
     def _format_state_for_prompt(self, state: GameState) -> str:
         # 构建人类可读的描述
@@ -198,9 +348,19 @@ class LLMAgent(Agent):
         if state.screen_type == "NONE" and state.room_phase == "COMBAT":
             monster_knowledge = []
             for m in state.monsters:
-                info = self.knowledge_base.get_monster_info(m.name)
+                info = self.knowledge_base.get_monster_info(m.name, m.id)
                 intent_info = self.knowledge_base.get_intent_info(m.intent)
-                monster_knowledge.append(f"- {m.name} (HP: {m.current_hp}/{m.max_hp}, 格挡: {m.block}): 意图: {m.intent} ({intent_info})。已知行为: {info}")
+                move_info = ""
+                if m.move and m.move.damage is not None:
+                    if m.move.hits and m.move.hits > 1:
+                        move_info = f" 当前招式伤害: {m.move.damage}x{m.move.hits}。"
+                    else:
+                        move_info = f" 当前招式伤害: {m.move.damage}。"
+
+                monster_knowledge.append(
+                    f"- {m.name} (HP: {m.current_hp}/{m.max_hp}, 格挡: {m.block}): 意图: {m.intent} ({intent_info})。"
+                    f"{move_info}已知行为: {info}"
+                )
             
             card_knowledge = []
             for card in state.hand:
@@ -265,11 +425,16 @@ class LLMAgent(Agent):
             unified_choices = self._build_unified_choices(state)
             choices_str = ""
             for i, (choice_text, _) in enumerate(unified_choices):
-                choice_info = self._get_choice_card_info(state, choice_text)
-                if choice_info != "未知卡牌效果。":
-                    choices_str += f"  {i}: {choice_text} - {choice_info}\n"
+                display_text = self._get_map_choice_display_text(state, i, choice_text)
+                map_summary = self._build_map_choice_summary(state, i, choice_text)
+                if map_summary:
+                    choices_str += f"  {i}: {display_text} | 路线摘要: {map_summary}\n"
                 else:
-                    choices_str += f"  {i}: {choice_text}\n"
+                    choice_info = self._get_choice_card_info(state, choice_text)
+                    if choice_info != "未知卡牌效果。":
+                        choices_str += f"  {i}: {display_text} - {choice_info}\n"
+                    else:
+                        choices_str += f"  {i}: {display_text}\n"
             
             specific_info += f"""
 - 可选列表 (Choices):
@@ -277,6 +442,31 @@ class LLMAgent(Agent):
 """
             if state.screen_type == "COMBAT_REWARD":
                 specific_info += "\n- 这是一个战斗奖励界面 (COMBAT_REWARD)。\n"
+            if state.screen_type == "MAP":
+                specific_info += (
+                    "\n- 地图符号说明: M=普通战斗, E=精英战斗, R=火堆(休息/升级), ?=未知事件, $=商店, T=宝箱, B=Boss\n"
+                )
+                if state.map_ascii:
+                    specific_info += f"\n- 地图 (ASCII):\n{state.map_ascii}\n"
+                if state.map_position is not None:
+                    if not state.first_room_chosen:
+                        specific_info += f"\n- 当前位置: {state.map_position.human_label}\n"
+                    else:
+                        specific_info += (
+                            f"\n- 当前位置: 第{state.map_position.floor}层，"
+                            f"从左往右第{state.map_position.lane_index_from_left}个房间"
+                        )
+                        if state.map_position.human_label:
+                            specific_info += f"（{state.map_position.human_label}）"
+                        specific_info += "\n"
+                elif state.current_map_node is not None and state.current_map_node.lane_index_from_left > 0:
+                    specific_info += (
+                        f"\n- 当前位置: 第{state.current_map_node.y}层，"
+                        f"从左往右第{state.current_map_node.lane_index_from_left}个房间"
+                    )
+                    if state.current_map_node.human_label:
+                        specific_info += f"（{state.current_map_node.human_label}）"
+                    specific_info += "\n"
 
             specific_info += """
 目标: 根据当前情况做出最佳选择。
@@ -335,11 +525,6 @@ Schema 格式如下:
         return prompt
 
     def choose_action(self, state: GameState) -> GameAction:
-        # Check for SHOP -> MAP transition
-        if self.last_screen_type == "SHOP" and state.screen_type == "MAP":
-            self.last_screen_type = state.screen_type
-            return self._choose_map_node_after_shop(state)
-            
         # 强制逻辑：从商店购买界面返回房间后，自动前进
         if self.last_screen_type == "SHOP_SCREEN" and state.screen_type == "SHOP_ROOM" and state.can_proceed:
             print(Fore.YELLOW + "检测到刚离开商店购买界面，自动前进..." + Style.RESET_ALL)
@@ -353,6 +538,7 @@ Schema 格式如下:
             return GameAction(type=ActionType.WAIT)
 
         prompt = self._format_state_for_prompt(state)
+        self._write_debug_prompt(state, prompt)
         
         print(Fore.CYAN + "正在思考..." + Style.RESET_ALL)
         

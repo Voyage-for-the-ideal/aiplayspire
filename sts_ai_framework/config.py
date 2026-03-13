@@ -16,3 +16,4 @@ LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o")
 
 # Logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+DEBUG_PROMPT_FILE = os.getenv("DEBUG_PROMPT_FILE", "")

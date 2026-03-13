@@ -1,4 +1,5 @@
 from typing import Dict, List, Optional, Union, Any
+import re
 
 class KnowledgeBase:
     def __init__(self):
@@ -272,8 +273,34 @@ class KnowledgeBase:
             "UNKNOWN": "未知"
         }
 
-    def get_monster_info(self, name: str) -> str:
-        data = self.monsters_data.get(name)
+        self.monster_alias_to_key: Dict[str, str] = {}
+        for key, data in self.monsters_data.items():
+            aliases = [key, data.get("name_cn", "")]
+            for alias in aliases:
+                normalized = self._normalize_monster_key(alias)
+                if normalized:
+                    self.monster_alias_to_key[normalized] = key
+
+    def _normalize_monster_key(self, value: Optional[str]) -> str:
+        if not value:
+            return ""
+        normalized = value.strip().lower()
+        normalized = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", normalized)
+        return normalized
+
+    def get_monster_info(self, name: Optional[str] = None, monster_id: Optional[str] = None) -> str:
+        data = None
+
+        for candidate in (name, monster_id):
+            if not candidate:
+                continue
+            normalized = self._normalize_monster_key(candidate)
+            key = self.monster_alias_to_key.get(normalized)
+            if key:
+                data = self.monsters_data.get(key)
+                if data:
+                    break
+
         if not data:
             return "未知怪物行为。"
         

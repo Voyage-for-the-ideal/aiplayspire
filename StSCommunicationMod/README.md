@@ -81,11 +81,20 @@ java Build
 - `floor`, `act`, `room_phase`
 - `screen_type`, `choice_list`, `can_proceed`, `can_cancel`
 - `is_end_turn_button_enabled`
+- 地图事实字段（AI 无关的原始状态）：
+  - `first_room_chosen`
+  - `map_ascii`: 地图的 ASCII 文本渲染
+  - `map_position`: 当前位置（楼层 + 从左往右第几个房间）
+  - `map_choices_human`: 当前地图可选房间的人类可读列表
+  - `map_nodes`: 全图节点列表（内部事实字段，仍含 `x/y/symbol/is_current/children`）
+  - `current_map_node`: 当前节点内部事实字段
+  - `current_map_choices`: 仅在 `screen_type=MAP` 时提供当前合法下一步节点的内部事实字段
 
 说明：
 
 - `hand` 中卡牌索引从 `0` 开始，可直接用于 `play.card_index`。
 - `monsters` 的目标索引基于“存活怪顺序”，可用于 `target_index`。
+- 地图展示层默认不再使用坐标，而使用 ASCII 地图与“第几个房间”的文案；`map_nodes/current_map_choices` 仅保留为内部事实字段。
 - 若主线程未及时响应，请求可能返回超时错误。
 
 ### 2) 执行动作

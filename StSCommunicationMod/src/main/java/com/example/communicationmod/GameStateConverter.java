@@ -9,6 +9,7 @@ import com.megacrit.cardcrawl.dungeons.AbstractDungeon;
 import com.megacrit.cardcrawl.helpers.CardLibrary;
 import com.megacrit.cardcrawl.monsters.AbstractMonster;
 import com.megacrit.cardcrawl.monsters.EnemyMoveInfo;
+import com.megacrit.cardcrawl.map.MapRoomNode;
 import com.megacrit.cardcrawl.orbs.AbstractOrb;
 import com.megacrit.cardcrawl.potions.AbstractPotion;
 import com.megacrit.cardcrawl.potions.PotionSlot;
@@ -94,10 +95,24 @@ public class GameStateConverter {
         state.put("room_phase", AbstractDungeon.getCurrRoom().phase.name());
 
         // Screen Info
-        state.put("screen_type", ChoiceScreenUtils.getCurrentChoiceType().name());
+        ChoiceScreenUtils.ChoiceType currentChoiceType = ChoiceScreenUtils.getCurrentChoiceType();
+        state.put("screen_type", currentChoiceType.name());
         state.put("choice_list", ChoiceScreenUtils.getCurrentChoiceList());
         state.put("can_proceed", ChoiceScreenUtils.isConfirmButtonAvailable());
         state.put("can_cancel", ChoiceScreenUtils.isCancelButtonAvailable());
+
+        // Map Facts (AI-agnostic): full map graph + current node + current legal map targets
+        state.put("first_room_chosen", AbstractDungeon.firstRoomChosen);
+        state.put("map_ascii", renderMapAscii());
+        state.put("map_position", convertMapPositionToJson());
+        state.put("map_choices_human", ChoiceScreenUtils.getCurrentChoiceType() == ChoiceScreenUtils.ChoiceType.MAP ? ChoiceScreenUtils.getCurrentChoiceList() : new ArrayList<>());
+        state.put("map_nodes", convertMapNodesToJson());
+        state.put("current_map_node", convertCurrentMapNodeToJson());
+        if (currentChoiceType == ChoiceScreenUtils.ChoiceType.MAP) {
+            state.put("current_map_choices", convertCurrentMapChoicesToJson());
+        } else {
+            state.put("current_map_choices", new ArrayList<>());
+        }
 
         // Turn Info
         boolean isEndTurnButtonEnabled = false;
@@ -271,5 +286,211 @@ public class GameStateConverter {
             result.add(jsonOrb);
         }
         return result;
+    }
+
+    private static List<Map<String, Object>> convertMapNodesToJson() {
+        List<Map<String, Object>> result = new ArrayList<>();
+        if (AbstractDungeon.map == null) {
+            return result;
+        }
+
+        for (ArrayList<MapRoomNode> row : AbstractDungeon.map) {
+            for (MapRoomNode node : row) {
+                if (node == null) {
+                    continue;
+                }
+
+                Map<String, Object> jsonNode = new HashMap<>();
+                jsonNode.put("x", node.x);
+                jsonNode.put("y", node.y);
+                jsonNode.put("symbol", node.getRoomSymbol(true));
+                jsonNode.put("lane_index_from_left", ChoiceScreenUtils.getMapNodeLaneIndexFromLeft(node));
+                jsonNode.put("human_label", ChoiceScreenUtils.describeMapNodeForHuman(node));
+                jsonNode.put("is_current", AbstractDungeon.currMapNode != null && node.x == AbstractDungeon.currMapNode.x && node.y == AbstractDungeon.currMapNode.y);
+
+                List<Map<String, Object>> children = new ArrayList<>();
+                for (ArrayList<MapRoomNode> targets : AbstractDungeon.map) {
+                    for (MapRoomNode target : targets) {
+                        if (target == null) {
+                            continue;
+                        }
+
+                        boolean connected = node.isConnectedTo(target);
+                        boolean wingedConnected = node.wingedIsConnectedTo(target);
+                        if (!connected && !wingedConnected) {
+                            continue;
+                        }
+
+                        Map<String, Object> edge = new HashMap<>();
+                        edge.put("x", target.x);
+                        edge.put("y", target.y);
+                        edge.put("winged", !connected && wingedConnected);
+                        children.add(edge);
+                    }
+                }
+                jsonNode.put("children", children);
+
+                result.add(jsonNode);
+            }
+        }
+
+        return result;
+    }
+
+    private static Map<String, Object> convertCurrentMapNodeToJson() {
+        Map<String, Object> current = new HashMap<>();
+        if (AbstractDungeon.currMapNode == null) {
+            return current;
+        }
+
+        current.put("x", AbstractDungeon.currMapNode.x);
+        current.put("y", AbstractDungeon.currMapNode.y);
+        current.put("symbol", AbstractDungeon.currMapNode.getRoomSymbol(true));
+        current.put("lane_index_from_left", ChoiceScreenUtils.getMapNodeLaneIndexFromLeft(AbstractDungeon.currMapNode));
+        current.put("human_label", ChoiceScreenUtils.describeMapNodeForHuman(AbstractDungeon.currMapNode));
+        return current;
+    }
+
+    private static Map<String, Object> convertMapPositionToJson() {
+        Map<String, Object> position = new HashMap<>();
+        if (!AbstractDungeon.firstRoomChosen) {
+            position.put("floor", 0);
+            position.put("lane_index_from_left", 0);
+            position.put("symbol", "");
+            position.put("human_label", "起始选路界面（尚未选择起始房间）");
+            return position;
+        }
+        if (AbstractDungeon.currMapNode == null) {
+            return position;
+        }
+
+        position.put("floor", AbstractDungeon.currMapNode.y);
+        position.put("lane_index_from_left", ChoiceScreenUtils.getMapNodeLaneIndexFromLeft(AbstractDungeon.currMapNode));
+        position.put("symbol", AbstractDungeon.currMapNode.getRoomSymbol(true));
+        position.put("human_label", ChoiceScreenUtils.describeMapNodeForHuman(AbstractDungeon.currMapNode));
+        return position;
+    }
+
+    private static List<Map<String, Object>> convertCurrentMapChoicesToJson() {
+        List<Map<String, Object>> result = new ArrayList<>();
+        ArrayList<MapRoomNode> nodes = ChoiceScreenUtils.getMapScreenNodeChoices();
+        MapRoomNode current = AbstractDungeon.currMapNode;
+
+        for (int i = 0; i < nodes.size(); i++) {
+            MapRoomNode node = nodes.get(i);
+            Map<String, Object> jsonChoice = new HashMap<>();
+            jsonChoice.put("choice_index", i);
+            jsonChoice.put("x", node.x);
+            jsonChoice.put("y", node.y);
+            jsonChoice.put("symbol", node.getRoomSymbol(true));
+            jsonChoice.put("lane_index_from_left", ChoiceScreenUtils.getMapNodeLaneIndexFromLeft(node));
+            jsonChoice.put("human_label", ChoiceScreenUtils.describeMapNodeForHuman(node));
+
+            boolean connected = current != null && current.isConnectedTo(node);
+            boolean wingedConnected = current != null && current.wingedIsConnectedTo(node);
+            jsonChoice.put("winged", !connected && wingedConnected);
+
+            result.add(jsonChoice);
+        }
+
+        return result;
+    }
+
+    private static String renderMapAscii() {
+        if (AbstractDungeon.map == null || AbstractDungeon.map.isEmpty()) {
+            return "";
+        }
+
+        int maxRow = AbstractDungeon.map.size() - 1;
+        int laneSpacing = 2;
+        StringBuilder builder = new StringBuilder();
+
+        for (int row = maxRow; row >= 0; row--) {
+            ArrayList<MapRoomNode> rowNodes = ChoiceScreenUtils.getVisibleMapRowNodes(row);
+            char[] nodeLine = createBlankMapLine(laneSpacing);
+            writeFloorPrefix(nodeLine, row);
+            for (MapRoomNode node : rowNodes) {
+                int col = mapColumnForNode(node, laneSpacing);
+                if (col >= 0 && col < nodeLine.length) {
+                    nodeLine[col] = node.getRoomSymbol(true).charAt(0);
+                }
+            }
+            builder.append(rstrip(nodeLine)).append("\n");
+
+            if (row > 0) {
+                char[] edgeLine = createBlankMapLine(laneSpacing);
+                writeFloorSpacer(edgeLine);
+                ArrayList<MapRoomNode> lowerRowNodes = ChoiceScreenUtils.getVisibleMapRowNodes(row - 1);
+                for (MapRoomNode source : lowerRowNodes) {
+                    for (MapRoomNode target : rowNodes) {
+                        boolean connected = source.isConnectedTo(target) || source.wingedIsConnectedTo(target);
+                        if (!connected) {
+                            continue;
+                        }
+                        drawConnection(edgeLine, mapColumnForNode(source, laneSpacing), mapColumnForNode(target, laneSpacing));
+                    }
+                }
+                builder.append(rstrip(edgeLine)).append("\n");
+            }
+        }
+
+        return builder.toString().trim();
+    }
+
+    private static char[] createBlankMapLine(int laneSpacing) {
+        int width = 5 + (7 * laneSpacing) + 4;
+        char[] line = new char[width];
+        for (int i = 0; i < width; i++) {
+            line[i] = ' ';
+        }
+        return line;
+    }
+
+    private static void writeFloorPrefix(char[] line, int row) {
+        String label = String.format("%2d  ", row);
+        for (int i = 0; i < label.length() && i < line.length; i++) {
+            line[i] = label.charAt(i);
+        }
+    }
+
+    private static void writeFloorSpacer(char[] line) {
+        String label = "    ";
+        for (int i = 0; i < label.length() && i < line.length; i++) {
+            line[i] = label.charAt(i);
+        }
+    }
+
+    private static int mapColumnForNode(MapRoomNode node, int laneSpacing) {
+        return 4 + (node.x * laneSpacing);
+    }
+
+    private static void drawConnection(char[] line, int sourceCol, int targetCol) {
+        if (sourceCol < 0 || targetCol < 0) {
+            return;
+        }
+
+        int min = Math.min(sourceCol, targetCol);
+        int max = Math.max(sourceCol, targetCol);
+        if (sourceCol == targetCol) {
+            if (sourceCol >= 0 && sourceCol < line.length) {
+                line[sourceCol] = '|';
+            }
+            return;
+        }
+
+        char ch = sourceCol < targetCol ? '/' : '\\';
+        for (int col = min + 1; col < max; col++) {
+            if (col >= 0 && col < line.length && line[col] == ' ') {
+                line[col] = ch;
+            }
+        }
+    }
+
+    private static String rstrip(char[] chars) {
+        int end = chars.length;
+        while (end > 0 && chars[end - 1] == ' ') {
+            end--;
+        }
+        return new String(chars, 0, end);
     }
 }

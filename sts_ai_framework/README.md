@@ -46,6 +46,7 @@
 - `GRID` 删牌等界面严格以 `choice_list` 为准，不再把 `can_proceed`/`can_cancel` 混入候选，避免错误点击前进。
 - 当界面没有 `choice_list`，但存在 `can_proceed`/`can_cancel` 时，会按“按钮态”处理，而不是错误回退为 `end_turn`。
 - 当选择界面的候选项可映射到当前可见卡牌时，AI 会按需通过本地知识库或 `/card_info` 查询卡牌效果，并把效果补充到 Prompt 中。
+- 地图界面会消费 Mod 导出的 ASCII 地图、当前位置（楼层 + 从左往右第几个房间）以及完整地图事实，由 AI 自主做路径评估后再映射回 `choice_index`。
 - LLM 解析失败时采用分层回退：优先 `wait`/安全动作，再考虑 `end_turn`，避免直接空过。
 - `game_client.py` 区分“动作已提交（HTTP 成功）”与“动作已生效（状态发生变化）”。
 - Mod 端实际执行是异步的（入队成功不等于立刻生效）。
@@ -55,6 +56,9 @@
 - 修复：`GRID` 删牌界面严格按照 `choice_list` 选择，不再把 `proceed` 作为固定候选注入，避免 AI 在删牌时反复输出前进。
 - 修复：`COMBAT_REWARD` 等 `choice_list` 为空但 `can_proceed=true` 的界面，新增“按钮态”处理，允许正确执行前进而不是误输出 `end_turn`。
 - 改进：AI 现在会在必要时为选择界面的候选卡牌按需查询效果，优先使用本地知识库，未知时再调用 `/card_info`。
+- 改进：移除了商店后“固定选第一个地图点”的脚本行为，地图选路改为纯 AI 决策。
+- 改进：新增地图候选路线摘要（怪物/精英/火堆/商店等可达统计），帮助模型进行长线选路。
+- 改进：地图展示已去除坐标文案，改为 ASCII 地图与“第几个房间”的人类可读表达。
 
 ## 4. 环境准备
 
@@ -118,6 +122,20 @@ python -m sts_ai_framework --model gpt-4o --interval 2.0
 
 - `--model`：覆盖 `.env` 的 `LLM_MODEL`
 - `--interval`：轮询与行动间隔（秒，默认 `2.0`）
+- `--debug-prompt-file`：把每次最新发送给 LLM 的 Prompt 覆盖写入指定文件，便于在编辑器中实时查看
+
+示例：
+
+```bash
+cd D:\code\aiplayspire
+python -m sts_ai_framework --model deepseek/deepseek-chat --debug-prompt-file debug\latest_prompt.txt
+```
+
+也可以在 `.env` 中设置：
+
+```env
+DEBUG_PROMPT_FILE=debug/latest_prompt.txt
+```
 
 ## 7. 动作协议（框架侧）
 

@@ -8,14 +8,14 @@ from colorama import init, Fore, Style
 
 # Try importing from package, otherwise fall back to local (if user runs script directly inside folder, though discouraged)
 try:
-    from .config import STS_API_BASE_URL, LLM_MODEL
+    from .config import STS_API_BASE_URL, LLM_MODEL, DEBUG_PROMPT_FILE
     from .game_client import GameClient
     from .llm_agent import LLMAgent
     from .models import ActionType
 except ImportError:
     # Hack to allow running python sts_ai_framework/__main__.py
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from sts_ai_framework.config import STS_API_BASE_URL, LLM_MODEL
+    from sts_ai_framework.config import STS_API_BASE_URL, LLM_MODEL, DEBUG_PROMPT_FILE
     from sts_ai_framework.game_client import GameClient
     from sts_ai_framework.llm_agent import LLMAgent
     from sts_ai_framework.models import ActionType
@@ -74,11 +74,14 @@ def main():
     parser = argparse.ArgumentParser(description="运行杀戮尖塔 AI Agent")
     parser.add_argument("--model", type=str, default=LLM_MODEL, help="使用的 LLM 模型 (例如 gpt-4o, claude-3-opus, gemini-pro)")
     parser.add_argument("--interval", type=float, default=2.0, help="行动间隔时间 (秒)")
+    parser.add_argument("--debug-prompt-file", type=str, default=DEBUG_PROMPT_FILE, help="将最新 Prompt 持续写入到指定文件，便于调试")
     args = parser.parse_args()
 
     print(Fore.YELLOW + "正在启动杀戮尖塔 AI 框架..." + Style.RESET_ALL)
     print(f"模型: {args.model}")
     print(f"连接到 Mod 地址: {STS_API_BASE_URL}")
+    if args.debug_prompt_file:
+        print(f"Prompt 调试文件: {args.debug_prompt_file}")
 
     client = GameClient(base_url=STS_API_BASE_URL)
     
@@ -98,7 +101,7 @@ def main():
 
     print(Fore.GREEN + "连接成功!" + Style.RESET_ALL)
 
-    agent = LLMAgent(model_name=args.model, game_client=client)
+    agent = LLMAgent(model_name=args.model, game_client=client, debug_prompt_file=args.debug_prompt_file or None)
     
     # 重试计数器
     retry_count = 0
