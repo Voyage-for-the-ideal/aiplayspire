@@ -23,6 +23,7 @@ import com.megacrit.cardcrawl.shop.StoreRelic;
 import com.megacrit.cardcrawl.ui.buttons.*;
 import com.megacrit.cardcrawl.ui.campfire.AbstractCampfireOption;
 import com.example.communicationmod.patches.CardRewardScreenPatch;
+import com.example.communicationmod.patches.DungeonMapPatch;
 import com.example.communicationmod.patches.MapRoomNodeHoverPatch;
 import com.example.communicationmod.patches.GridCardSelectScreenPatch;
 import com.example.communicationmod.patches.MerchantPatch;
@@ -402,7 +403,16 @@ public class ChoiceScreenUtils {
         ArrayList<MapRoomNode> choices = new ArrayList<>();
         MapRoomNode currMapNode = AbstractDungeon.getCurrMapNode();
         if (currMapNode == null) return choices; // Should not happen if map is up
-        
+
+        // Check if we are selecting the boss
+        String actId = AbstractDungeon.id;
+        if(currMapNode.y == 14 || ("TheEnding".equals(actId) && currMapNode.y == 2)) {
+            MapRoomNode bossNode = new MapRoomNode(-1, 15);
+            bossNode.room = new com.megacrit.cardcrawl.rooms.MonsterRoomBoss();
+            choices.add(bossNode);
+            return choices;
+        }
+
         // Special handling for first room
         if (!AbstractDungeon.firstRoomChosen) {
              for(MapRoomNode node : AbstractDungeon.map.get(0)) {
@@ -426,6 +436,19 @@ public class ChoiceScreenUtils {
     }
 
     public static void makeMapChoice(int index) {
+        MapRoomNode currMapNode = AbstractDungeon.getCurrMapNode();
+        if(currMapNode != null) {
+            String actId = AbstractDungeon.id;
+            if(currMapNode.y == 14 || ("TheEnding".equals(actId) && currMapNode.y == 2)) {
+                if(index == 0) {
+                    DungeonMapPatch.doBossHover = true;
+                    return;
+                } else {
+                    throw new IndexOutOfBoundsException("Only a boss node can be chosen here.");
+                }
+            }
+        }
+
         ArrayList<MapRoomNode> nodes = getMapScreenNodeChoices();
         if (index >= 0 && index < nodes.size()) {
             MapRoomNode node = nodes.get(index);

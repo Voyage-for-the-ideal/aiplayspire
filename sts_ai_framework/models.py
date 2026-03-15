@@ -127,6 +127,7 @@ class GameState(BaseModel):
     choice_list: Optional[List[str]] = []
     can_proceed: bool = False
     can_cancel: bool = False
+    grid_selected_count: int = 0
     is_end_turn_button_enabled: bool = False
 
 class ActionType(str, Enum):

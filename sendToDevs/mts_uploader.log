@@ -1,0 +1,22 @@
+3月 15, 2026 7:02:08 下午 com.megacrit.moduploader.Main main
+详细: programStr=D:/Program%20Files%20(x86)/Steam/steamapps/common/SlayTheSpire/mod-uploader.jar
+3月 15, 2026 7:02:08 下午 com.megacrit.moduploader.cli.UploadCMD run
+严重: The workspace 'CommunicationMod' does not appear to exist.Please use the 'new' command to create it.
+3月 15, 2026 7:02:08 下午 java.lang.Shutdown logRuntimeExit
+详细: Runtime.exit() called with status: 1
+java.lang.Throwable: Runtime.exit(1)
+	at java.base/java.lang.Shutdown.logRuntimeExit(Shutdown.java:179)
+	at java.base/java.lang.Shutdown.exit(Shutdown.java:160)
+	at java.base/java.lang.Runtime.exit(Runtime.java:177)
+	at java.base/java.lang.System.exit(System.java:1540)
+	at com.megacrit.moduploader.cli.UploadCMD.run(UploadCMD.java:23)
+	at picocli.CommandLine.execute(CommandLine.java:1048)
+	at picocli.CommandLine.access$900(CommandLine.java:142)
+	at picocli.CommandLine$RunAll.handle(CommandLine.java:1304)
+	at picocli.CommandLine$RunAll.handle(CommandLine.java:1264)
+	at picocli.CommandLine$AbstractParseResultHandler.handleParseResult(CommandLine.java:1131)
+	at picocli.CommandLine.parseWithHandlers(CommandLine.java:1414)
+	at picocli.CommandLine.parseWithHandler(CommandLine.java:1353)
+	at com.megacrit.moduploader.cli.CLI.parseArgs(CLI.java:30)
+	at com.megacrit.moduploader.Main.main(Main.java:53)
+
