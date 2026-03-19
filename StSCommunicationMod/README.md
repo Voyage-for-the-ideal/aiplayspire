@@ -198,3 +198,7 @@ java Build
 - 每次执行动作前先调用一次 `/state`，使用最新 `choice_list` 和索引。
 - 对于多步骤交互（如奖励、地图、商店），优先用 `screen_type + choice_list` 驱动决策。
 - 若频繁请求 `/state`，建议客户端做重试与短间隔轮询，处理 `timeout`/`busy` 错误。
+
+## 最近更新 (Changelog)
+
+- 修复（2026-03-15）：修复了在地图的最后一步（`y == 14` / `y == 2`）准备进入 Boss 房间时，`getMapScreenNodeChoices()` 会返回空列表导致 AI 端卡死不断尝试 `proceed` 的问题。现在引入了底层鼠标点击 Patch (`DungeonMapPatch`)，能够为 AI 提供虚拟的 Boss 节点事件，并在选择后自动安全打通进入 Boss 的地图连线。

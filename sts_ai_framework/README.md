@@ -53,6 +53,7 @@
 
 ### 最近更新
 
+- 修复：修复了最后一层（第15层等）由于 Mod 端地图不连通导致 AI 收不到 Boss 节点的问题（配合 StSCommunicationMod 升级）。
 - 修复：`GRID` 删牌界面严格按照 `choice_list` 选择，不再把 `proceed` 作为固定候选注入，避免 AI 在删牌时反复输出前进。
 - 修复：`COMBAT_REWARD` 等 `choice_list` 为空但 `can_proceed=true` 的界面，新增“按钮态”处理，允许正确执行前进而不是误输出 `end_turn`。
 - 改进：AI 现在会在必要时为选择界面的候选卡牌按需查询效果，优先使用本地知识库，未知时再调用 `/card_info`。
