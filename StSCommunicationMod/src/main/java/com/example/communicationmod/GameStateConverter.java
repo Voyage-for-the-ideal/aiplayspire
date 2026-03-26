@@ -294,9 +294,6 @@ public class GameStateConverter {
             return result;
         }
 
-        int bossRow = getSyntheticBossRow();
-        int bossX = getSyntheticBossX();
-
         for (ArrayList<MapRoomNode> row : AbstractDungeon.map) {
             for (MapRoomNode node : row) {
                 if (node == null) {
@@ -331,28 +328,11 @@ public class GameStateConverter {
                         children.add(edge);
                     }
                 }
-                if (node.y == AbstractDungeon.map.size() - 1) {
-                    Map<String, Object> edge = new HashMap<>();
-                    edge.put("x", bossX);
-                    edge.put("y", bossRow);
-                    edge.put("winged", false);
-                    children.add(edge);
-                }
                 jsonNode.put("children", children);
 
                 result.add(jsonNode);
             }
         }
-
-        Map<String, Object> bossNode = new HashMap<>();
-        bossNode.put("x", bossX);
-        bossNode.put("y", bossRow);
-        bossNode.put("symbol", "B");
-        bossNode.put("lane_index_from_left", 1);
-        bossNode.put("human_label", "Boss 房间");
-        bossNode.put("is_current", false);
-        bossNode.put("children", new ArrayList<>());
-        result.add(bossNode);
 
         return result;
     }
@@ -422,26 +402,8 @@ public class GameStateConverter {
         }
 
         int maxRow = AbstractDungeon.map.size() - 1;
-        int bossRow = getSyntheticBossRow();
-        int bossX = getSyntheticBossX();
         int laneSpacing = 2;
         StringBuilder builder = new StringBuilder();
-
-        char[] bossLine = createBlankMapLine(laneSpacing);
-        writeFloorPrefix(bossLine, bossRow);
-        int bossCol = mapColumnForX(bossX, laneSpacing);
-        if (bossCol >= 0 && bossCol < bossLine.length) {
-            bossLine[bossCol] = 'B';
-        }
-        builder.append(rstrip(bossLine)).append("\n");
-
-        char[] bossEdgeLine = createBlankMapLine(laneSpacing);
-        writeFloorSpacer(bossEdgeLine);
-        ArrayList<MapRoomNode> topRowNodes = ChoiceScreenUtils.getVisibleMapRowNodes(maxRow);
-        for (MapRoomNode source : topRowNodes) {
-            drawBossConnection(bossEdgeLine, mapColumnForNode(source, laneSpacing), bossCol);
-        }
-        builder.append(rstrip(bossEdgeLine)).append("\n");
 
         for (int row = maxRow; row >= 0; row--) {
             ArrayList<MapRoomNode> rowNodes = ChoiceScreenUtils.getVisibleMapRowNodes(row);
@@ -499,11 +461,7 @@ public class GameStateConverter {
     }
 
     private static int mapColumnForNode(MapRoomNode node, int laneSpacing) {
-        return mapColumnForX(node.x, laneSpacing);
-    }
-
-    private static int mapColumnForX(int x, int laneSpacing) {
-        return 4 + (x * laneSpacing);
+        return 4 + (node.x * laneSpacing);
     }
 
     private static void drawConnection(char[] line, int sourceCol, int targetCol) {
@@ -528,42 +486,11 @@ public class GameStateConverter {
         }
     }
 
-    private static void drawBossConnection(char[] line, int sourceCol, int bossCol) {
-        if (sourceCol < 0 || bossCol < 0) {
-            return;
-        }
-
-        if (sourceCol == bossCol) {
-            if (sourceCol >= 0 && sourceCol < line.length) {
-                line[sourceCol] = '|';
-            }
-            return;
-        }
-
-        int col = sourceCol < bossCol ? sourceCol + 1 : sourceCol - 1;
-        if (col < 0 || col >= line.length) {
-            return;
-        }
-
-        char ch = sourceCol < bossCol ? '/' : '\\';
-        if (line[col] == ' ') {
-            line[col] = ch;
-        }
-    }
-
     private static String rstrip(char[] chars) {
         int end = chars.length;
         while (end > 0 && chars[end - 1] == ' ') {
             end--;
         }
         return new String(chars, 0, end);
-    }
-
-    private static int getSyntheticBossRow() {
-        return AbstractDungeon.map.size();
-    }
-
-    private static int getSyntheticBossX() {
-        return 3;
     }
 }
