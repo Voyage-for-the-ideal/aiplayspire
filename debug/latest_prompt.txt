@@ -1,26 +1,57 @@
-时间: 2026-03-15 19:44:46
-楼层: 5
+时间: 2026-04-02 15:55:02
+楼层: 8
 阶段: 1
-屏幕: COMBAT_REWARD
+屏幕: MAP
 房间阶段: COMPLETE
 
 ===== PROMPT BEGIN =====
 
 
 当前游戏状态 (Current Game State):
-- 楼层 (Floor): 5, 阶段 (Act): 1
-- 玩家 (Player): HP 7/88, 格挡 (Block): 0, 能量 (Energy): 9999, 金币 (Gold): 199
-- 当前屏幕 (Screen Type): COMBAT_REWARD
+- 楼层 (Floor): 8, 阶段 (Act): 1
+- 玩家 (Player): HP 88/88, 格挡 (Block): 0, 能量 (Energy): 3, 金币 (Gold): 0
+- 当前屏幕 (Screen Type): MAP
 - 房间阶段 (Room Phase): COMPLETE
 
 
 - 可选列表 (Choices):
-  0: 11(+0 bonus) gold
-  1: add potion: [火焰药水] 造成 20 点伤害。
-  2: add card to deck
+  0: 第1个房间(宝箱房) | 路线摘要: 最近火堆:4步 商店:无 精英:1步
 
 
-- 这是一个战斗奖励界面 (COMBAT_REWARD)。
+- 地图符号说明: M=普通战斗, E=精英战斗, R=火堆(休息/升级), ?=未知事件, $=商店, T=宝箱, B=Boss
+
+- 地图 (ASCII):
+14    R   R R R
+     /|  /  |/
+13  M E M   M
+     \| |   |\
+12    ? R   ? M
+      |\|\ / /
+11    ? ? M M
+     / /  |\ \
+10  ? M   ? M R
+    |  \ /   \|
+ 9  E   M     E
+     \ /|      \
+ 8    T T       T
+     /|\|       |
+ 7  R E ?       R
+     \ \|\     /|
+ 6    E $ R   E ?
+      |/  |   |/
+ 5    R   E   R
+     / \ /   /|
+ 4  M   $   ? M
+    |\  |\  |  \
+ 3  M $ M ? M   M
+    |  \ \| |  /
+ 2  ?   M M ? M
+     \ /  |\| |
+ 1    M   ? M M
+     /   / / /
+ 0  M   M M M
+
+- 当前位置: 第7层，从左往右第1个房间（第1个房间(休息点)）
 
 目标: 根据当前情况做出最佳选择。
 

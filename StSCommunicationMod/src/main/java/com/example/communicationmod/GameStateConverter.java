@@ -67,6 +67,9 @@ public class GameStateConverter {
         state.put("relics", convertRelicsToJson(AbstractDungeon.player.relics));
         state.put("potions", convertPotionsToJson(AbstractDungeon.player.potions));
 
+        // Master Deck
+        state.put("deck", convertCardGroup(AbstractDungeon.player.masterDeck.group));
+
         // Cards
         state.put("hand", convertCardGroup(AbstractDungeon.player.hand.group));
         state.put("draw_pile", convertCardGroup(AbstractDungeon.player.drawPile.group));
@@ -100,6 +103,14 @@ public class GameStateConverter {
         state.put("choice_list", ChoiceScreenUtils.getCurrentChoiceList());
         state.put("can_proceed", ChoiceScreenUtils.isConfirmButtonAvailable());
         state.put("can_cancel", ChoiceScreenUtils.isCancelButtonAvailable());
+
+        if (currentChoiceType == ChoiceScreenUtils.ChoiceType.CARD_REWARD && AbstractDungeon.cardRewardScreen != null) {
+            List<String> rewardIds = new ArrayList<>();
+            for (com.megacrit.cardcrawl.cards.AbstractCard c : AbstractDungeon.cardRewardScreen.rewardGroup) {
+                rewardIds.add(c.cardID);
+            }
+            state.put("reward_card_ids", rewardIds);
+        }
 
         // Map Facts (AI-agnostic): full map graph + current node + current legal map targets
         state.put("first_room_chosen", AbstractDungeon.firstRoomChosen);

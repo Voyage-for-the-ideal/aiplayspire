@@ -601,6 +601,9 @@ public class ChoiceScreenUtils {
              AbstractDungeon.closeCurrentScreen();
         } else if (AbstractDungeon.screen == AbstractDungeon.CurrentScreen.CARD_REWARD) {
              AbstractDungeon.closeCurrentScreen();
+        } else if (AbstractDungeon.screen == AbstractDungeon.CurrentScreen.COMBAT_REWARD) {
+             AbstractDungeon.overlayMenu.cancelButton.hb.clicked = true;
+             AbstractDungeon.closeCurrentScreen();
         }
     }
 

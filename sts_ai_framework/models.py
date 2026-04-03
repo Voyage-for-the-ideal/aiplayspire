@@ -61,6 +61,10 @@ class PotionState(BaseModel):
     can_discard: bool = False
     requires_target: bool = False
 
+class RelicState(BaseModel):
+    id: str
+    name: str
+    counter: int = -1
 
 class MapEdgeState(BaseModel):
     x: int
@@ -104,6 +108,8 @@ class MapPositionState(BaseModel):
 
 class GameState(BaseModel):
     player: PlayerState
+    deck: List[Card] = []
+    relics: List[RelicState] = []
     hand: List[Card]
     draw_pile: List[Card] = []
     discard_pile: List[Card] = []
@@ -125,6 +131,7 @@ class GameState(BaseModel):
     current_map_choices: List[MapChoiceState] = []
     screen_type: Optional[str] = "NONE"
     choice_list: Optional[List[str]] = []
+    reward_card_ids: Optional[List[str]] = []
     can_proceed: bool = False
     can_cancel: bool = False
     grid_selected_count: int = 0
