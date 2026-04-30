@@ -1,0 +1,10 @@
+{
+  "[PAD]": 0,
+  "[MASK]": 1,
+  "Strike_R": 2,
+  "Defend_R": 3,
+  "Bash": 4,
+  "AscendersBane": 5,
+  "Trip": 6,
+  "Burning Blood": 7
+}

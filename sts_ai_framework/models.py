@@ -2,21 +2,6 @@ from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 from enum import Enum
 
-class CardType(str, Enum):
-    ATTACK = "ATTACK"
-    SKILL = "SKILL"
-    POWER = "POWER"
-    STATUS = "STATUS"
-    CURSE = "CURSE"
-    UNKNOWN = "UNKNOWN"
-
-class CardTarget(str, Enum):
-    ENEMY = "ENEMY"
-    ALL_ENEMY = "ALL_ENEMY"
-    SELF = "SELF"
-    NONE = "NONE"
-    ALL = "ALL"
-    UNKNOWN = "UNKNOWN"
 
 class Card(BaseModel):
     index: int
@@ -144,7 +129,6 @@ class ActionType(str, Enum):
     WAIT = "wait"
     PROCEED = "proceed"
     CHOOSE = "choose"
-    CONFIRM = "confirm"
     SKIP = "skip"
     CANCEL = "cancel"
 

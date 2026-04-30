@@ -1,8 +1,7 @@
 import requests
 import json
-from typing import Optional, List, Tuple
-from .models import GameState, GameAction, ActionType
-import time
+from typing import Optional, Tuple
+from .models import GameState, GameAction
 
 class GameClient:
     def __init__(self, base_url: str = "http://localhost:5000"):
@@ -64,10 +63,6 @@ class GameClient:
         except Exception as e:
             return False, None, f"exception: {e}"
 
-    def execute_action(self, action: GameAction) -> bool:
-        """Backward-compatible wrapper: True means request accepted by HTTP server."""
-        ok, _, _ = self.submit_action(action)
-        return ok
 
     def get_card_info(self, card_id: str) -> Optional[dict]:
         try:

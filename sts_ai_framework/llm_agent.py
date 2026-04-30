@@ -10,7 +10,7 @@ from .knowledge_base import KnowledgeBase
 from .llm_agent_parts import ActionMixin, ChoiceMixin, DecisionMixin, InfoPromptMixin
 
 # 添加 masterspire/selectcard 到 PYTHONPATH 以便导入模型
-sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "masterspire", "selectcard"))
+sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "aiplayspire", "selectcard"))
 try:
     from src.inference import STSInferenceEngine
 except ImportError:
@@ -39,7 +39,7 @@ class LLMAgent(ActionMixin, DecisionMixin, InfoPromptMixin, ChoiceMixin, Agent):
         if STSInferenceEngine is not None:
             model_base_dir = os.path.join(
                 os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-                "masterspire",
+                "aiplayspire",
                 "selectcard",
             )
             model_path = os.path.join(model_base_dir, "checkpoints", "best_sts_value_model_final.pth")

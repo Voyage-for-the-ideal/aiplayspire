@@ -227,79 +227,83 @@ class InfoPromptMixin:
         rules = ""
         schema_desc = ""
 
-        if state.screen_type == "NONE" and state.room_phase == "COMBAT":
-            monster_knowledge = []
-            for m in state.monsters:
-                info = self.knowledge_base.get_monster_info(m.name, m.id)
-                intent_info = self.knowledge_base.get_intent_info(m.intent)
-                move_info = ""
-                if m.move and m.move.damage is not None:
-                    if m.move.hits and m.move.hits > 1:
-                        move_info = f" 当前招式伤害: {m.move.damage}x{m.move.hits}。"
-                    else:
-                        move_info = f" 当前招式伤害: {m.move.damage}。"
+        # === COMBAT MODULE DISABLED - outsourced to masterspire BattleAiMod.jar ===
+        # if state.screen_type == "NONE" and state.room_phase == "COMBAT":
+        #     monster_knowledge = []
+        #     for m in state.monsters:
+        #         info = self.knowledge_base.get_monster_info(m.name, m.id)
+        #         intent_info = self.knowledge_base.get_intent_info(m.intent)
+        #         move_info = ""
+        #         if m.move and m.move.damage is not None:
+        #             if m.move.hits and m.move.hits > 1:
+        #                 move_info = f" 当前招式伤害: {m.move.damage}x{m.move.hits}。"
+        #             else:
+        #                 move_info = f" 当前招式伤害: {m.move.damage}。"
+        #
+        #         monster_knowledge.append(
+        #             f"- {m.name} (HP: {m.current_hp}/{m.max_hp}, 格挡: {m.block}): 意图: {m.intent} ({intent_info})。"
+        #             f"{move_info}已知行为: {info}"
+        #         )
+        #
+        #     card_knowledge = []
+        #     for card in state.hand:
+        #         info = self._resolve_card_info(card.name, card.id)
+        #         playable_str = ""
+        #         if not card.is_playable:
+        #             playable_str = " [不可用/UNPLAYABLE]"
+        #
+        #         card_knowledge.append(
+        #             f"- [{card.index}] {card.name} (耗能: {card.cost}, 类型: {card.type}, 目标: {card.target}){playable_str}: {info}"
+        #         )
+        #
+        #     potion_knowledge = []
+        #     for potion in state.potions:
+        #         if potion.is_empty:
+        #             potion_knowledge.append(f"- [{potion.index}] 空药水槽")
+        #             continue
+        #
+        #         potion_flags = []
+        #         potion_flags.append("可用" if potion.can_use else "不可用")
+        #         if potion.requires_target:
+        #             potion_flags.append("需要目标")
+        #         if potion.can_discard:
+        #             potion_flags.append("可丢弃")
+        #
+        #         potion_knowledge.append(f"- [{potion.index}] {potion.name} ({', '.join(potion_flags)})")
+        #
+        #     if not potion_knowledge:
+        #         potion_knowledge.append("- 无药水信息")
+        #
+        #     specific_info += f"""
+        # - 怪物 (Monsters):
+        # {chr(10).join(monster_knowledge)}
+        # - 手牌 (Hand):
+        # {chr(10).join(card_knowledge)}
+        # - 药水 (Potions):
+        # {chr(10).join(potion_knowledge)}
+        # - 抽牌堆: {state.draw_pile_size}, 弃牌堆: {state.discard_pile_size}
+        #
+        # 目标: 赢得战斗。生存下来。击杀怪物。
+        # """
+        #     rules = """
+        # 1. 只有当你有足够的能量时才能打出卡牌。
+        # 2. 只有当卡牌的目标是 ENEMY 时，你才能指定敌人为目标。
+        # 3. 你可以使用药水 (type=\"potion\")。
+        # 4. 不要打出标记为 [不可用/UNPLAYABLE] 的卡牌
+        # 5. 只使用标记为"可用"的药水；空药水槽不可使用。
+        # 6. 若药水"需要目标"，则必须提供 target_index。
+        # """
+        #     schema_desc = """
+        # {
+        #   "type": "play" | "potion" | "end_turn",
+        #   "card_index": int (可选, 如果 type 是 play 则必须),
+        #   "potion_index": int (可选, 如果 type 是 potion 则必须),
+        #   "target_index": int (可选, 如果需要目标则必须；例如单体攻击卡或需要目标的药水)
+        # }
+        # """
 
-                monster_knowledge.append(
-                    f"- {m.name} (HP: {m.current_hp}/{m.max_hp}, 格挡: {m.block}): 意图: {m.intent} ({intent_info})。"
-                    f"{move_info}已知行为: {info}"
-                )
-
-            card_knowledge = []
-            for card in state.hand:
-                info = self._resolve_card_info(card.name, card.id)
-                playable_str = ""
-                if not card.is_playable:
-                    playable_str = " [不可用/UNPLAYABLE]"
-
-                card_knowledge.append(
-                    f"- [{card.index}] {card.name} (耗能: {card.cost}, 类型: {card.type}, 目标: {card.target}){playable_str}: {info}"
-                )
-
-            potion_knowledge = []
-            for potion in state.potions:
-                if potion.is_empty:
-                    potion_knowledge.append(f"- [{potion.index}] 空药水槽")
-                    continue
-
-                potion_flags = []
-                potion_flags.append("可用" if potion.can_use else "不可用")
-                if potion.requires_target:
-                    potion_flags.append("需要目标")
-                if potion.can_discard:
-                    potion_flags.append("可丢弃")
-
-                potion_knowledge.append(f"- [{potion.index}] {potion.name} ({', '.join(potion_flags)})")
-
-            if not potion_knowledge:
-                potion_knowledge.append("- 无药水信息")
-
-            specific_info += f"""
-- 怪物 (Monsters):
-{chr(10).join(monster_knowledge)}
-- 手牌 (Hand):
-{chr(10).join(card_knowledge)}
-- 药水 (Potions):
-{chr(10).join(potion_knowledge)}
-- 抽牌堆: {state.draw_pile_size}, 弃牌堆: {state.discard_pile_size}
-
-目标: 赢得战斗。生存下来。击杀怪物。
-"""
-            rules = """
-1. 只有当你有足够的能量时才能打出卡牌。
-2. 只有当卡牌的目标是 ENEMY 时，你才能指定敌人为目标。
-3. 你可以使用药水 (type=\"potion\")。
-4. 不要打出标记为 [不可用/UNPLAYABLE] 的卡牌
-5. 只使用标记为“可用”的药水；空药水槽不可使用。
-6. 若药水“需要目标”，则必须提供 target_index。
-"""
-            schema_desc = """
-{
-  "type": "play" | "potion" | "end_turn",
-  "card_index": int (可选, 如果 type 是 play 则必须),
-  "potion_index": int (可选, 如果 type 是 potion 则必须),
-  "target_index": int (可选, 如果需要目标则必须；例如单体攻击卡或需要目标的药水)
-}
-"""
+        if False and state.screen_type == "NONE" and state.room_phase == "COMBAT":
+            pass  # combat disabled, see above
 
         elif state.choice_list and len(state.choice_list) > 0:
             unified_choices = self._build_unified_choices(state)

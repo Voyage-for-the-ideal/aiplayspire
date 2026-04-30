@@ -10,3 +10,9 @@ target/
 # IDE files
 .idea/
 .vscode/
+
+# Claude Code
+.claude/
+
+# Debug output
+debug/

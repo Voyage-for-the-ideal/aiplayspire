@@ -70,8 +70,9 @@ class ActionMixin:
         if state.screen_type == "COMBAT_REWARD":
             return self._handle_combat_reward(state)
 
-        if state.screen_type == "NONE" and state.room_phase == "COMBAT" and not state.is_end_turn_button_enabled:
-            print(Fore.YELLOW + "等待玩家回合 (结束回合按钮不可用)..." + Style.RESET_ALL)
+        # === COMBAT MODULE DISABLED - outsourced to masterspire BattleAiMod.jar ===
+        if state.screen_type == "NONE" and state.room_phase == "COMBAT":
+            print(Fore.YELLOW + "等待外部战斗AI (BattleAiMod) 决策中..." + Style.RESET_ALL)
             return GameAction(type=ActionType.WAIT)
 
         # ====== 插入本地模型拦截 (例如选卡时) ======

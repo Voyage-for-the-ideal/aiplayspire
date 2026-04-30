@@ -13,9 +13,9 @@
     <properties>
         <maven.compiler.source>1.8</maven.compiler.source>
         <maven.compiler.target>1.8</maven.compiler.target>
-        <!-- CHANGE THIS PATH TO YOUR SLAY THE SPIRE INSTALLATION -->
-        <Steam.path>D:/Program Files (x86)/Steam/steamapps/common/SlayTheSpire</Steam.path>
-        <Steam.workshop>D:/Program Files (x86)/Steam/steamapps/workshop/content/646570</Steam.workshop>
+        <!-- CHANGE THESE PATHS TO YOUR SLAY THE SPIRE INSTALLATION -->
+        <Steam.path>D:/Program Files/Slay the Spire</Steam.path>
+        <Steam.mods>D:/Program Files/Slay the Spire/mods</Steam.mods>
     </properties>
 
     <dependencies>
@@ -34,7 +34,7 @@
             <artifactId>ModTheSpire</artifactId>
             <version>3.18.0</version>
             <scope>system</scope>
-            <systemPath>${Steam.workshop}/1605060445/ModTheSpire.jar</systemPath>
+            <systemPath>${Steam.path}/ModTheSpire.jar</systemPath>
         </dependency>
 
         <!-- BaseMod -->
@@ -43,7 +43,7 @@
             <artifactId>basemod</artifactId>
             <version>5.32.0</version>
             <scope>system</scope>
-            <systemPath>${Steam.workshop}/1605833019/BaseMod.jar</systemPath>
+            <systemPath>${Steam.mods}/BaseMod.jar</systemPath>
         </dependency>
         
         <!-- Gson is included in LibGDX/StS but we declare it for compilation if needed -->

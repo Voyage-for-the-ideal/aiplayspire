@@ -186,34 +186,34 @@ class ChoiceMixin:
 
         return GameAction(type=ActionType.WAIT)
 
-    def _choose_simple_combat_fallback(self, state: GameState) -> Optional[GameAction]:
-        """在战斗中优先尝试一个低风险可执行动作，减少直接空过。"""
-        if state.room_phase != "COMBAT" or state.screen_type != "NONE":
-            return None
-
-        if not state.is_end_turn_button_enabled:
-            return GameAction(type=ActionType.WAIT)
-
-        for card in state.hand:
-            if not card.is_playable:
-                continue
-
-            # X 费卡 cost_for_turn 可能为 -1，交给游戏端判定是否可用
-            if card.cost_for_turn >= 0 and card.cost_for_turn > state.player.energy:
-                continue
-
-            needs_target = card.target in {"ENEMY", "SELF_AND_ENEMY"}
-            if needs_target:
-                if state.monsters:
-                    return GameAction(type=ActionType.PLAY, card_index=card.index, target_index=0)
-                continue
-
-            return GameAction(type=ActionType.PLAY, card_index=card.index)
-
-        if state.is_end_turn_button_enabled:
-            return GameAction(type=ActionType.END_TURN)
-
-        return GameAction(type=ActionType.WAIT)
+    # === COMBAT MODULE DISABLED - outsourced to masterspire BattleAiMod.jar ===
+    # def _choose_simple_combat_fallback(self, state: GameState) -> Optional[GameAction]:
+    #     """在战斗中优先尝试一个低风险可执行动作，减少直接空过。"""
+    #     if state.room_phase != "COMBAT" or state.screen_type != "NONE":
+    #         return None
+    #
+    #     if not state.is_end_turn_button_enabled:
+    #         return GameAction(type=ActionType.WAIT)
+    #
+    #     for card in state.hand:
+    #         if not card.is_playable:
+    #             continue
+    #
+    #         if card.cost_for_turn >= 0 and card.cost_for_turn > state.player.energy:
+    #             continue
+    #
+    #         needs_target = card.target in {"ENEMY", "SELF_AND_ENEMY"}
+    #         if needs_target:
+    #             if state.monsters:
+    #                 return GameAction(type=ActionType.PLAY, card_index=card.index, target_index=0)
+    #             continue
+    #
+    #         return GameAction(type=ActionType.PLAY, card_index=card.index)
+    #
+    #     if state.is_end_turn_button_enabled:
+    #         return GameAction(type=ActionType.END_TURN)
+    #
+    #     return GameAction(type=ActionType.WAIT)
 
     def _build_safe_fallback_action(self, state: GameState) -> GameAction:
         """分层回退：选择态优先稳定映射；战斗态先 wait/可执行出牌，最后才 end_turn。"""
@@ -234,9 +234,10 @@ class ChoiceMixin:
                 return GameAction(type=ActionType.CANCEL)
             return GameAction(type=ActionType.WAIT)
 
-        combat_fallback = self._choose_simple_combat_fallback(state)
-        if combat_fallback is not None:
-            return combat_fallback
+        # === COMBAT MODULE DISABLED ===
+        # combat_fallback = self._choose_simple_combat_fallback(state)
+        # if combat_fallback is not None:
+        #     return combat_fallback
 
         return GameAction(type=ActionType.WAIT)
 

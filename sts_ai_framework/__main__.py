@@ -2,7 +2,6 @@ import time
 import os
 import sys
 import argparse
-from typing import Optional
 from dotenv import load_dotenv
 from colorama import init, Fore, Style
 

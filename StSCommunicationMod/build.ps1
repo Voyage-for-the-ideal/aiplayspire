@@ -1,14 +1,14 @@
 $ProjectDir = $PSScriptRoot
-$SteamPath = "D:\Program Files (x86)\Steam\steamapps\common\SlayTheSpire"
-$WorkshopPath = "D:\Program Files (x86)\Steam\steamapps\workshop\content\646570"
+$SteamPath = "D:\Program Files\Slay the Spire"
+$ModsPath = "D:\Program Files\Slay the Spire\mods"
 $JavaHome = "D:\Program Files\Java\jdk-25.0.2"
 $Javac = "$JavaHome\bin\javac.exe"
 $Jar = "$JavaHome\bin\jar.exe"
 
 # Paths to dependencies
 $DesktopJar = "$SteamPath\desktop-1.0.jar"
-$ModTheSpireJar = "$WorkshopPath\1605060445\ModTheSpire.jar"
-$BaseModJar = "$WorkshopPath\1605833019\BaseMod.jar"
+$ModTheSpireJar = "$SteamPath\ModTheSpire.jar"
+$BaseModJar = "$ModsPath\BaseMod.jar"
 
 # Output directories
 $TargetDir = "$ProjectDir\target"
@@ -51,28 +51,11 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host "Build successful! JAR created at: $JarFile"
 
-# Prepare Mod folder
-$ModSourceDir = "$ProjectDir\CommunicationMod"
-$ModContentDir = "$ModSourceDir\content"
+# Deploy JAR directly to mods folder
+$DeployJar = "$ModsPath\CommunicationMod.jar"
 
-if (!(Test-Path $ModContentDir)) {
-    New-Item -ItemType Directory -Path $ModContentDir -Force | Out-Null
-}
+Write-Host "Deploying JAR to: $DeployJar"
 
-Write-Host "Copying JAR to Mod content folder..."
-Copy-Item -Path $JarFile -Destination "$ModContentDir\CommunicationMod.jar" -Force
-
-# Copy Mod folder to Game directory
-$GameDir = $SteamPath
-$GameModDir = "$GameDir\CommunicationMod"
-
-Write-Host "Deploying Mod to game directory: $GameModDir"
-
-if (Test-Path $GameModDir) {
-    Write-Host "Removing old Mod folder..."
-    Remove-Item -Path $GameModDir -Recurse -Force
-}
-
-Copy-Item -Path $ModSourceDir -Destination $GameDir -Recurse -Force
+Copy-Item -Path $JarFile -Destination $DeployJar -Force
 
 Write-Host "Mod deployed successfully!"

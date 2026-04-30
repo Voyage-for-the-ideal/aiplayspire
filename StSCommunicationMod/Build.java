@@ -10,12 +10,12 @@ import java.util.stream.Stream;
 public class Build {
     public static void main(String[] args) throws IOException {
         Path projectDir = getProjectDir();
-        Path steamPath = Paths.get("D:\\Program Files (x86)\\Steam\\steamapps\\common\\SlayTheSpire");
-        Path workshopPath = Paths.get("D:\\Program Files (x86)\\Steam\\steamapps\\workshop\\content\\646570");
+        Path steamPath = Paths.get("D:\\Program Files\\Slay the Spire");
+        Path modsPath = Paths.get("D:\\Program Files\\Slay the Spire\\mods");
 
         Path desktopJar = steamPath.resolve("desktop-1.0.jar");
-        Path modTheSpireJar = workshopPath.resolve("1605060445").resolve("ModTheSpire.jar");
-        Path baseModJar = workshopPath.resolve("1605833019").resolve("BaseMod.jar");
+        Path modTheSpireJar = steamPath.resolve("ModTheSpire.jar");
+        Path baseModJar = modsPath.resolve("BaseMod.jar");
 
         Path targetDir = projectDir.resolve("target");
         Path classesDir = targetDir.resolve("classes");
