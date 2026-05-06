@@ -2,8 +2,7 @@ import os
 import sys
 from typing import Optional
 
-import colorama
-from colorama import Fore, Style
+from openai import OpenAI
 
 from .agent_base import Agent
 from .knowledge_base import KnowledgeBase
@@ -16,13 +15,11 @@ try:
 except ImportError:
     STSInferenceEngine = None
 
-colorama.init()
-
 
 class LLMAgent(ActionMixin, DecisionMixin, InfoPromptMixin, ChoiceMixin, Agent):
     def __init__(
         self,
-        model_name: str = "gpt-4o",
+        model_name: str = "deepseek-chat",
         knowledge_base: Optional[KnowledgeBase] = None,
         game_client=None,
         debug_prompt_file: Optional[str] = None,
@@ -31,8 +28,13 @@ class LLMAgent(ActionMixin, DecisionMixin, InfoPromptMixin, ChoiceMixin, Agent):
         self.knowledge_base = knowledge_base or KnowledgeBase()
         self.game_client = game_client
         self.debug_prompt_file = debug_prompt_file
-        self.history = []  # 如果需要上下文记忆，可以保存历史记录
+        self.history = []
         self.last_screen_type = None
+
+        # Initialize DeepSeek LLM client via OpenAI SDK
+        api_key = os.getenv("DEEPSEEK_API_KEY", "")
+        base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+        self.llm_client = OpenAI(api_key=api_key, base_url=base_url)
 
         # 加载本地选卡决策模型
         self.value_engine = None
@@ -46,8 +48,8 @@ class LLMAgent(ActionMixin, DecisionMixin, InfoPromptMixin, ChoiceMixin, Agent):
             vocab_path = os.path.join(model_base_dir, "checkpoints", "vocab.json")
             if os.path.exists(model_path) and os.path.exists(vocab_path):
                 self.value_engine = STSInferenceEngine(model_path=model_path, vocab_path=vocab_path)
-                print(Fore.GREEN + f"已加载本地卡牌决策模型: {model_path}" + Style.RESET_ALL)
+                print(f"\033[32m已加载本地卡牌决策模型: {model_path}\033[0m")
             else:
-                print(Fore.YELLOW + "本地卡牌决策模型/词表 不存在，请先训练模型并确保在 checkpoints 目录下" + Style.RESET_ALL)
+                print(f"\033[33m本地卡牌决策模型/词表 不存在，请先训练模型并确保在 checkpoints 目录下\033[0m")
         else:
-            print(Fore.RED + "未找到 selectcard.src.inference，无法加载决策模型" + Style.RESET_ALL)
+            print(f"\033[31m未找到 selectcard.src.inference，无法加载决策模型\033[0m")

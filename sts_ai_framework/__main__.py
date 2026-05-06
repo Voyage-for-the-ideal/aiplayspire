@@ -71,7 +71,7 @@ def _fetch_post_action_state(client, retries: int = 2, delay: float = 0.15):
 
 def main():
     parser = argparse.ArgumentParser(description="运行杀戮尖塔 AI Agent")
-    parser.add_argument("--model", type=str, default=LLM_MODEL, help="使用的 LLM 模型 (例如 gpt-4o, claude-3-opus, gemini-pro)")
+    parser.add_argument("--model", type=str, default=LLM_MODEL, help="使用的 DeepSeek 模型 (例如 deepseek-chat, deepseek-reasoner)")
     parser.add_argument("--interval", type=float, default=2.0, help="行动间隔时间 (秒)")
     parser.add_argument("--debug-prompt-file", type=str, default=DEBUG_PROMPT_FILE, help="将最新 Prompt 持续写入到指定文件，便于调试")
     args = parser.parse_args()
@@ -126,13 +126,23 @@ def main():
                 sys.stdout.write("\n") # 换行
                 retry_count = 0
 
-            # Check if game is in a playable state (combat or choice screen)
-            if state.room_phase == "COMBAT" or (state.screen_type != "NONE" and (state.choice_list or state.can_proceed)):
+            # COMBAT: compact single-line output, submit WAIT silently
+            if state.screen_type == "NONE" and state.room_phase == "COMBAT":
+                action = agent.choose_action(state)
+                if action:
+                    client.submit_action(action)
+                sys.stdout.write(f"\r战斗进行中... (第 {state.floor} 层 | HP: {state.player.current_hp}/{state.player.max_hp} | 能量: {state.player.energy})   ")
+                sys.stdout.flush()
+                time.sleep(args.interval)
+                continue
+
+            # Non-combat playable states: verbose output
+            if state.screen_type != "NONE" and (state.choice_list or state.can_proceed):
                 print(Fore.BLUE + f"\n--- 第 {state.floor} 层 (HP: {state.player.current_hp}/{state.player.max_hp} | 能量: {state.player.energy} | 屏幕: {state.screen_type}) ---" + Style.RESET_ALL)
-                
+
                 # Ask agent for action
                 action = agent.choose_action(state)
-                
+
                 if action:
                     pre_action_state = state
                     msg = f"行动: {action.type}"
@@ -143,7 +153,7 @@ def main():
                     elif action.type == ActionType.CHOOSE:
                          msg += f" 选择索引: {action.choice_index}"
                     print(msg)
-                    
+
                     submitted, server_resp, error_msg = client.submit_action(action)
                     if submitted:
                         print(Fore.GREEN + "行动已提交到 Mod 队列。" + Style.RESET_ALL)

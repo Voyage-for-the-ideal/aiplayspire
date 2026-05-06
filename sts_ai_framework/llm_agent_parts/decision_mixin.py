@@ -134,6 +134,8 @@ class DecisionMixin:
                 continue
 
             if "relic" in clause_lower or "obtain" in clause_lower:
+                if "potion" in clause_lower:
+                    continue  # "Obtain N random Potions" is not a relic
                 if "random" in clause_lower:
                     effects.append({"type": "obtain_relic", "relic_id": "Anchor"})
                 else:

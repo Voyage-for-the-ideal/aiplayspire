@@ -2,4 +2,4 @@ requests
 pydantic>=2.0
 python-dotenv
 colorama
-litellm
+openai

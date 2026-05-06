@@ -1,7 +1,7 @@
 import json
+import sys
 
 from colorama import Fore, Style
-from litellm import completion
 
 from ..models import ActionType, GameAction, GameState
 
@@ -66,13 +66,31 @@ class ActionMixin:
             else:
                 self.intended_purge_card = None
 
+        # Neow 开场 talk 硬编码
+        if state.screen_type == "GRID" and state.floor == 0:
+            choice_list = getattr(state, "choice_list", None)
+            if choice_list and "talk" in str(choice_list[0]).lower():
+                print(Fore.MAGENTA + "自动跳过 Neow 开场对话..." + Style.RESET_ALL)
+                return GameAction(type=ActionType.CHOOSE, choice_index=0)
+
         # 强制拦截：COMBAT_REWARD 直接由本地固定规则处理
         if state.screen_type == "COMBAT_REWARD":
             return self._handle_combat_reward(state)
 
+        # Auto-handle CHEST: just open it, no LLM needed
+        if state.screen_type == "CHEST":
+            print(Fore.MAGENTA + "自动打开宝箱..." + Style.RESET_ALL)
+            unified_choices = self._build_unified_choices(state)
+            if unified_choices:
+                return unified_choices[0][1]
+            if state.can_proceed:
+                return GameAction(type=ActionType.PROCEED)
+            return GameAction(type=ActionType.WAIT)
+
         # === COMBAT MODULE DISABLED - outsourced to masterspire BattleAiMod.jar ===
         if state.screen_type == "NONE" and state.room_phase == "COMBAT":
-            print(Fore.YELLOW + "等待外部战斗AI (BattleAiMod) 决策中..." + Style.RESET_ALL)
+            sys.stdout.write(f"\r{Fore.YELLOW}等待外部战斗AI (BattleAiMod) 决策中...{Style.RESET_ALL}")
+            sys.stdout.flush()
             return GameAction(type=ActionType.WAIT)
 
         # ====== 插入本地模型拦截 (例如选卡时) ======
@@ -100,19 +118,20 @@ class ActionMixin:
         print(Fore.CYAN + "正在思考..." + Style.RESET_ALL)
 
         try:
+            # Normalize model name: strip provider prefix (e.g. "deepseek/deepseek-chat" -> "deepseek-chat")
+            model = self.model_name.split("/", 1)[1] if "/" in self.model_name else self.model_name
             try:
-                response = completion(
-                    model=self.model_name,
+                response = self.llm_client.chat.completions.create(
+                    model=model,
                     messages=[
                         {"role": "system", "content": "你是一个《杀戮尖塔》专家 AI。你会为了胜利而进行最优操作。请只输出 JSON。"},
                         {"role": "user", "content": prompt},
                     ],
                     response_format={"type": "json_object"},
-                    drop_params=True,
                 )
             except Exception:
-                response = completion(
-                    model=self.model_name,
+                response = self.llm_client.chat.completions.create(
+                    model=model,
                     messages=[
                         {"role": "system", "content": "你是一个《杀戮尖塔》专家 AI。你会为了胜利而进行最优操作。请只输出 JSON，不要包含Markdown代码块。"},
                         {"role": "user", "content": prompt},
