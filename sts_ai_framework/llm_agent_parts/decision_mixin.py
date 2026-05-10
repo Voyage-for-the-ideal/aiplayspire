@@ -95,6 +95,12 @@ class DecisionMixin:
         return normalized in self.CURSE_NAMES
 
     def _parse_event_effects(self, choice_text: str, state: Optional[GameState] = None):
+        """Parse event choice text into structured effects.
+
+        Each clause is checked against ALL effect categories so that combined
+        phrases like "[ Lose all Gold Remove 2 Cards ]" produce multiple effects.
+        No continue-after-match — a single clause can yield 2+ effects.
+        """
         choice_text_clean = self._clean_effect_text(choice_text)
         choice_text_lower = choice_text_clean.lower()
         effects = []
@@ -110,52 +116,46 @@ class DecisionMixin:
                     else:
                         effects.append({"type": "gain_max_hp", "amount": amount})
                         effects.append({"type": "gain_hp", "amount": amount})
-                continue
-
-            if "heal" in clause_lower or "restore" in clause_lower or "regain" in clause_lower:
-                amount = self._extract_first_int(clause)
-                if amount is not None:
-                    effects.append({"type": "gain_hp", "amount": amount})
-                continue
 
             if "damage" in clause_lower or "lose hp" in clause_lower or "lose life" in clause_lower:
                 amount = self._extract_first_int(clause)
                 if amount is not None:
                     effects.append({"type": "lose_hp", "amount": amount})
-                continue
 
-            if "gold" in clause_lower or "gold" in choice_text_lower:
+            elif "heal" in clause_lower or "restore" in clause_lower or "regain" in clause_lower:
+                amount = self._extract_first_int(clause)
+                if amount is not None:
+                    effects.append({"type": "gain_hp", "amount": amount})
+
+            if "gold" in clause_lower:
                 amount = self._extract_first_int(clause)
                 if amount is not None:
                     if "lose" in clause_lower or "pay" in clause_lower or "spend" in clause_lower:
                         effects.append({"type": "lose_gold", "amount": amount})
                     else:
                         effects.append({"type": "gain_gold", "amount": amount})
-                continue
 
             if "relic" in clause_lower or "obtain" in clause_lower:
-                if "potion" in clause_lower:
-                    continue  # "Obtain N random Potions" is not a relic
-                if "random" in clause_lower:
-                    effects.append({"type": "obtain_relic", "relic_id": "Anchor"})
-                else:
-                    relic_id = self._extract_bracket_label(clause)
-                    if relic_id:
-                        effects.append({"type": "obtain_relic", "relic_id": relic_id})
-                continue
+                if "potion" not in clause_lower:
+                    if "random" in clause_lower:
+                        effects.append({"type": "obtain_relic", "relic_id": "Anchor"})
+                    else:
+                        relic_id = self._extract_bracket_label(clause)
+                        if relic_id:
+                            effects.append({"type": "obtain_relic", "relic_id": relic_id})
 
             if "curse" in clause_lower or "cursed" in clause_lower:
                 curse_name = self._extract_curse_name(clause_lower)
                 effects.append({"type": "add_card", "card_id": curse_name or "Curse"})
-                continue
 
             if "card" in clause_lower:
                 if "remove" in clause_lower or "purge" in clause_lower:
+                    amount = self._extract_first_int(clause) or 1
                     matched_card = self._find_card_for_choice(state, choice_text) if state else None
                     if matched_card:
-                        effects.append({"type": "remove_card", "card_id": matched_card.id})
+                        effects.append({"type": "remove_card", "card_id": matched_card.id, "amount": amount})
                     else:
-                        effects.append({"type": "remove_card", "card_id": "unknown_card"})
+                        effects.append({"type": "remove_card", "card_id": "unknown_card", "amount": amount})
                 elif "transform" in clause_lower:
                     matched_card = self._find_card_for_choice(state, choice_text) if state else None
                     if matched_card:
