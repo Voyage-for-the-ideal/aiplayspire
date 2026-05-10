@@ -295,3 +295,35 @@ class DecisionMixin:
             return self._map_unified_choice_to_action(state, idx)
 
         return GameAction(type=ActionType.WAIT)
+
+    def _get_model_boss_reward_decision(self, state: GameState) -> Optional[GameAction]:
+        current_state = {
+            "hp": state.player.current_hp,
+            "max_hp": state.player.max_hp,
+            "gold": state.player.gold,
+            "floor": state.floor,
+            "ascension": 20,
+            "deck": [card.id for card in state.deck] if hasattr(state, "deck") else [],
+            "relics": [relic.id for relic in state.relics] if hasattr(state, "relics") else [],
+        }
+
+        choices = []
+        unified_choices = self._build_unified_choices(state)
+        for i, (choice_text, _) in enumerate(unified_choices):
+            relic_id = str(choice_text).strip()
+            choices.append({
+                "action": "composite_event",
+                "effects": [{"type": "obtain_relic", "relic_id": relic_id}],
+                "index": i,
+            })
+
+        choices.append({"action": "skip", "target": None, "index": -1})
+
+        best = self.value_engine.recommend_choice(current_state, choices)
+        if best:
+            idx = best.get("index")
+            if idx == -1:
+                return GameAction(type=ActionType.CANCEL)
+            return self._map_unified_choice_to_action(state, idx)
+
+        return None

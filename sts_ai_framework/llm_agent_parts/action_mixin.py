@@ -110,6 +110,12 @@ class ActionMixin:
                         self.skipped_card_rewards_count = 0
                     self.skipped_card_rewards_count += 1
                 return action
+
+        if state.screen_type == "BOSS_REWARD" and self.value_engine is not None and getattr(state, "choice_list", None):
+            print(Fore.MAGENTA + "正在使用本地价值网络 (Value Network) 进行Boss遗物决策..." + Style.RESET_ALL)
+            action = self._get_model_boss_reward_decision(state)
+            if action is not None:
+                return action
         # ==================================
 
         prompt = self._format_state_for_prompt(state)

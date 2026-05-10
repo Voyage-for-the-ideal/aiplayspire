@@ -129,7 +129,7 @@ public class ChoiceScreenUtils {
             case MAP: return getMapScreenChoices();
             case BOSS_REWARD:
                 for(com.megacrit.cardcrawl.relics.AbstractRelic relic : AbstractDungeon.bossRelicScreen.relics) {
-                    choices.add(relic.name);
+                    choices.add(relic.relicId);
                 }
                 break;
             case SHOP_SCREEN: return getShopScreenChoices();
@@ -187,7 +187,7 @@ public class ChoiceScreenUtils {
                 break;
             case MAP: makeMapChoice(choice_index); break;
             case BOSS_REWARD:
-                AbstractDungeon.bossRelicScreen.relics.get(choice_index).hb.clicked = true;
+                AbstractDungeon.bossRelicScreen.relics.get(choice_index).bossObtainLogic();
                 break;
             case SHOP_SCREEN: makeShopScreenChoice(choice_index); break;
             case GRID:
@@ -558,6 +558,10 @@ public class ChoiceScreenUtils {
     }
 
     public static boolean isCancelButtonAvailable() {
+        // BossRelicScreen always has a skip button
+        if (AbstractDungeon.screen == AbstractDungeon.CurrentScreen.BOSS_REWARD) {
+            return true;
+        }
         // Check Cancel Button
         boolean isHidden = (boolean) ReflectionHacks.getPrivate(AbstractDungeon.overlayMenu.cancelButton, CancelButton.class, "isHidden");
         if (!isHidden) return true;
@@ -604,6 +608,12 @@ public class ChoiceScreenUtils {
         } else if (AbstractDungeon.screen == AbstractDungeon.CurrentScreen.COMBAT_REWARD) {
              AbstractDungeon.overlayMenu.cancelButton.hb.clicked = true;
              AbstractDungeon.closeCurrentScreen();
+        } else if (AbstractDungeon.screen == AbstractDungeon.CurrentScreen.BOSS_REWARD) {
+            com.megacrit.cardcrawl.screens.mainMenu.MenuCancelButton cancelBtn = (com.megacrit.cardcrawl.screens.mainMenu.MenuCancelButton) ReflectionHacks.getPrivate(
+                AbstractDungeon.bossRelicScreen,
+                com.megacrit.cardcrawl.screens.select.BossRelicSelectScreen.class,
+                "cancelButton");
+            cancelBtn.hb.clicked = true;
         }
     }
 
