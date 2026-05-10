@@ -120,6 +120,8 @@ class GameState(BaseModel):
     can_proceed: bool = False
     can_cancel: bool = False
     grid_selected_count: int = 0
+    grid_num_cards: int = 1
+    grid_purpose: str = ""
     is_end_turn_button_enabled: bool = False
 
 class ActionType(str, Enum):

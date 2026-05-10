@@ -108,9 +108,21 @@ class ChoiceMixin:
             action_type = best.get("action")
             if action_type == "upgrade_card" and "_smith_intent_id" in best:
                 self.intended_smith_card = best["_smith_intent_id"]
+                self._pending_grid = {
+                    "purpose": "upgrade",
+                    "target_ids": [best["_smith_intent_id"]],
+                    "num_to_select": 1,
+                    "selected_count": 0,
+                }
                 print(Fore.MAGENTA + f"决定在营火敲牌打铁 (Smith)，预定升级: {self.intended_smith_card}" + Style.RESET_ALL)
             elif action_type == "tosh" and "_purge_intent_id" in best:
                 self.intended_purge_card = best["_purge_intent_id"]
+                self._pending_grid = {
+                    "purpose": "purge",
+                    "target_ids": [best["_purge_intent_id"]],
+                    "num_to_select": 1,
+                    "selected_count": 0,
+                }
                 print(Fore.MAGENTA + f"决定抽和平烟斗 (Tosh)，预定删除: {self.intended_purge_card}" + Style.RESET_ALL)
             elif action_type == "rest":
                 print(Fore.MAGENTA + "决定在营火睡觉 (Rest) 回血" + Style.RESET_ALL)

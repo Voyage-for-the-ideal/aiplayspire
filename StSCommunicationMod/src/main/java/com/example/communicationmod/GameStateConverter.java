@@ -16,6 +16,8 @@ import com.megacrit.cardcrawl.potions.PotionSlot;
 import com.megacrit.cardcrawl.powers.AbstractPower;
 import com.megacrit.cardcrawl.relics.AbstractRelic;
 import com.megacrit.cardcrawl.rooms.AbstractRoom;
+import com.megacrit.cardcrawl.screens.select.GridCardSelectScreen;
+import com.megacrit.cardcrawl.ui.buttons.GridSelectConfirmButton;
 import com.megacrit.cardcrawl.ui.buttons.EndTurnButton;
 import com.megacrit.cardcrawl.ui.panels.EnergyPanel;
 import basemod.ReflectionHacks;
@@ -103,6 +105,56 @@ public class GameStateConverter {
         state.put("choice_list", ChoiceScreenUtils.getCurrentChoiceList());
         state.put("can_proceed", ChoiceScreenUtils.isConfirmButtonAvailable());
         state.put("can_cancel", ChoiceScreenUtils.isCancelButtonAvailable());
+
+        // GRID metadata: expose purpose, numCards, and selected count for AI-driven card selection
+        if (currentChoiceType == ChoiceScreenUtils.ChoiceType.GRID) {
+            GridCardSelectScreen grid = AbstractDungeon.gridSelectScreen;
+
+            int numCards = (int) ReflectionHacks.getPrivate(
+                grid, GridCardSelectScreen.class, "numCards");
+            state.put("grid_num_cards", numCards);
+
+            java.util.ArrayList<AbstractCard> selectedCards =
+                (java.util.ArrayList<AbstractCard>) ReflectionHacks.getPrivate(
+                    grid, GridCardSelectScreen.class, "selectedCards");
+            state.put("grid_selected_count", selectedCards.size());
+
+            boolean forPurge = (boolean) ReflectionHacks.getPrivate(
+                grid, GridCardSelectScreen.class, "forPurge");
+            boolean forUpgrade = (boolean) ReflectionHacks.getPrivate(
+                grid, GridCardSelectScreen.class, "forUpgrade");
+            boolean forTransform = (boolean) ReflectionHacks.getPrivate(
+                grid, GridCardSelectScreen.class, "forTransform");
+
+            String purpose;
+            if (forPurge) {
+                purpose = "purge";
+            } else if (forUpgrade) {
+                purpose = "upgrade";
+            } else if (forTransform) {
+                purpose = "transform";
+            } else {
+                String confirmText = (String) ReflectionHacks.getPrivate(
+                    grid.confirmButton, GridSelectConfirmButton.class, "buttonText");
+                if (confirmText != null) {
+                    confirmText = confirmText.toLowerCase();
+                    if (confirmText.contains("duplicate")) {
+                        purpose = "duplicate";
+                    } else if (confirmText.contains("transform")) {
+                        purpose = "transform";
+                    } else if (confirmText.contains("upgrade")) {
+                        purpose = "upgrade";
+                    } else if (confirmText.contains("remove")) {
+                        purpose = "purge";
+                    } else {
+                        purpose = "unknown";
+                    }
+                } else {
+                    purpose = "unknown";
+                }
+            }
+            state.put("grid_purpose", purpose);
+        }
 
         if (currentChoiceType == ChoiceScreenUtils.ChoiceType.CARD_REWARD && AbstractDungeon.cardRewardScreen != null) {
             List<String> rewardIds = new ArrayList<>();

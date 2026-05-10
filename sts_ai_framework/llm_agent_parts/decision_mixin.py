@@ -171,6 +171,12 @@ class DecisionMixin:
                         matched_card = self._find_card_for_choice(state, choice_text) if state else None
                         if matched_card:
                             effects.append({"type": "upgrade_card", "card_id": matched_card.id})
+                elif "duplicate" in clause_lower or "copy" in clause_lower:
+                    matched_card = self._find_card_for_choice(state, choice_text) if state else None
+                    if matched_card:
+                        effects.append({"type": "duplicate", "card_id": matched_card.id})
+                    else:
+                        effects.append({"type": "duplicate", "card_id": "unknown_card"})
                 else:
                     card_id = self._extract_bracket_label(clause)
                     if card_id:
@@ -207,9 +213,13 @@ class DecisionMixin:
 
         best = self.value_engine.recommend_choice(current_state, choices)
         if best:
-            if (best.get("action") == "composite_event" or best.get("action") == "remove_card") and "_purge_intent_id" in best:
+            # Store GRID intent via unified path
+            self._store_grid_intent_from_choice(best, state)
+            # Keep old flags for backward compatibility
+            if "_purge_intent_id" in best:
                 self.intended_purge_card = best["_purge_intent_id"]
-                print(Fore.MAGENTA + f"事件评估结果：预定移除或变化卡牌: {self.intended_purge_card}" + Style.RESET_ALL)
+            if "_smith_intent_id" in best:
+                self.intended_smith_card = best["_smith_intent_id"]
 
             idx = best.get("index")
             if idx == -1:
@@ -273,11 +283,19 @@ class DecisionMixin:
             "relics": [relic.id for relic in state.relics] if hasattr(state, "relics") else [],
         }
 
+        # Detect transform choices and collect curse IDs for transform filtering
+        transform_indices = set()
+        curse_ids = {card.id for card in state.deck if card.type == "CURSE"}
+
         choices = []
         unified_choices = self._build_unified_choices(state)
         for i, (choice_text, _) in enumerate(unified_choices):
             choice_text_clean, effects = self._parse_event_effects(choice_text, state)
             choice_text_lower = choice_text_clean.lower()
+
+            # Detect transform keywords in choice text
+            if any(kw in choice_text_lower for kw in ("transform", "change", "mutate")):
+                transform_indices.add(i)
 
             if "skip" in choice_text_lower or "leave" in choice_text_lower or "cancel" in choice_text_lower:
                 choices.append({"action": "skip", "target": None, "index": i, "cost": 0})
@@ -289,12 +307,73 @@ class DecisionMixin:
         if len(choices) == 0:
             return None
 
-        best = self.value_engine.recommend_choice(current_state, choices)
+        # For transform choices, skip curse cards (curse→curse is no benefit)
+        exclude_ids = curse_ids if transform_indices else None
+
+        best = self.value_engine.recommend_choice(current_state, choices, exclude_purge_ids=exclude_ids)
         if best:
-            idx = best.get("index")
-            return self._map_unified_choice_to_action(state, idx)
+            best_idx = best.get("index")
+            if best_idx in transform_indices:
+                best["_is_transform"] = True
+            self._store_grid_intent_from_choice(best, state)
+            return self._map_unified_choice_to_action(state, best_idx)
 
         return GameAction(type=ActionType.WAIT)
+
+    def _store_grid_intent_from_choice(self, best_choice: dict, state) -> None:
+        """Extract and store pending GRID card selection intent from a recommended choice.
+
+        Called after recommend_choice() in event/shop decisions. If the chosen option
+        will trigger a GRID card-selection screen (purge/upgrade/transform/duplicate),
+        pre-compute the target card IDs and store them in self._pending_grid.
+        """
+        action = best_choice.get("action")
+        effects = best_choice.get("effects", [])
+        is_transform = best_choice.get("_is_transform", False)
+
+        purpose = None
+        num_to_select = 1
+        target_ids = []
+
+        # Detect purge/transform from _purge_intent_id
+        if "_purge_intent_id" in best_choice:
+            target_card = best_choice["_purge_intent_id"]
+            if is_transform:
+                purpose = "transform"
+            elif action == "composite_event":
+                has_add = any(ef.get("type") == "add_card" for ef in effects)
+                if has_add:
+                    purpose = "transform"
+                else:
+                    purpose = "purge"
+                for ef in effects:
+                    if ef.get("type") == "remove_card":
+                        num_to_select = ef.get("amount", 1)
+            elif action in ("remove_card", "tosh"):
+                purpose = "purge"
+            target_ids = [target_card]
+
+        # Detect upgrade from _smith_intent_id
+        if "_smith_intent_id" in best_choice:
+            if not purpose:
+                purpose = "upgrade"
+                target_ids = [best_choice["_smith_intent_id"]]
+
+        # Detect duplicate from _duplicate_intent_id
+        if "_duplicate_intent_id" in best_choice:
+            purpose = "duplicate"
+            target_ids = [best_choice["_duplicate_intent_id"]]
+
+        if purpose:
+            self._pending_grid = {
+                "purpose": purpose,
+                "target_ids": target_ids,
+                "num_to_select": num_to_select,
+                "selected_count": 0,
+            }
+            print(Fore.MAGENTA +
+                f"预定GRID操作: {purpose}, 目标={target_ids}, 数量={num_to_select}" +
+                Style.RESET_ALL)
 
     def _get_model_boss_reward_decision(self, state: GameState) -> Optional[GameAction]:
         current_state = {

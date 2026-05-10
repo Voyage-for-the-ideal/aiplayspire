@@ -277,6 +277,9 @@ class STSInferenceEngine:
         elif action == "tosh" and target:
             if target in new_state["deck"]:
                 new_state["deck"].remove(target)
+        elif action == "duplicate" and target:
+            if target in new_state["deck"]:
+                new_state["deck"].append(target)
         elif action == "upgrade_card" and target:
             if target in new_state["deck"]:
                 new_state["deck"].remove(target)
@@ -300,37 +303,53 @@ class STSInferenceEngine:
             
         return new_state
 
-    def recommend_choice(self, current_state, choices):
+    def recommend_choice(self, current_state, choices, exclude_purge_ids=None):
         """
         Evaluate multiple choices (e.g. Card rewards, Map paths)
         Returns the best choice dict.
+
+        exclude_purge_ids: optional set of card IDs to skip during purge/transform evaluation.
+        Used to exclude curse cards from transform candidates (curse→curse is a net loss).
         """
         best_score = -1.0
         best_choice = None
-        
+
         for choice in choices:
             needs_purge_eval = False
+            needs_upgrade_eval = False
+            needs_duplicate_eval = False
+
             if choice.get("action") == "composite_event":
                 for ef in choice.get("effects", []):
                     if ef.get("type") == "remove_card" and (not ef.get("card_id") or ef.get("card_id") == "unknown_card"):
                         needs_purge_eval = True
-                        break
+                    if ef.get("type") == "upgrade_card" and (not ef.get("card_id") or ef.get("card_id") == "unknown_card"):
+                        needs_upgrade_eval = True
             elif choice.get("action") == "remove_card" and not choice.get("target"):
                 needs_purge_eval = True
+            elif choice.get("action") == "upgrade_card" and not choice.get("target"):
+                needs_upgrade_eval = True
+            elif choice.get("action") == "duplicate" and not choice.get("target"):
+                needs_duplicate_eval = True
 
             if needs_purge_eval:
                 max_score_for_choice = -1.0
                 best_card_to_purge = None
-                
+
                 deck = current_state.get("deck", [])
                 unique_cards = list(set(deck))
-                
+
                 if not unique_cards:
                     hypothetical_state = self._apply_choice(current_state, choice)
                     score = self.evaluate_state(hypothetical_state)
                     max_score_for_choice = score
                 else:
                     for card in unique_cards:
+                        if exclude_purge_ids and card in exclude_purge_ids:
+                            non_excluded = [c for c in unique_cards if c not in exclude_purge_ids]
+                            if non_excluded:
+                                continue
+
                         mod_choice = copy.deepcopy(choice)
                         if mod_choice.get("action") == "composite_event":
                             for ef in mod_choice.get("effects", []):
@@ -338,20 +357,83 @@ class STSInferenceEngine:
                                     ef["card_id"] = card
                         elif mod_choice.get("action") == "remove_card":
                             mod_choice["target"] = card
-                            
+
                         hypo_state = self._apply_choice(current_state, mod_choice)
                         score = self.evaluate_state(hypo_state)
                         if score > max_score_for_choice:
                             max_score_for_choice = score
                             best_card_to_purge = card
-                
+
                 score = max_score_for_choice
                 eval_choice = copy.deepcopy(choice)
                 if best_card_to_purge:
                     eval_choice["_purge_intent_id"] = best_card_to_purge
-                
+
                 print(f"Choice: composite_purge (remove={best_card_to_purge}) -> V(S') = {score:.4f}")
-                
+
+            elif needs_upgrade_eval:
+                max_score_for_choice = -1.0
+                best_card_to_upgrade = None
+
+                deck = current_state.get("deck", [])
+                unique_unupgraded = list(set([c for c in deck if "+" not in c]))
+
+                if not unique_unupgraded:
+                    hypothetical_state = self._apply_choice(current_state, choice)
+                    score = self.evaluate_state(hypothetical_state)
+                    max_score_for_choice = score
+                else:
+                    for card in unique_unupgraded:
+                        mod_choice = copy.deepcopy(choice)
+                        if mod_choice.get("action") == "composite_event":
+                            for ef in mod_choice.get("effects", []):
+                                if ef.get("type") == "upgrade_card" and (not ef.get("card_id") or ef.get("card_id") == "unknown_card"):
+                                    ef["card_id"] = card
+                        elif mod_choice.get("action") == "upgrade_card":
+                            mod_choice["target"] = card
+
+                        hypo_state = self._apply_choice(current_state, mod_choice)
+                        score = self.evaluate_state(hypo_state)
+                        if score > max_score_for_choice:
+                            max_score_for_choice = score
+                            best_card_to_upgrade = card
+
+                score = max_score_for_choice
+                eval_choice = copy.deepcopy(choice)
+                if best_card_to_upgrade:
+                    eval_choice["_smith_intent_id"] = best_card_to_upgrade
+
+                print(f"Choice: composite_upgrade (upgrade={best_card_to_upgrade}) -> V(S') = {score:.4f}")
+
+            elif needs_duplicate_eval:
+                max_score_for_choice = -1.0
+                best_card_to_dup = None
+
+                deck = current_state.get("deck", [])
+                unique_cards = list(set(deck))
+
+                if not unique_cards:
+                    hypothetical_state = self._apply_choice(current_state, choice)
+                    score = self.evaluate_state(hypothetical_state)
+                    max_score_for_choice = score
+                else:
+                    for card in unique_cards:
+                        mod_choice = copy.deepcopy(choice)
+                        mod_choice["target"] = card
+
+                        hypo_state = self._apply_choice(current_state, mod_choice)
+                        score = self.evaluate_state(hypo_state)
+                        if score > max_score_for_choice:
+                            max_score_for_choice = score
+                            best_card_to_dup = card
+
+                score = max_score_for_choice
+                eval_choice = copy.deepcopy(choice)
+                if best_card_to_dup:
+                    eval_choice["_duplicate_intent_id"] = best_card_to_dup
+
+                print(f"Choice: duplicate (copy={best_card_to_dup}) -> V(S') = {score:.4f}")
+
             else:
                 hypothetical_state = self._apply_choice(current_state, choice)
                 score = self.evaluate_state(hypothetical_state)
@@ -363,6 +445,56 @@ class STSInferenceEngine:
                 best_choice = eval_choice
 
         return best_choice
+
+    def rank_cards_for_purpose(self, current_state, purpose, n, exclude_ids=None):
+        """Return the top-n card IDs for a given grid purpose.
+
+        purpose behavior:
+        - purge: remove each card, evaluate. Highest V = worst card.
+        - transform: same as purge, but skips curse cards (curse→curse is no benefit).
+        - upgrade: upgrade each unupgraded card, evaluate. Highest V = best upgrade target.
+        - duplicate: copy each card, evaluate. Highest V = best copy target.
+
+        exclude_ids: optional set of card IDs to skip (e.g. curse cards for transform).
+        Falls back to all cards if excluding leaves nothing.
+        """
+        deck = current_state.get("deck", [])
+        unique_cards = list(set(deck))
+        scored = []
+
+        for card in unique_cards:
+            if exclude_ids and card in exclude_ids:
+                non_excluded = [c for c in unique_cards if c not in exclude_ids]
+                if non_excluded:
+                    continue
+
+            hypo_state = copy.deepcopy(current_state)
+            if purpose in ("purge", "transform"):
+                if card in hypo_state["deck"]:
+                    hypo_state["deck"].remove(card)
+            elif purpose == "upgrade":
+                if "+" in card:
+                    continue
+                if card in hypo_state["deck"]:
+                    hypo_state["deck"].remove(card)
+                    match = re.match(r"(Searing Blow)\+(\d+)", card)
+                    if match:
+                        hypo_state["deck"].append(f"Searing Blow+{int(match.group(2)) + 1}")
+                    elif card == "Searing Blow":
+                        hypo_state["deck"].append("Searing Blow+1")
+                    elif not card.endswith("+1"):
+                        hypo_state["deck"].append(card + "+1")
+                    else:
+                        hypo_state["deck"].append(card)
+            elif purpose == "duplicate":
+                if card in hypo_state["deck"]:
+                    hypo_state["deck"].append(card)
+
+            score = self.evaluate_state(hypo_state)
+            scored.append((card, score))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return [card for card, _ in scored[:n]]
 
     def shop_greedy_search(self, state, goods):
         """Greedy iterative shopping: repeatedly buy the single item that most improves V(state), until nothing helps."""
