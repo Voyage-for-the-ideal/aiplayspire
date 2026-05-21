@@ -4,9 +4,9 @@ import gzip
 from reconstructor import RunReconstructor
 
 def test_reconstructor(limit=200):
-    files = glob.glob(r"D:\code\masterspire\selectcard\STS Data\**\*.json.gz", recursive=True)
+    files = glob.glob(r"D:\code\aiplayspire\selectcard\STS Data\**\*.json.gz", recursive=True)
     if not files:
-        files = glob.glob(r"D:\code\masterspire\selectcard\**\*.json", recursive=True)
+        files = glob.glob(r"D:\code\aiplayspire\selectcard\**\*.json", recursive=True)
         
     success = 0
     total = 0

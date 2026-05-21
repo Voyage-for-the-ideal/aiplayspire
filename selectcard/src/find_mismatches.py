@@ -7,10 +7,10 @@ from reconstructor import RunReconstructor
 
 def list_mismatches(limit=500, output_file="mismatched_runs.txt"):
     # 查找数据文件
-    data_dir = r"D:\code\masterspire\selectcard\STS Data"
+    data_dir = r"D:\code\aiplayspire\selectcard\STS Data"
     files = glob.glob(os.path.join(data_dir, "**", "*.json.gz"), recursive=True)
     if not files:
-        files = glob.glob(r"D:\code\masterspire\selectcard\**\*.json", recursive=True)
+        files = glob.glob(r"D:\code\aiplayspire\selectcard\**\*.json", recursive=True)
         
     mismatches = []
     total_valid = 0

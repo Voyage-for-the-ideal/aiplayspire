@@ -1,7 +1,22 @@
+# Build artifacts (not tracked)
+_ModTheSpire/
+lib/
+
+# STS Data - large JSON.gz run files
+STS Data/
+
+# ML checkpoints and processed data
+checkpoints/
+processed_data/
+
 # Python
 __pycache__/
 *.py[cod]
+*.pyo
 .env
+.venv/
+venv/
+*.egg-info/
 
 # Java / Maven build outputs
 target/
@@ -10,9 +25,22 @@ target/
 # IDE files
 .idea/
 .vscode/
+*.iml
 
 # Claude Code
 .claude/
 
+# OS
+.DS_Store
+Thumbs.db
+
 # Debug output
 debug/
+
+# Output files
+out.csv
+mismatched_runs.txt
+*.dot
+
+# Git sub-repos
+selectcard/.git/

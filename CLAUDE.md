@@ -4,11 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is **aiplayspire** — an AI bot for Slay the Spire. Three subsystems work together:
+This is **aiplayspire** — an AI bot for Slay the Spire. Six subsystems work together:
 
 1. **StSCommunicationMod** (Java) — A mod that opens HTTP port 5000 inside the game, exposing `/state`, `/action`, `/card_info`.
 2. **sts_ai_framework** (Python) — The main AI client that polls game state, decides actions via LLM + local value network, and submits them.
 3. **selectcard** (Python) — A deep learning project that trains a Set Transformer survival-value network used by the AI framework for card/relic/event/shop decisions.
+4. **STSStateSaver** (Java) — Game state serialization. Captures full battle state (player, monsters, powers, relics, orbs, actions, select screens) to JSON.
+5. **LudicrousSpeed** (Java) — Fast simulation engine. Replaces normal game action loop with blocking simulation via `Controller` interface. Command system for card plays, potions, screen selects.
+6. **scumthespire** (Java) — Battle AI (BattleAiMod). Server/client architecture — AI server runs headless, client sends battle state, server tree-searches optimal plays via `BattleAiController`.
 
 ## Common Commands
 
@@ -40,6 +43,36 @@ cd "D:\Program Files\Slay the Spire"
 jre\bin\java.exe -jar ModTheSpire.jar
 ```
 
+### STSStateSaver, LudicrousSpeed, scumthespire (Java — Battle AI mods)
+
+These three mods form a pipeline: **STSStateSaver** serializes game state → **LudicrousSpeed** simulates actions fast → **scumthespire** (BattleAiMod) tree-searches optimal plays.
+
+Dependencies are system-scoped via `../lib/` and `../_ModTheSpire/mods/`. Build in dependency order:
+
+```bash
+# First-time dependency setup (from game installation)
+mkdir -p lib _ModTheSpire/mods
+cp "D:/Program Files/Slay the Spire/desktop-1.0.jar" lib/
+cp "D:/Program Files/Slay the Spire/ModTheSpire.jar" lib/
+cp "D:/Program Files/Slay the Spire/mods/BaseMod.jar" _ModTheSpire/mods/
+cp "D:/Program Files/Slay the Spire/mods/StSLib.jar" _ModTheSpire/mods/
+
+# Build all four Java mods in order
+cd STSStateSaver && mvn package     # → ../_ModTheSpire/mods/SaveStateMod.jar
+cd LudicrousSpeed && mvn package    # → ../_ModTheSpire/mods/LudicrousSpeed.jar
+cd StSCommunicationMod && mvn package  # → ../_ModTheSpire/mods/CommunicationMod.jar
+cd scumthespire && mvn package      # → ../_ModTheSpire/mods/BattleAiMod.jar
+
+# Or use the unified script
+./build_all.sh
+```
+
+### Running the Battle AI
+
+1. Start server: `java -DisServer=true -jar ModTheSpire.jar`
+2. Start client: `java -jar ModTheSpire.jar` (normal launch with all 4 mods enabled)
+3. Enter battle → press "Start Steve" button → AI plays the fight
+
 ### selectcard
 ```bash
 # Process raw JSON run data into training samples
@@ -52,7 +85,11 @@ uvicorn src.api:app --reload
 
 ## `cardcrawl` — Decompiled Game Source
 
-Decompiled from `desktop-1.0.jar`. ~2000 Java files under `com.megacrit.cardcrawl.*`. Read-only reference for understanding game internals when building the AI.
+Decompiled from `desktop-1.0.jar` (~2000 Java files). Read-only reference for understanding game internals when building the AI.
+
+**文件布局**: `.java` 文件直接放在主题子目录下（如 `cards/AbstractCard.java`），不是 `com/megacrit/cardcrawl/` 路径。目录名即对应包名段。
+
+**导航技巧**: 追踪一个游戏机制时，按以下顺序查找：`actions/`（队列化的效果）→ 触发它的 `powers/`（持续修改器）或 `relics/`（遗物钩子）→ `AbstractDungeon`（全局条件检查）。大部分游戏逻辑都经由 `actions/` 和 `powers/` 流转。
 
 | Directory | Contents |
 |---|---|
@@ -163,4 +200,33 @@ Decision flow: local value network handles CARD_REWARD, SHOP_SCREEN, EVENT, REST
 - **GRID auto-handling**: When the game shows a grid picker after smith/purge, the framework matches card names automatically.
 - **Map navigation**: Uses BFS from each map choice node to report distances to nearest campfire/shop/elite in the prompt.
 - **Omamori-aware**: Both `DecisionMixin` and `STSInferenceEngine` check for Omamori charges when evaluating curse events.
-- **selectcard reference path**: `sts_ai_framework/llm_agent.py` imports from `../masterspire/selectcard` (hardcoded relative path outside this repo).
+- **selectcard reference path**: `sts_ai_framework/llm_agent.py` imports from `../selectcard` (same-repo relative path).
+
+### STSStateSaver — State System
+
+- **SaveState** — root state object, serializes entire battle state via `jsonEncode()` / loads via `loadState()`. Contains PlayerState, monster states, screen states, action queue state.
+- **StateFactories** — registry mapping class names to state constructors for deserialization.
+- Monster/power/relic/action states organized by game zone (exordium, city, beyond, ending) and character class (ironclad, silent, defect, watcher).
+- **fastobjects/** — optimized replacement objects that skip logging/rendering for simulation speed.
+
+### LudicrousSpeed — Command Pattern
+
+- **Command** (interface) — `execute()` + `encode()`. Implementations: CardCommand, PotionCommand, EndCommand, HandSelectCommand, GridSelectCommand, CardRewardSelectCommand, plus confirm variants.
+- **CommandList.getAvailableCommands()** — enumerates all legal commands for current game state.
+- **ActionSimulator.actionLoop()** — blocking loop that replaces `GameActionManager.update()`. Runs controller steps.
+- **Controller** (interface) — `step()` called each frame while game waits for input; `isDone()` exits the simulation loop.
+- Patches in `simulator/patches/` override game behavior for speed.
+
+### scumthespire (BattleAiMod) — AI Tree Search
+
+- **BattleAiController** (implements Controller) — manages tree search. Priority queue of TurnNodes, explores states breadth-first by value.
+- **TurnNode** — represents a turn's worth of states. Comparable by value. Each TurnNode has a stack of StateNodes.
+- **StateNode** — a single state snapshot after one command.
+- **ValueFunctions** — scores game states to guide search.
+- Character-specific card play heuristics: IronCladPlayOrder, DefectPlayOrder, SilentPlayOrder.
+
+### Networking (scumthespire)
+
+- **AiServer** (port 5125) — runs on headless game instance. Receives JSON run requests, runs BattleAiController, streams progress updates, returns command list.
+- **AiClient** — runs on player's game instance. Serializes current state, sends to server, receives command list, executes via CommandRunnerController.
+- Wire format: JSON with `type`, `commands`, `message` fields. `state` field uses diff encoding (`diffEncode()`) to pass state along command chain.
