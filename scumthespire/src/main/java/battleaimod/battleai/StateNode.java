@@ -4,6 +4,7 @@ import battleaimod.BattleAiMod;
 import com.megacrit.cardcrawl.actions.GameActionManager;
 import com.megacrit.cardcrawl.cards.AbstractCard;
 import com.megacrit.cardcrawl.cards.blue.Turbo;
+import com.megacrit.cardcrawl.cards.green.Catalyst;
 import com.megacrit.cardcrawl.cards.green.Concentrate;
 import com.megacrit.cardcrawl.cards.green.HeelHook;
 import com.megacrit.cardcrawl.cards.green.SneakyStrike;
@@ -250,8 +251,22 @@ public class StateNode {
             return false;
         });
 
-        // TODO: spot weakness
-        // TODO: catalyst
+        // Deprioritize Catalyst when target has no poison
+        lastActionConditions.add((command) -> {
+            if (command instanceof CardCommand) {
+                CardCommand cardCommand = (CardCommand) command;
+                AbstractCard card = AbstractDungeon.player.hand.group.get(cardCommand.cardIndex);
+                if (card.cardID.equals(Catalyst.ID)) {
+                    if (cardCommand.monsterIndex > -1) {
+                        AbstractMonster monster = AbstractDungeon.getMonsters().monsters
+                                .get(cardCommand.monsterIndex);
+                        return !monster.isDeadOrEscaped() && !monster.hasPower("Poison");
+                    }
+                    return true;
+                }
+            }
+            return false;
+        });
 
         ArrayList<Function<AbstractCard, Boolean>> playCardsLastConditions = new ArrayList<>();
         ArrayList<Function<AbstractCard, Boolean>> playCardsFirstConditions = new ArrayList<>();

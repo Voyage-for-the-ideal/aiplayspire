@@ -82,9 +82,8 @@ public class AiClient {
 
                 try {
 
-                    // TODO: This was hardcoded, making lots of bad things happen
                     String directoryName = String
-                            .format("startstates/%s/%02d", SeedHelper.getString(Settings.seed),
+                            .format("startstates/%s/%02d/%d", SeedHelper.getString(Settings.seed),
                                     AbstractDungeon.floorNum, fileIndex++);
                     File directory = new File(directoryName);
                     directory.mkdirs();

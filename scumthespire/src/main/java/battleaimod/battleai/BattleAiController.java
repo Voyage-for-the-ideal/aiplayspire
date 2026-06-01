@@ -221,19 +221,18 @@ public class BattleAiController implements Controller {
                     committedTurn = toAdd;
                     bestTurn = null;
                     backupTurn = null;
-                    deathNode = null;
-
-                    // TODO this is here to prevent playback errors
-                    bestEnd = null;
 
                     return;
                 } else if (turns.isEmpty() || turnsLoaded >= maxTurnLoads * 10) {
                     if (deathNode != null) {
                         System.err.println("Sending back death turn");
                         bestEnd = deathNode;
-                        isDone = true;
-                        return;
+                    } else {
+                        System.err.println("No path found, using start state as fallback");
+                        bestEnd = startNode.startingState;
                     }
+                    isDone = true;
+                    return;
                 }
             }
         }
