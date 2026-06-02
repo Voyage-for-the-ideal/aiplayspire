@@ -420,9 +420,8 @@ public class SaveState {
             AbstractDungeon.screen = null;
             AbstractDungeon.previousScreen = null;
 
-            // TODO this needs to be the actual character class or bad things happen
             new Exordium(CardCrawlGame.characterManager
-                    .getCharacter(AbstractPlayer.PlayerClass.IRONCLAD), new ArrayList<>());
+                    .getCharacter(playerState.chosenClass), new ArrayList<>());
 
             AbstractDungeon.currMapNode.room = new EmptyRoom();
 
