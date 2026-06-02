@@ -4,6 +4,7 @@ import basemod.ReflectionHacks;
 import com.evacipated.cardcrawl.modthespire.lib.SpireInsertPatch;
 import com.evacipated.cardcrawl.modthespire.lib.SpirePatch;
 import com.evacipated.cardcrawl.modthespire.lib.SpirePrefixPatch;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -187,19 +188,27 @@ public class SaveState {
         this.ascensionLevel = parsed.get("ascension_level").getAsInt();
         this.bombIdOffset = parsed.get("bomb_id_offset").getAsInt();
         this.totalDiscardedThisTurn = parsed.get("total_discarded_this_turn").getAsInt();
-        this.lastCombatMetricKey = parsed.get("AbstractDungeon.lastCombatMetricKey").getAsString();
+        this.lastCombatMetricKey = getOptionalString(parsed, "lastCombatMetricKey",
+                getOptionalString(parsed, "AbstractDungeon.lastCombatMetricKey", "2 Louse"));
 
         // start counting from the json start
-        this.lessonLearnedCount = 0;
-        this.parasiteCount = 0;
+        this.lessonLearnedCount = getOptionalInt(parsed, "lesson_learned_count", 0);
+        this.parasiteCount = getOptionalInt(parsed, "parasite_count", 0);
 
-        // TODO
-        this.handSelectScreenState = null;
-        this.cardsPlayedThisTurn = new ArrayList<>();
-        this.cardsPlayedThisTurnBackup = new ArrayList<>();
-        this.cardsPlayedThisCombat = new ArrayList<>();
-        this.gridSelectedCards = new ArrayList<>();
-        this.drawnCards = new ArrayList<>();
+        JsonObject handSelectJson = getOptionalObject(parsed, "hand_select_screen_state");
+        this.handSelectScreenState = handSelectJson == null ? null : new HandSelectScreenState(handSelectJson);
+        JsonObject gridSelectJson = getOptionalObject(parsed, "grid_card_select_screen_state");
+        this.gridCardSelectScreenState = gridSelectJson == null ? null : new GridCardSelectScreenState(gridSelectJson);
+        JsonObject cardRewardJson = getOptionalObject(parsed, "card_reward_screen_state");
+        this.cardRewardScreenState = cardRewardJson == null ? null : new CardRewardScreenState(cardRewardJson);
+        this.cardsPlayedThisTurn = intListFromJson(parsed, "cards_played_this_turn");
+        this.cardsPlayedThisTurnBackup = cardStateListFromJson(parsed, "cards_played_this_turn_backup");
+        this.cardsPlayedThisCombat = cardStateContainerListFromJson(parsed, "cards_played_this_combat");
+        this.gridSelectedCards = cardStateContainerListFromJson(parsed, "grid_selected_cards");
+        this.drawnCards = intListFromJson(parsed, "drawn_cards");
+        this.endTurnQueued = getOptionalBoolean(parsed, "end_turn_queued", false);
+        this.isEndingTurn = getOptionalBoolean(parsed, "is_ending_turn", false);
+        this.gridCardSelectAmount = getOptionalInt(parsed, "grid_card_select_amount", 0);
 
         for (Map.Entry<String, StateElement.ElementFactories> entry : StateFactories.elementFactories
                 .entrySet()) {
@@ -232,16 +241,23 @@ public class SaveState {
         this.totalDiscardedThisTurn = saveStateObject.get("total_discarded_this_turn").getAsInt();
 
         // start counting from the json start
-        this.lessonLearnedCount = 0;
-        this.parasiteCount = 0;
+        this.lessonLearnedCount = getOptionalInt(saveStateObject, "lesson_learned_count", 0);
+        this.parasiteCount = getOptionalInt(saveStateObject, "parasite_count", 0);
 
-        // TODO
-        this.handSelectScreenState = null;
-        this.cardsPlayedThisTurn = new ArrayList<>();
-        this.cardsPlayedThisTurnBackup = new ArrayList<>();
-        this.cardsPlayedThisCombat = new ArrayList<>();
-        this.gridSelectedCards = new ArrayList<>();
-        this.drawnCards = new ArrayList<>();
+        JsonObject handSelectJson = getOptionalObject(saveStateObject, "hand_select_screen_state");
+        this.handSelectScreenState = handSelectJson == null ? null : new HandSelectScreenState(handSelectJson);
+        JsonObject gridSelectJson = getOptionalObject(saveStateObject, "grid_card_select_screen_state");
+        this.gridCardSelectScreenState = gridSelectJson == null ? null : new GridCardSelectScreenState(gridSelectJson);
+        JsonObject cardRewardJson = getOptionalObject(saveStateObject, "card_reward_screen_state");
+        this.cardRewardScreenState = cardRewardJson == null ? null : new CardRewardScreenState(cardRewardJson);
+        this.cardsPlayedThisTurn = intListFromJson(saveStateObject, "cards_played_this_turn");
+        this.cardsPlayedThisTurnBackup = cardStateListFromJson(saveStateObject, "cards_played_this_turn_backup");
+        this.cardsPlayedThisCombat = cardStateContainerListFromJson(saveStateObject, "cards_played_this_combat");
+        this.gridSelectedCards = cardStateContainerListFromJson(saveStateObject, "grid_selected_cards");
+        this.drawnCards = intListFromJson(saveStateObject, "drawn_cards");
+        this.endTurnQueued = getOptionalBoolean(saveStateObject, "end_turn_queued", false);
+        this.isEndingTurn = getOptionalBoolean(saveStateObject, "is_ending_turn", false);
+        this.gridCardSelectAmount = getOptionalInt(saveStateObject, "grid_card_select_amount", 0);
 
         for (Map.Entry<String, StateElement.ElementFactories> entry : StateFactories.elementFactories
                 .entrySet()) {
@@ -450,6 +466,22 @@ public class SaveState {
         saveStateJson.addProperty("bomb_id_offset", bombIdOffset);
         saveStateJson.addProperty("total_discarded_this_turn", totalDiscardedThisTurn);
         saveStateJson.addProperty("lastCombatMetricKey", lastCombatMetricKey);
+        saveStateJson.addProperty("lesson_learned_count", lessonLearnedCount);
+        saveStateJson.addProperty("parasite_count", parasiteCount);
+        saveStateJson.addProperty("end_turn_queued", endTurnQueued);
+        saveStateJson.addProperty("is_ending_turn", isEndingTurn);
+        saveStateJson.addProperty("grid_card_select_amount", gridCardSelectAmount);
+        saveStateJson.add("hand_select_screen_state", handSelectScreenState == null ? null : handSelectScreenState
+                .jsonEncode());
+        saveStateJson.add("grid_card_select_screen_state", gridCardSelectScreenState == null ? null : gridCardSelectScreenState
+                .jsonEncode());
+        saveStateJson.add("card_reward_screen_state", cardRewardScreenState == null ? null : cardRewardScreenState
+                .jsonEncode());
+        saveStateJson.add("cards_played_this_turn", intListToJson(cardsPlayedThisTurn));
+        saveStateJson.add("cards_played_this_turn_backup", cardStateListToJson(cardsPlayedThisTurnBackup));
+        saveStateJson.add("cards_played_this_combat", cardStateContainerListToJson(cardsPlayedThisCombat));
+        saveStateJson.add("grid_selected_cards", cardStateContainerListToJson(gridSelectedCards));
+        saveStateJson.add("drawn_cards", intListToJson(drawnCards));
 
         for (String key : StateFactories.elementFactories.keySet()) {
             saveStateJson.addProperty(key, additionalElements.get(key).encode());
@@ -479,6 +511,22 @@ public class SaveState {
         saveStateJson.add("rng_state", rngState.jsonEncode());
         saveStateJson.add("cur_map_node_state", curMapNodeState.jsonEncode());
         saveStateJson.addProperty("lastCombatMetricKey", lastCombatMetricKey);
+        saveStateJson.addProperty("lesson_learned_count", lessonLearnedCount);
+        saveStateJson.addProperty("parasite_count", parasiteCount);
+        saveStateJson.addProperty("end_turn_queued", endTurnQueued);
+        saveStateJson.addProperty("is_ending_turn", isEndingTurn);
+        saveStateJson.addProperty("grid_card_select_amount", gridCardSelectAmount);
+        saveStateJson.add("hand_select_screen_state", handSelectScreenState == null ? null : handSelectScreenState
+                .jsonEncode());
+        saveStateJson.add("grid_card_select_screen_state", gridCardSelectScreenState == null ? null : gridCardSelectScreenState
+                .jsonEncode());
+        saveStateJson.add("card_reward_screen_state", cardRewardScreenState == null ? null : cardRewardScreenState
+                .jsonEncode());
+        saveStateJson.add("cards_played_this_turn", intListToJson(cardsPlayedThisTurn));
+        saveStateJson.add("cards_played_this_turn_backup", cardStateListToJson(cardsPlayedThisTurnBackup));
+        saveStateJson.add("cards_played_this_combat", cardStateContainerListToJson(cardsPlayedThisCombat));
+        saveStateJson.add("grid_selected_cards", cardStateContainerListToJson(gridSelectedCards));
+        saveStateJson.add("drawn_cards", intListToJson(drawnCards));
 
         for (String key : StateFactories.elementFactories.keySet()) {
             saveStateJson.add(key, additionalElements.get(key).jsonEncode());
@@ -542,6 +590,95 @@ public class SaveState {
         return allMatch;
     }
 
+    private static boolean hasValue(JsonObject json, String key) {
+        return json.has(key) && !json.get(key).isJsonNull();
+    }
+
+    private static JsonObject getOptionalObject(JsonObject json, String key) {
+        if (!hasValue(json, key)) {
+            return null;
+        }
+
+        JsonElement element = json.get(key);
+        if (element.isJsonObject()) {
+            return element.getAsJsonObject();
+        }
+
+        return new JsonParser().parse(element.getAsString()).getAsJsonObject();
+    }
+
+    private static int getOptionalInt(JsonObject json, String key, int defaultValue) {
+        return hasValue(json, key) ? json.get(key).getAsInt() : defaultValue;
+    }
+
+    private static boolean getOptionalBoolean(JsonObject json, String key, boolean defaultValue) {
+        return hasValue(json, key) ? json.get(key).getAsBoolean() : defaultValue;
+    }
+
+    private static String getOptionalString(JsonObject json, String key, String defaultValue) {
+        return hasValue(json, key) ? json.get(key).getAsString() : defaultValue;
+    }
+
+    private static JsonArray intListToJson(ArrayList<Integer> values) {
+        JsonArray json = new JsonArray();
+        for (Integer value : values) {
+            json.add(value);
+        }
+        return json;
+    }
+
+    private static ArrayList<Integer> intListFromJson(JsonObject json, String key) {
+        ArrayList<Integer> values = new ArrayList<>();
+        if (!hasValue(json, key)) {
+            return values;
+        }
+
+        for (JsonElement element : json.get(key).getAsJsonArray()) {
+            values.add(element.getAsInt());
+        }
+        return values;
+    }
+
+    private static JsonArray cardStateListToJson(ArrayList<CardState> cards) {
+        JsonArray json = new JsonArray();
+        for (CardState card : cards) {
+            json.add(card.jsonEncode());
+        }
+        return json;
+    }
+
+    private static ArrayList<CardState> cardStateListFromJson(JsonObject json, String key) {
+        ArrayList<CardState> cards = new ArrayList<>();
+        if (!hasValue(json, key)) {
+            return cards;
+        }
+
+        for (JsonElement element : json.get(key).getAsJsonArray()) {
+            cards.add(CardState.forJson(element.getAsJsonObject()));
+        }
+        return cards;
+    }
+
+    private static JsonArray cardStateContainerListToJson(ArrayList<CardStateContainer> cards) {
+        JsonArray json = new JsonArray();
+        for (CardStateContainer card : cards) {
+            json.add(card.jsonEncode());
+        }
+        return json;
+    }
+
+    private static ArrayList<CardStateContainer> cardStateContainerListFromJson(JsonObject json, String key) {
+        ArrayList<CardStateContainer> cards = new ArrayList<>();
+        if (!hasValue(json, key)) {
+            return cards;
+        }
+
+        for (JsonElement element : json.get(key).getAsJsonArray()) {
+            cards.add(CardStateContainer.fromJson(element.getAsJsonObject()));
+        }
+        return cards;
+    }
+
     public static class CardStateContainer {
         private int cardIndex = -1;
         private CardState cardState = null;
@@ -559,12 +696,30 @@ public class SaveState {
             return result;
         }
 
+        public static CardStateContainer fromJson(JsonObject json) {
+            CardStateContainer result = new CardStateContainer();
+            result.cardIndex = json.get("card_index").getAsInt();
+
+            JsonElement cardStateElement = json.get("card_state");
+            result.cardState = cardStateElement == null || cardStateElement
+                    .isJsonNull() ? null : CardState.forJson(cardStateElement.getAsJsonObject());
+
+            return result;
+        }
+
         public AbstractCard loadCard(ArrayList<AbstractCard> allCards) {
             if (cardIndex == -1) {
                 return cardState.loadCard();
             } else {
                 return allCards.get(cardIndex);
             }
+        }
+
+        public JsonObject jsonEncode() {
+            JsonObject json = new JsonObject();
+            json.addProperty("card_index", cardIndex);
+            json.add("card_state", cardState == null ? null : cardState.jsonEncode());
+            return json;
         }
     }
 

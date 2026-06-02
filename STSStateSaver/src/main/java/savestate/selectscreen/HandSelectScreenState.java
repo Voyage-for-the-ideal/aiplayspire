@@ -1,6 +1,9 @@
 package savestate.selectscreen;
 
 import basemod.ReflectionHacks;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
 import com.megacrit.cardcrawl.actions.AbstractGameAction;
 import com.megacrit.cardcrawl.actions.GameActionManager;
 import com.megacrit.cardcrawl.dungeons.AbstractDungeon;
@@ -8,6 +11,7 @@ import com.megacrit.cardcrawl.screens.select.HandCardSelectScreen;
 import savestate.CardQueueItemState;
 import savestate.CardState;
 import savestate.PlayerState;
+import savestate.StateJsonHelper;
 import savestate.actions.ActionState;
 import savestate.actions.CurrentActionState;
 
@@ -71,6 +75,24 @@ public class HandSelectScreenState {
 
     }
 
+    public HandSelectScreenState(JsonObject json) {
+        this.numCardsToSelect = json.get("num_cards_to_select").getAsInt();
+        this.selectedCards = cardStateArrayFromJson(json.get("selected_cards").getAsJsonArray());
+        this.wereCardsRetrieved = json.get("were_cards_retrieved").getAsBoolean();
+        this.canPickZero = json.get("can_pick_zero").getAsBoolean();
+        this.upTo = json.get("up_to").getAsBoolean();
+        this.anyNumber = json.get("any_number").getAsBoolean();
+        this.forTransform = json.get("for_transform").getAsBoolean();
+        this.forUpgrade = json.get("for_upgrade").getAsBoolean();
+        this.numSelected = json.get("num_selected").getAsInt();
+        this.isDisabled = json.get("is_disabled").getAsBoolean();
+
+        this.currentActionState = StateJsonHelper
+                .currentActionStateFromJson(json.get("current_action_state"));
+        this.actionQueue = actionQueueFromJson(json.get("action_queue"));
+        this.cardQueueState = cardQueueFromJson(json.get("card_queue_state"));
+    }
+
     public void loadHandSelectScreenState() {
         AbstractDungeon.handCardSelectScreen.button.isDisabled = isDisabled;
 
@@ -113,5 +135,94 @@ public class HandSelectScreenState {
             }
 
         }
+    }
+
+    public String encode() {
+        return jsonEncode().toString();
+    }
+
+    public JsonObject jsonEncode() {
+        JsonObject json = new JsonObject();
+
+        json.addProperty("num_cards_to_select", numCardsToSelect);
+        json.add("selected_cards", cardStateArrayToJson(selectedCards));
+        json.addProperty("were_cards_retrieved", wereCardsRetrieved);
+        json.addProperty("can_pick_zero", canPickZero);
+        json.addProperty("up_to", upTo);
+        json.addProperty("any_number", anyNumber);
+        json.addProperty("for_transform", forTransform);
+        json.addProperty("for_upgrade", forUpgrade);
+        json.addProperty("num_selected", numSelected);
+        json.addProperty("is_disabled", isDisabled);
+        json.add("current_action_state", currentActionState == null ? null : StateJsonHelper
+                .currentActionStateToJson(currentActionState));
+        json.add("action_queue", actionQueueToJson(actionQueue));
+        json.add("card_queue_state", cardQueueToJson(cardQueueState));
+
+        return json;
+    }
+
+    private static JsonArray cardStateArrayToJson(CardState[] cards) {
+        JsonArray json = new JsonArray();
+        for (CardState card : cards) {
+            json.add(card.jsonEncode());
+        }
+        return json;
+    }
+
+    private static CardState[] cardStateArrayFromJson(JsonArray json) {
+        CardState[] cards = new CardState[json.size()];
+        for (int i = 0; i < json.size(); i++) {
+            cards[i] = CardState.forJson(json.get(i).getAsJsonObject());
+        }
+        return cards;
+    }
+
+    private static JsonArray actionQueueToJson(ArrayList<ActionState> actionQueue) {
+        if (actionQueue == null) {
+            return null;
+        }
+
+        JsonArray json = new JsonArray();
+        for (ActionState actionState : actionQueue) {
+            json.add(StateJsonHelper.actionStateToJson(actionState));
+        }
+        return json;
+    }
+
+    private static ArrayList<ActionState> actionQueueFromJson(JsonElement json) {
+        if (json == null || json.isJsonNull()) {
+            return null;
+        }
+
+        ArrayList<ActionState> actionQueue = new ArrayList<>();
+        for (JsonElement actionJson : json.getAsJsonArray()) {
+            actionQueue.add(StateJsonHelper.actionStateFromJson(actionJson));
+        }
+        return actionQueue;
+    }
+
+    private static JsonArray cardQueueToJson(ArrayList<CardQueueItemState> cardQueueState) {
+        if (cardQueueState == null) {
+            return null;
+        }
+
+        JsonArray json = new JsonArray();
+        for (CardQueueItemState cardQueueItemState : cardQueueState) {
+            json.add(cardQueueItemState.jsonEncode());
+        }
+        return json;
+    }
+
+    private static ArrayList<CardQueueItemState> cardQueueFromJson(JsonElement json) {
+        if (json == null || json.isJsonNull()) {
+            return null;
+        }
+
+        ArrayList<CardQueueItemState> cardQueueState = new ArrayList<>();
+        for (JsonElement cardQueueItemJson : json.getAsJsonArray()) {
+            cardQueueState.add(new CardQueueItemState(cardQueueItemJson.getAsJsonObject()));
+        }
+        return cardQueueState;
     }
 }
