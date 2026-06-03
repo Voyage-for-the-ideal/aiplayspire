@@ -162,6 +162,27 @@ public class HandSelectScreenState {
         return json;
     }
 
+    public JsonObject diffEncode() {
+        JsonObject json = new JsonObject();
+
+        json.addProperty("num_cards_to_select", numCardsToSelect);
+        json.add("selected_cards", cardStateArrayToJson(selectedCards));
+        json.addProperty("were_cards_retrieved", wereCardsRetrieved);
+        json.addProperty("can_pick_zero", canPickZero);
+        json.addProperty("up_to", upTo);
+        json.addProperty("any_number", anyNumber);
+        json.addProperty("for_transform", forTransform);
+        json.addProperty("for_upgrade", forUpgrade);
+        json.addProperty("num_selected", numSelected);
+        json.addProperty("is_disabled", isDisabled);
+        json.add("current_action_state", currentActionState == null ? null : StateJsonHelper
+                .currentActionStateToJson(currentActionState));
+        json.add("action_queue", actionQueueToJson(actionQueue));
+        json.add("card_queue_state", cardQueueToJson(cardQueueState));
+
+        return json;
+    }
+
     private static JsonArray cardStateArrayToJson(CardState[] cards) {
         JsonArray json = new JsonArray();
         for (CardState card : cards) {

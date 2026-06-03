@@ -537,10 +537,32 @@ public class SaveState {
     public String diffEncode() {
         JsonObject saveStateJson = new JsonObject();
 
+        saveStateJson.addProperty("screen_name", screen.name());
+        saveStateJson.addProperty("previous_screen_name", previousScreen != null ? previousScreen
+                .name() : null);
+        saveStateJson.addProperty("is_screen_up", isScreenUp);
+        saveStateJson.addProperty("turn", turn);
+        saveStateJson.addProperty("mantra_gained", mantraGained);
+        saveStateJson.addProperty("end_turn_queued", endTurnQueued);
+        saveStateJson.addProperty("is_ending_turn", isEndingTurn);
+        saveStateJson.addProperty("lesson_learned_count", lessonLearnedCount);
+        saveStateJson.addProperty("parasite_count", parasiteCount);
+        saveStateJson.addProperty("grid_card_select_amount", gridCardSelectAmount);
         saveStateJson.addProperty("rng_state", rngState.encode());
         saveStateJson.addProperty("cur_map_node_state", curMapNodeState.diffEncode());
         saveStateJson.addProperty("player_state", playerState.diffEncode());
         saveStateJson.addProperty("total_discarded_this_turn", totalDiscardedThisTurn);
+        saveStateJson.add("cards_played_this_turn", intListToJson(cardsPlayedThisTurn));
+        saveStateJson.add("cards_played_this_turn_backup", cardStateListToJson(cardsPlayedThisTurnBackup));
+        saveStateJson.add("cards_played_this_combat", cardStateContainerListToJson(cardsPlayedThisCombat));
+        saveStateJson.add("grid_selected_cards", cardStateContainerListToJson(gridSelectedCards));
+        saveStateJson.add("drawn_cards", intListToJson(drawnCards));
+        saveStateJson.add("hand_select_screen_state", handSelectScreenState == null ? null : handSelectScreenState
+                .diffEncode());
+        saveStateJson.add("grid_card_select_screen_state", gridCardSelectScreenState == null ? null : gridCardSelectScreenState
+                .diffEncode());
+        saveStateJson.add("card_reward_screen_state", cardRewardScreenState == null ? null : cardRewardScreenState
+                .diffEncode());
 
         return saveStateJson.toString();
     }
@@ -585,8 +607,48 @@ public class SaveState {
             System.err.println(two.get("total_discarded_this_turn").getAsInt());
         }
 
+        allMatch = compareJsonField(one, two, "screen_name") && allMatch;
+        allMatch = compareJsonField(one, two, "previous_screen_name") && allMatch;
+        allMatch = compareJsonField(one, two, "is_screen_up") && allMatch;
+        allMatch = compareJsonField(one, two, "turn") && allMatch;
+        allMatch = compareJsonField(one, two, "mantra_gained") && allMatch;
+        allMatch = compareJsonField(one, two, "end_turn_queued") && allMatch;
+        allMatch = compareJsonField(one, two, "is_ending_turn") && allMatch;
+        allMatch = compareJsonField(one, two, "lesson_learned_count") && allMatch;
+        allMatch = compareJsonField(one, two, "parasite_count") && allMatch;
+        allMatch = compareJsonField(one, two, "grid_card_select_amount") && allMatch;
+        allMatch = compareJsonField(one, two, "cards_played_this_turn") && allMatch;
+        allMatch = compareJsonField(one, two, "cards_played_this_turn_backup") && allMatch;
+        allMatch = compareJsonField(one, two, "cards_played_this_combat") && allMatch;
+        allMatch = compareJsonField(one, two, "grid_selected_cards") && allMatch;
+        allMatch = compareJsonField(one, two, "drawn_cards") && allMatch;
+        allMatch = compareJsonField(one, two, "hand_select_screen_state") && allMatch;
+        allMatch = compareJsonField(one, two, "grid_card_select_screen_state") && allMatch;
+        allMatch = compareJsonField(one, two, "card_reward_screen_state") && allMatch;
 
         return allMatch;
+    }
+
+    private static boolean compareJsonField(JsonObject one, JsonObject two, String key) {
+        JsonElement oneElement = one.get(key);
+        JsonElement twoElement = two.get(key);
+
+        if (oneElement == null) {
+            oneElement = com.google.gson.JsonNull.INSTANCE;
+        }
+        if (twoElement == null) {
+            twoElement = com.google.gson.JsonNull.INSTANCE;
+        }
+
+        boolean matches = oneElement.equals(twoElement);
+        if (!matches) {
+            System.err.println(key + " state mismatch");
+            System.err.println(oneElement.toString());
+            System.err.println("----------------------------------------------");
+            System.err.println(twoElement.toString());
+        }
+
+        return matches;
     }
 
     private static boolean hasValue(JsonObject json, String key) {

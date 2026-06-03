@@ -136,6 +136,23 @@ public class CardRewardScreenState {
         return json;
     }
 
+    public JsonObject diffEncode() {
+        JsonObject json = new JsonObject();
+
+        json.add("current_action_state", currentActionState == null ? null : StateJsonHelper
+                .currentActionStateToJson(currentActionState));
+        json.add("action_queue", actionQueueToJson(actionQueue));
+        json.add("card_queue_state", cardQueueToJson(cardQueueState));
+        json.addProperty("discovery", discovery);
+        json.addProperty("choose_one", chooseOne);
+        json.addProperty("skippable", skippable);
+        json.addProperty("draft", draft);
+        json.add("discovery_card", discoveryCard == null ? null : discoveryCard.jsonEncode());
+        json.add("reward_group", cardStateListToJson(rewardGroup));
+
+        return json;
+    }
+
     private static CardState cardStateFromJson(JsonElement json) {
         return json == null || json.isJsonNull() ? null : CardState.forJson(json.getAsJsonObject());
     }

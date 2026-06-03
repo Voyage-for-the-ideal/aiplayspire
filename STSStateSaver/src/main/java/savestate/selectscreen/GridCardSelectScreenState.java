@@ -196,6 +196,29 @@ public class GridCardSelectScreenState {
         return json;
     }
 
+    public JsonObject diffEncode() {
+        JsonObject json = new JsonObject();
+
+        json.add("selected_cards", cardStateContainerListToJson(selectedCards));
+        json.add("current_action_state", currentActionState == null ? null : StateJsonHelper
+                .currentActionStateToJson(currentActionState));
+        json.add("action_queue", actionQueueToJson(actionQueue));
+        json.addProperty("is_discard", isDiscard);
+        json.add("group_cards", cardStateContainerListToJson(groupCards));
+        json.add("card_queue_state", cardQueueToJson(cardQueueState));
+        json.addProperty("is_confirm_button_disabled", isConfirmButtonDisabled);
+        json.addProperty("card_select_amount", cardSelectAmount);
+        json.addProperty("num_cards", numCards);
+        json.addProperty("any_number", anyNumber);
+        json.addProperty("for_clarity", forClarity);
+        json.addProperty("for_upgrade", forUpgrade);
+        json.addProperty("for_transform", forTransform);
+        json.addProperty("can_cancel", canCancel);
+        json.addProperty("for_purge", forPurge);
+
+        return json;
+    }
+
     private static JsonArray cardStateContainerListToJson(ArrayList<SaveState.CardStateContainer> cards) {
         JsonArray json = new JsonArray();
         for (SaveState.CardStateContainer card : cards) {
