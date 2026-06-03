@@ -58,7 +58,7 @@ public class CardState {
     public CardState(AbstractCard card) {
         long cardConstructorStartTime = System.currentTimeMillis();
 
-        this.cardIdIndex = StateFactories.cardIdToIndexMap.get(card.cardID);
+        this.cardIdIndex = cardIdIndexFor(card.cardID);
         this.block = card.block;
         this.upgraded = card.upgraded;
         this.baseDamage = card.baseDamage;
@@ -104,7 +104,7 @@ public class CardState {
     public CardState(String jsonString) {
         JsonObject parsed = new JsonParser().parse(jsonString).getAsJsonObject();
 
-        this.cardIdIndex = StateFactories.cardIdToIndexMap.get(parsed.get("card_id").getAsString());
+        this.cardIdIndex = cardIdIndexFor(parsed.get("card_id").getAsString());
         this.upgraded = parsed.get("upgraded").getAsBoolean();
         this.baseDamage = parsed.get("base_damage").getAsInt();
         this.cost = parsed.get("cost").getAsInt();
@@ -157,8 +157,7 @@ public class CardState {
     }
 
     public CardState(JsonObject cardJson) {
-        this.cardIdIndex =
-                StateFactories.cardIdToIndexMap.get(cardJson.get("card_id").getAsString());
+        this.cardIdIndex = cardIdIndexFor(cardJson.get("card_id").getAsString());
         this.upgraded = cardJson.get("upgraded").getAsBoolean();
         this.baseDamage = cardJson.get("base_damage").getAsInt();
         this.cost = cardJson.get("cost").getAsInt();
@@ -415,10 +414,24 @@ public class CardState {
         AbstractCard card = CardLibrary.getCard(key);
 
         if (card == null) {
-            System.err.println("can't find " + key);
+            throw new IllegalArgumentException("Missing card id " + key
+                    + " in CardLibrary while restoring saved card state. "
+                    + "Check that the server and client have matching mods and card libraries.");
         }
 
         return card.makeCopy();
+    }
+
+    private static int cardIdIndexFor(String cardId) {
+        Integer cardIdIndex = StateFactories.cardIdToIndexMap.get(cardId);
+
+        if (cardIdIndex == null) {
+            throw new IllegalArgumentException("Missing card id " + cardId
+                    + " in StateFactories.cardIdToIndexMap while restoring saved card state. "
+                    + "Check that the server and client have matching mods and card libraries.");
+        }
+
+        return cardIdIndex;
     }
 
     public static int indexForCard(AbstractCard card) {
