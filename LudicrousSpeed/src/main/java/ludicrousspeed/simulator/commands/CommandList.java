@@ -44,32 +44,24 @@ public final class CommandList {
             for(int i = 0; i < hand.size(); i++) {
                 AbstractCard card = hand.get(i);
 
-                // Only populate the first time you've seen a card with this specific {name X upgraded}
-                String setName = card.cardID + (card.upgraded ? "+" : "");
-                int oldCount = seenCommands.size();
-                seenCommands.add(setName);
-                if (oldCount == seenCommands.size()) {
-                    continue;
-                }
-
                 if (card.target == AbstractCard.CardTarget.ENEMY || card.target == AbstractCard.CardTarget.SELF_AND_ENEMY) {
                     for (int j = 0; j < monsters.size(); j++) {
                         AbstractMonster monster = monsters.get(j);
                         if (card.canUse(player, monster) && !monster.isDeadOrEscaped()) {
-                            commands.add(new CardCommand(i, j, String.format(card.cardID)));
+                            addCommandIfNew(commands, seenCommands, new CardCommand(i, j, String.format(card.cardID)));
                         }
                     }
                 }
 
                 if (card.target == AbstractCard.CardTarget.ALL_ENEMY || card.target == AbstractCard.CardTarget.ALL) {
                     if (card.canUse(player, null)) {
-                        commands.add(new CardCommand(i, card.cardID));
+                        addCommandIfNew(commands, seenCommands, new CardCommand(i, card.cardID));
                     }
                 }
 
                 if (card.target == AbstractCard.CardTarget.SELF || card.target == AbstractCard.CardTarget.SELF_AND_ENEMY || card.target == AbstractCard.CardTarget.NONE) {
                     if (card.canUse(player, null)) {
-                        commands.add(new CardCommand(i, card.cardID));
+                        addCommandIfNew(commands, seenCommands, new CardCommand(i, card.cardID));
                     }
                 }
             }
@@ -251,6 +243,12 @@ public final class CommandList {
             return screen.forUpgrade || screen.forTransform || screen.forPurge || screen.anyNumber;
         }
         return false;
+    }
+
+    private static void addCommandIfNew(List<Command> commands, Set<String> seenCommands, Command command) {
+        if (seenCommands.add(command.encode())) {
+            commands.add(command);
+        }
     }
 
     private CommandList() {
