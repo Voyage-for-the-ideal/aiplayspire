@@ -216,6 +216,11 @@ public class BattleClientController {
     }
 
     private static void startServerThread() {
+        if (serverProcess != null && serverProcess.isAlive()) {
+            System.out.println("Server game is already running");
+            return;
+        }
+
         String mtsPath = "";
         try {
             try {
@@ -270,6 +275,8 @@ public class BattleClientController {
             pingServer();
         } catch (IOException e) {
             e.printStackTrace();
+            serverReady = false;
+            serverProcess = null;
         }
 
 

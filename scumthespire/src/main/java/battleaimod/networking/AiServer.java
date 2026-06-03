@@ -38,13 +38,11 @@ public class AiServer {
                 new ThreadFactoryBuilder().setNameFormat("server-networking-thread-%d").build();
         ExecutorService executor = Executors.newSingleThreadExecutor(namedThreadFactory);
         executor.submit(() -> {
-            try {
-                ServerSocket serverSocket = new ServerSocket(PORT_NUMBER);
-
-                Socket socket = serverSocket.accept();
-
-                DataInputStream in = new DataInputStream(new BufferedInputStream(socket
-                        .getInputStream()));
+            try (ServerSocket serverSocket = new ServerSocket(PORT_NUMBER);
+                 Socket socket = serverSocket.accept();
+                 DataInputStream in = new DataInputStream(new BufferedInputStream(socket
+                         .getInputStream()));
+                 DataOutputStream out = new DataOutputStream(socket.getOutputStream())) {
 
                 while (true) {
                     fileIndex = 0;
@@ -93,11 +91,11 @@ public class AiServer {
                             System.err.println("state parsed " + commandFileName);
                         } catch (Exception e) {
                             e.printStackTrace();
+                            System.err.println("Failed to parse client request; clearing server for reset");
+                            clearServerState();
                             return;
                         }
 
-
-                        DataOutputStream out = new DataOutputStream(socket.getOutputStream());
 
                         BattleAiMod.shouldStartAiFromServer = true;
                         BattleAiMod.goFast = true;
@@ -163,10 +161,10 @@ public class AiServer {
 
                             String endFileName = Paths.get(requestFilePath).getParent() + endSuffix;
 
-                            FileWriter writer = new FileWriter(endFileName);
-                            writer.write(BattleAiMod.battleAiController.bestEnd.saveState
-                                    .jsonEncode().toString());
-                            writer.close();
+                            try (FileWriter writer = new FileWriter(endFileName)) {
+                                writer.write(BattleAiMod.battleAiController.bestEnd.saveState
+                                        .jsonEncode().toString());
+                            }
 
                             // Send Command List
                             jsonToSend.addProperty("type", commandListString);
@@ -180,9 +178,9 @@ public class AiServer {
                                             .println("should be writing file to " + commandFileName);
                                     Path parent = Paths.get(commandFileName).getParent();
                                     new File(parent.toString()).mkdirs();
-                                    FileWriter commandWriter = new FileWriter(commandFileName);
-                                    commandWriter.write(jsonToSend.toString());
-                                    commandWriter.close();
+                                    try (FileWriter commandWriter = new FileWriter(commandFileName)) {
+                                        commandWriter.write(jsonToSend.toString());
+                                    }
                                 } catch (IOException e) {
                                     e.printStackTrace();
                                 }
@@ -217,9 +215,16 @@ public class AiServer {
             } catch (IOException e) {
                 e.printStackTrace();
                 System.err.println("Client Disconnected, clearing server for reset");
-                BattleAiMod.aiServer = null;
+                clearServerState();
             }
         });
+    }
+
+    private static void clearServerState() {
+        BattleAiMod.aiServer = null;
+        BattleAiMod.shouldStartAiFromServer = false;
+        BattleAiMod.battleAiController = null;
+        LudicrousSpeedMod.controller = null;
     }
 
     public static JsonArray commandsForStateNode(StateNode root, boolean shouldPrint, String clientCwd) {

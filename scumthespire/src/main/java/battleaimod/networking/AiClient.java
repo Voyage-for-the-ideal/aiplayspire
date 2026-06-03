@@ -28,6 +28,8 @@ import java.util.stream.Collectors;
 
 public class AiClient {
     private static final String HOST_IP = "127.0.0.1";
+    private static final int CONNECT_TIMEOUT_MILLIS = 3000;
+    private static final int READ_TIMEOUT_MILLIS = 3000;
     public static int fileIndex = 0;
     public static boolean waiting = false;
     public static String preferredCommandFilename = null;
@@ -41,14 +43,14 @@ public class AiClient {
 
     public AiClient(boolean connect) throws IOException {
         socket = new Socket();
-        socket.setSoTimeout(3000);
+        socket.setSoTimeout(READ_TIMEOUT_MILLIS);
 
         if (connect) {
             try {
-                socket.connect(new InetSocketAddress(HOST_IP, AiServer.PORT_NUMBER));
-            } catch (SocketTimeoutException e) {
-                System.err.println("Failed on connect timeout");
+                socket.connect(new InetSocketAddress(HOST_IP, AiServer.PORT_NUMBER), CONNECT_TIMEOUT_MILLIS);
+            } catch (IOException e) {
                 socket.close();
+                throw e;
             }
         }
     }
@@ -161,6 +163,7 @@ public class AiClient {
                 System.err.println("Server disconnected; clearing client for reset.");
                 BattleAiMod.aiClient = null;
                 BattleAiMod.rerunController = null;
+            } finally {
                 waiting = false;
             }
         });

@@ -44,27 +44,26 @@ public class StatusAndControlThreads {
                 Thread.sleep(5_000);
 
                 System.out.println("Starting status thread");
-                ServerSocket serverGameServerSocket = new ServerSocket(SERVER_GAME_PORT);
-                Socket serverGameSocket = serverGameServerSocket.accept();
+                try (ServerSocket serverGameServerSocket = new ServerSocket(SERVER_GAME_PORT);
+                     Socket serverGameSocket = serverGameServerSocket.accept();
+                     DataInputStream serverInputStream = new DataInputStream(new BufferedInputStream(serverGameSocket
+                             .getInputStream()));
+                     DataOutputStream serverOutputStream = new DataOutputStream(serverGameSocket
+                             .getOutputStream())) {
+                    while (true) {
+                        System.out.println("Waiting for game to start...");
 
-                while (true) {
-                    DataInputStream serverInputStream = new DataInputStream(new BufferedInputStream(serverGameSocket
-                            .getInputStream()));
-                    DataOutputStream serverOutputStream = new DataOutputStream(serverGameSocket
-                            .getOutputStream());
+                        String clientRequest = serverInputStream.readUTF();
 
-                    System.out.println("Waiting for game to start...");
+                        JsonObject response = new JsonObject();
 
-                    String clientRequest = serverInputStream.readUTF();
+                        boolean controllerRunning = BattleAiMod.battleAiController != null;
 
-                    JsonObject response = new JsonObject();
+                        response.addProperty("yay", "yay?");
+                        response.addProperty("ready", !controllerRunning);
 
-                    boolean controllerRunning = BattleAiMod.battleAiController != null;
-
-                    response.addProperty("yay", "yay?");
-                    response.addProperty("ready", !controllerRunning);
-
-                    serverOutputStream.writeUTF(response.toString());
+                        serverOutputStream.writeUTF(response.toString());
+                    }
                 }
             } catch (IOException | InterruptedException e) {
                 e.printStackTrace();
@@ -79,110 +78,16 @@ public class StatusAndControlThreads {
                 Thread.sleep(5_000);
 
                 System.out.println("Starting client thread");
-                ServerSocket serverGameServerSocket = new ServerSocket(CLIENT_GAME_PORT);
-
-                while (true) {
-                    Socket serverGameSocket = serverGameServerSocket.accept();
-                    DataInputStream serverInputStream = new DataInputStream(new BufferedInputStream(serverGameSocket
-                            .getInputStream()));
-                    DataOutputStream serverOutputStream = new DataOutputStream(serverGameSocket
-                            .getOutputStream());
-
-                    String clientRequest = serverInputStream.readUTF();
-
-                    JsonObject parsedRequest = new JsonParser().parse(clientRequest)
-                                                               .getAsJsonObject();
-
-                    String command = parsedRequest.get("command").getAsString();
-
-                    if (command.equals("load")) {
-                        String path = parsedRequest.get("path").getAsString();
-                        AbstractPlayer.PlayerClass playerClass = AbstractPlayer.PlayerClass
-                                .valueOf(parsedRequest.get("playerClass").getAsString());
-
-                        SaveStateMod.curFloorToDisplay = parsedRequest.get("replay_floor_start")
-                                                                      .getAsInt();
-                        SaveStateMod.lastFloorToDisplay = parsedRequest.get("replay_floor_end")
-                                                                       .getAsInt();
-
-                        if (parsedRequest.has("recall_mode")) {
-                            SavesPatches.recallMode = parsedRequest.get("recall_mode")
-                                                                   .getAsBoolean();
-                        }
-
-                        SavesPatches.load(path, playerClass);
-
-                        JsonObject response = new JsonObject();
-
-                        boolean controllerRunning = BattleAiMod.battleAiController != null;
-
-                        response.addProperty("yay", "yay?");
-                        response.addProperty("ready", !controllerRunning);
-
-                        serverOutputStream.writeUTF(response.toString());
-                    } else if (command.equals("startAi")) {
-                        if (parsedRequest.has("command_file_out")) {
-                            AiClient.preferredCommandFilename = parsedRequest
-                                    .get("command_file_out")
-                                    .getAsString();
-                        }
-
-                        if (parsedRequest.has("start_file")) {
-                            AiClient.preferredStartFilename = parsedRequest.get("start_file")
-                                                                           .getAsString();
-                        }
-
-                        if (canSendState()) {
-                            if (BattleAiMod.aiClient == null) {
-                                try {
-                                    BattleAiMod.aiClient = new AiClient();
-                                } catch (IOException e) {
-                                    e.printStackTrace();
-                                }
-                            }
-
-                            if (BattleAiMod.aiClient != null) {
-                                BattleAiMod.aiClient.sendState();
-                            }
-                        }
-
-                        JsonObject response = new JsonObject();
-
-                        boolean controllerRunning = BattleAiMod.battleAiController != null;
-
-                        response.addProperty("yay", "yay?");
-                        response.addProperty("ready", !controllerRunning);
-
-//                    SavesPatches.load();
-
-                        serverOutputStream.writeUTF(response.toString());
-                    } else if (command.equals("status")) {
-                        JsonObject response = new JsonObject();
-
-                        boolean controllerRunning = BattleAiMod.battleAiController != null;
-
-                        response.addProperty("yay", "yay?");
-                        response.addProperty("ready", !controllerRunning);
-
-//                    SavesPatches.load();
-
-                        boolean isReady = canSendState();
-
-                        boolean escaping = false;
-                        if (AbstractDungeon.actionManager != null) {
-                            if (AbstractDungeon.actionManager.currentAction instanceof EscapeAction) {
-                                escaping = true;
-                            }
-                        }
-
-                        if (isReady) {
-                            serverOutputStream.writeUTF("READY");
-                        } else {
-                            if (isControllerRunning() || AiClient.waiting || escaping) {
-                                serverOutputStream.writeUTF("PROCESSING");
-                            } else {
-                                serverOutputStream.writeUTF("LOADING");
-                            }
+                try (ServerSocket serverGameServerSocket = new ServerSocket(CLIENT_GAME_PORT)) {
+                    while (true) {
+                        try (Socket serverGameSocket = serverGameServerSocket.accept();
+                             DataInputStream serverInputStream = new DataInputStream(new BufferedInputStream(serverGameSocket
+                                     .getInputStream()));
+                             DataOutputStream serverOutputStream = new DataOutputStream(serverGameSocket
+                                     .getOutputStream())) {
+                            handleClientRequest(serverInputStream, serverOutputStream);
+                        } catch (Exception e) {
+                            e.printStackTrace();
                         }
                     }
                 }
@@ -190,6 +95,93 @@ public class StatusAndControlThreads {
                 e.printStackTrace();
             }
         }).start();
+    }
+
+    private static void handleClientRequest(DataInputStream serverInputStream, DataOutputStream serverOutputStream)
+            throws IOException {
+        String clientRequest = serverInputStream.readUTF();
+
+        JsonObject parsedRequest = new JsonParser().parse(clientRequest)
+                                                   .getAsJsonObject();
+
+        String command = parsedRequest.get("command").getAsString();
+
+        if (command.equals("load")) {
+            String path = parsedRequest.get("path").getAsString();
+            AbstractPlayer.PlayerClass playerClass = AbstractPlayer.PlayerClass
+                    .valueOf(parsedRequest.get("playerClass").getAsString());
+
+            SaveStateMod.curFloorToDisplay = parsedRequest.get("replay_floor_start")
+                                                          .getAsInt();
+            SaveStateMod.lastFloorToDisplay = parsedRequest.get("replay_floor_end")
+                                                           .getAsInt();
+
+            if (parsedRequest.has("recall_mode")) {
+                SavesPatches.recallMode = parsedRequest.get("recall_mode")
+                                                       .getAsBoolean();
+            }
+
+            SavesPatches.load(path, playerClass);
+
+            writeReadyResponse(serverOutputStream);
+        } else if (command.equals("startAi")) {
+            if (parsedRequest.has("command_file_out")) {
+                AiClient.preferredCommandFilename = parsedRequest
+                        .get("command_file_out")
+                        .getAsString();
+            }
+
+            if (parsedRequest.has("start_file")) {
+                AiClient.preferredStartFilename = parsedRequest.get("start_file")
+                                                               .getAsString();
+            }
+
+            if (canSendState()) {
+                if (BattleAiMod.aiClient == null) {
+                    try {
+                        BattleAiMod.aiClient = new AiClient();
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    }
+                }
+
+                if (BattleAiMod.aiClient != null) {
+                    BattleAiMod.aiClient.sendState();
+                }
+            }
+
+            writeReadyResponse(serverOutputStream);
+        } else if (command.equals("status")) {
+            boolean isReady = canSendState();
+
+            boolean escaping = false;
+            if (AbstractDungeon.actionManager != null) {
+                if (AbstractDungeon.actionManager.currentAction instanceof EscapeAction) {
+                    escaping = true;
+                }
+            }
+
+            if (isReady) {
+                serverOutputStream.writeUTF("READY");
+            } else {
+                if (isControllerRunning() || AiClient.waiting || escaping) {
+                    serverOutputStream.writeUTF("PROCESSING");
+                } else {
+                    serverOutputStream.writeUTF("LOADING");
+                }
+            }
+        }
+    }
+
+    private static void writeReadyResponse(DataOutputStream serverOutputStream) throws IOException {
+        JsonObject response = new JsonObject();
+
+        boolean controllerRunning = BattleAiMod.battleAiController != null;
+
+        response.addProperty("yay", "yay?");
+        response.addProperty("ready", !controllerRunning);
+
+        serverOutputStream.writeUTF(response.toString());
     }
 
     static boolean canSendState() {
