@@ -8,6 +8,7 @@ STS Data/
 # ML checkpoints and processed data
 checkpoints/
 processed_data/
+processed_data_v2/
 
 # Python
 __pycache__/

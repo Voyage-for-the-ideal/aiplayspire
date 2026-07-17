@@ -44,11 +44,13 @@ class LLMAgent(ActionMixin, DecisionMixin, InfoPromptMixin, ChoiceMixin, Agent):
                 "selectcard",
             )
             model_path = os.path.join(model_base_dir, "checkpoints", "best_sts_value_model_final.pth")
-            vocab_path = os.path.join(model_base_dir, "checkpoints", "vocab.json")
-            if os.path.exists(model_path) and os.path.exists(vocab_path):
-                self.value_engine = STSInferenceEngine(model_path=model_path, vocab_path=vocab_path)
-                print(f"\033[32m已加载本地卡牌决策模型: {model_path}\033[0m")
+            if os.path.exists(model_path):
+                try:
+                    self.value_engine = STSInferenceEngine(model_path=model_path)
+                    print(f"\033[32m已加载本地卡牌决策模型: {model_path}\033[0m")
+                except ValueError as exc:
+                    print(f"\033[33m本地卡牌决策模型不兼容: {exc}\033[0m")
             else:
-                print(f"\033[33m本地卡牌决策模型/词表 不存在，请先训练模型并确保在 checkpoints 目录下\033[0m")
+                print(f"\033[33m本地卡牌决策模型不存在，请先训练 v2 模型\033[0m")
         else:
             print(f"\033[31m未找到 selectcard.src.inference，无法加载决策模型\033[0m")

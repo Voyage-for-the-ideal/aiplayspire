@@ -1,129 +1,76 @@
-import os
 import torch
 import copy
 from src.model import STSValueNetwork
-from src.dataset import SimpleTokenizer
+from src.checkpointing import load_checkpoint
+from src.encoding import ItemVocabulary, encode_items
+from src.dataset import GlobalFeatureNormalizer
 from src.config import Config
 import re
 
-class DummyTokenizer:
-    def encode(self, deck, relics):
-        seq_len = len(deck) + len(relics)
-        seq_tokens = torch.randint(1, 100, (1, seq_len))
-        upgrades = torch.zeros((1, seq_len), dtype=torch.long)
-        counts = torch.ones((1, seq_len), dtype=torch.long)
-        return seq_tokens, upgrades, counts
-
 class InferenceTokenizer:
-    """包装 SimpleTokenizer 并在 inference 阶段执行与训练对齐的 encode 逻辑"""
-    def __init__(self, vocab_path, max_seq_len=64):
-        self.tokenizer = SimpleTokenizer()
-        self.tokenizer.load(vocab_path)
+    """Use the same frozen canonical item encoding as training."""
+    def __init__(self, vocabulary, max_seq_len=64, max_upgrade=15, max_count=10):
+        self.vocabulary = vocabulary
         self.max_seq_len = max_seq_len
+        self.max_upgrade = max_upgrade
+        self.max_count = max_count
 
     def encode(self, deck, relics):
-        from collections import Counter
-        
-        # 处理卡牌升级形态 (去除+1等后缀，分离出基础名字和升级数)
-        # 注意此逻辑必须和训练时构建 dataset.py 中的完全一致
-        card_items = []
-        for c in deck:
-            if "+" in c:
-                parts = c.split("+")
-                name = parts[0]
-                upg = min(int(parts[1]) if parts[1].isdigit() else 1, 14)
-            else:
-                name = c
-                upg = 0
-            if name != "AscendersBane": # 如果训练时排除了某些初始牌
-                card_items.append({"name": name, "upg": upg, "type": "card"})
-                
-        relic_items = [{"name": r, "upg": 0, "type": "relic"} for r in relics]
-        all_items = card_items + relic_items
-        
-        # 统计同样名字同样升级的卡牌个数
-        item_counts = Counter([(item["name"], item["upg"]) for item in all_items])
-        
-        seq, upg_seq, cnt_seq = [], [], []
-        for (name, upg), count in item_counts.items():
-            tok_id = self.tokenizer.item2id.get(name, 1) # 1 is [MASK] or UNK usually if not found
-            seq.append(tok_id)
-            upg_seq.append(upg)
-            cnt_seq.append(min(count, 9)) # max_count
-            
-        # Padding
-        if len(seq) < self.max_seq_len:
-            pad_len = self.max_seq_len - len(seq)
-            seq += [0] * pad_len
-            upg_seq += [0] * pad_len
-            cnt_seq += [0] * pad_len
-        else:
-            seq = seq[:self.max_seq_len]
-            upg_seq = upg_seq[:self.max_seq_len]
-            cnt_seq = cnt_seq[:self.max_seq_len]
-            
+        seq, upgrades, counts = encode_items(
+            deck,
+            relics,
+            self.vocabulary,
+            self.max_seq_len,
+            self.max_upgrade,
+            self.max_count,
+        )
         return (
             torch.tensor([seq], dtype=torch.long),
-            torch.tensor([upg_seq], dtype=torch.long),
-            torch.tensor([cnt_seq], dtype=torch.long)
+            torch.tensor([upgrades], dtype=torch.long),
+            torch.tensor([counts], dtype=torch.long),
         )
-
-def extract_global_features(state):
-    # state is a dict: {'hp': 50, 'max_hp': 70, 'gold': 150, 'floor': 12, 'ascension': 20, ...}
-    hp = float(state.get('hp', 0.0))
-    gold = float(state.get('gold', 0.0))
-    floor = float(state.get('floor', 1.0))
-    ascension = float(state.get('ascension', 20.0))
-
-    # Same normalizations as STSDataset
-    floor_norm = max(0.0, min(floor / 55.0, 1.0))
-    ascension_norm = max(0.0, min(ascension / 20.0, 1.0))
-    hp_std = (hp - 50.2277) / 158.0118
-    gold_std = (gold - 222.6476) / 3719.5747
-
-    global_feats = [floor_norm, hp_std, gold_std, ascension_norm, 0.0, 0.0, 0.0, 0.0]
-    return torch.tensor([global_feats], dtype=torch.float32)
 
 class STSInferenceEngine:
     def __init__(self, model_path=None, vocab_path=None):
-        if not vocab_path and model_path:
-            vocab_path = os.path.join(os.path.dirname(model_path), "vocab.json")
-            
-# Infer exact vocab_size from checkpoint if available, to avoid embedding size mismatch
-        state_dict = None
-        if model_path and os.path.exists(model_path):
-            state_dict = torch.load(model_path, map_location="cpu", weights_only=True)
-
-        # load tokenizer first to know vocab size fallback
-        if vocab_path and os.path.exists(vocab_path):
-            self.tokenizer = InferenceTokenizer(vocab_path, max_seq_len=64)
-            vocab_size = len(self.tokenizer.tokenizer) + Config.VOCAB_BUFFER
+        if vocab_path is not None:
+            raise ValueError("v2 checkpoints embed the vocabulary; vocab_path is no longer used")
+        if model_path:
+            checkpoint, vocabulary, self.normalizer = load_checkpoint(model_path)
+            architecture = checkpoint["model_config"]
+            self.model = STSValueNetwork(**architecture)
+            self.model.load_state_dict(checkpoint["model_state_dict"])
         else:
-            self.tokenizer = DummyTokenizer()  # Fallback only
-            vocab_size = 1000
-
-        if state_dict is not None and "token_emb.weight" in state_dict:
-            vocab_size = state_dict["token_emb.weight"].shape[0]
-
-        # init model
-        self.model = STSValueNetwork(
-            vocab_size=vocab_size,
-            max_upgrade=Config.MAX_UPGRADE,
-            max_count=Config.MAX_COUNT,
-            d_model=Config.D_MODEL,
-            n_heads=Config.N_HEADS,
-            n_layers=Config.N_LAYERS,
-            num_global_features=Config.NUM_GLOBAL_FEATURES,
-            dropout=Config.DROPOUT
+            vocabulary = ItemVocabulary().freeze()
+            self.normalizer = GlobalFeatureNormalizer()
+            architecture = {
+                "vocab_size": len(vocabulary),
+                "max_upgrade": Config.MAX_UPGRADE,
+                "max_count": Config.MAX_COUNT,
+                "d_model": Config.D_MODEL,
+                "n_heads": Config.N_HEADS,
+                "n_layers": Config.N_LAYERS,
+                "num_global_features": Config.NUM_GLOBAL_FEATURES,
+                "dropout": Config.DROPOUT,
+                "global_conditioning": Config.GLOBAL_CONDITIONING,
+                "norm_position": Config.NORM_POSITION,
+            }
+            self.model = STSValueNetwork(**architecture)
+        self.tokenizer = InferenceTokenizer(
+            vocabulary,
+            max_seq_len=Config.MAX_SEQ_LEN,
+            max_upgrade=architecture["max_upgrade"],
+            max_count=architecture["max_count"],
         )
-        if state_dict is not None:
-            self.model.load_state_dict(state_dict)
         self.model.eval()
+
+    def _global_features(self, state):
+        values = self.normalizer.transform_state(state)
+        return torch.tensor([values], dtype=torch.float32)
         
     def evaluate_state(self, state):
         """Evaluate a single state dictionary and return survival probability."""
         seq_tokens, upgrades, counts = self.tokenizer.encode(state['deck'], state['relics'])
-        global_feats = extract_global_features(state)
+        global_feats = self._global_features(state)
 
         with torch.no_grad():
             logits = self.model(seq_tokens, upgrades, counts, global_feats)
@@ -133,7 +80,7 @@ class STSInferenceEngine:
     def evaluate_state_logits(self, state):
         """Evaluate a single state dictionary and return raw logits."""
         seq_tokens, upgrades, counts = self.tokenizer.encode(state['deck'], state['relics'])
-        global_feats = extract_global_features(state)
+        global_feats = self._global_features(state)
         
         with torch.no_grad():
             logits = self.model(seq_tokens, upgrades, counts, global_feats)

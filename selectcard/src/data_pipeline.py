@@ -3,8 +3,62 @@ import json
 import glob
 import gzip
 import pandas as pd
+import hashlib
 from datetime import datetime
 from reconstructor import RunReconstructor
+
+try:
+    from encoding import PREPROCESSING_VERSION
+    from config import Config
+except ImportError:
+    from .encoding import PREPROCESSING_VERSION
+    from .config import Config
+
+
+def stable_run_id(event_data):
+    payload = json.dumps(event_data, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def assign_split(run_id):
+    split_total = Config.TRAIN_SPLIT + Config.VAL_SPLIT + Config.TEST_SPLIT
+    if abs(split_total - 1.0) > 1e-9:
+        raise ValueError("TRAIN_SPLIT + VAL_SPLIT + TEST_SPLIT must equal 1")
+    split_key = f"{Config.SPLIT_SEED}:{run_id}".encode("ascii")
+    bucket = int(hashlib.sha256(split_key).hexdigest()[:8], 16) % 10000
+    train_end = int(Config.TRAIN_SPLIT * 10000)
+    val_end = train_end + int(Config.VAL_SPLIT * 10000)
+    if bucket < train_end:
+        return "train"
+    if bucket < val_end:
+        return "val"
+    return "test"
+
+
+def is_reconstructable_run(recon):
+    """Apply structural filters while retaining manually abandoned runs as censored."""
+    if recon.ascension < 15 or recon.floor_reached <= 0:
+        return False
+    if "PrismaticShard" in recon.raw_data.get("relics", []):
+        return False
+    if recon.character not in {"IRONCLAD", "THE_SILENT", "DEFECT", "WATCHER"}:
+        return False
+    if not recon.raw_data.get("character_chosen"):
+        return False
+    deck_size = len(recon.deck)
+    master_size = len(recon.master_deck) if recon.master_deck else 0
+    if master_size and abs(deck_size - master_size) > 10:
+        return False
+    if master_size and deck_size != master_size and recon._has_shop_visit():
+        return False
+    return True
+
+
+def act_target(floor, floor_reached, terminal_known):
+    boundary = 17 if floor <= 16 else 34 if floor <= 33 else 50
+    if floor_reached >= boundary:
+        return 1, True
+    return 0, terminal_known
 
 def process_file(filepath):
     # 处理单个 JSON / JSON.gz 文件
@@ -38,28 +92,22 @@ def process_file(filepath):
                 pass # 如果解析失败，默认保留或跳过？这里选择保留或者根据需求处理
 
         recon = RunReconstructor(event_data)
-        if not recon.validate_run():
+        if not is_reconstructable_run(recon):
             continue
-            
+
+        run_id = stable_run_id(event_data)
+        split = assign_split(run_id)
+        terminal_known = bool(recon.is_victory or recon.killed_by)
         floor_reached = recon.floor_reached
         for snapshot in recon.replay():
             floor = snapshot['floor']
-            
-            # 判断 Label (当前 Act 存活)
-            if floor <= 16:
-                label = 1 if floor_reached > 16 else 0
-            elif floor <= 33:
-                label = 1 if floor_reached > 33 else 0
-            else:
-                label = 1 if floor_reached >= 50 else 0
-            # 应用隐性替换操作
-            if floor > 0:
-                for c in recon._implicit_removals.get(floor, []):
-                    recon._remove_card(c)
-                for c in recon._implicit_additions.get(floor, []):
-                    recon.deck.append(c)
+            label, target_valid = act_target(floor, floor_reached, terminal_known)
 
             snapshot['label'] = label
+            snapshot['target_valid'] = target_valid
+            snapshot['run_id'] = run_id
+            snapshot['split'] = split
+            snapshot['preprocessing_version'] = PREPROCESSING_VERSION
             # Convert list of strings to string representation for parquet compatibility easily
             snapshot['deck'] = ",".join(snapshot['deck'])
             snapshot['relics'] = ",".join(snapshot['relics'])
@@ -132,6 +180,6 @@ if __name__ == "__main__":
     # 获取当前脚本所在目录(src)的上一级目录(selectcard)，这样能自适应本地和Colab环境
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     DATA_DIR = os.path.join(BASE_DIR, "STS Data")
-    OUTPUT_DIR = os.path.join(BASE_DIR, "processed_data")
+    OUTPUT_DIR = os.path.join(BASE_DIR, "processed_data_v2")
     build_dataset(DATA_DIR, OUTPUT_DIR)
 
