@@ -59,11 +59,11 @@ def model_config(vocab_size):
     }
 
 
-def make_dataset(split, vocabulary, normalizer):
+def make_dataset(split, vocabulary, feature_encoder):
     return STSDataset(
         Config.DATA_DIR,
         vocabulary,
-        normalizer,
+        feature_encoder,
         split=split,
         max_seq_len=Config.MAX_SEQ_LEN,
         max_upgrade=Config.MAX_UPGRADE,
@@ -105,9 +105,9 @@ def evaluate(model, loader, criterion, device):
 def train_model():
     set_seed(Config.RANDOM_SEED)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    vocabulary, normalizer = build_training_artifacts(Config.DATA_DIR)
+    vocabulary, feature_encoder = build_training_artifacts(Config.DATA_DIR)
     datasets = {
-        split: make_dataset(split, vocabulary, normalizer)
+        split: make_dataset(split, vocabulary, feature_encoder)
         for split in ("train", "val", "test")
     }
     for split, dataset in datasets.items():
@@ -169,7 +169,7 @@ def train_model():
             best_val_loss = val_metrics["loss"]
             patience_counter = 0
             save_checkpoint(
-                best_path, model, architecture, vocabulary, normalizer, metadata
+                best_path, model, architecture, vocabulary, feature_encoder, metadata
             )
         else:
             patience_counter += 1
@@ -184,11 +184,11 @@ def train_model():
         model,
         architecture,
         vocabulary,
-        normalizer,
+        feature_encoder,
         {"seed": Config.RANDOM_SEED, "test_metrics": test_metrics},
     )
     print(f"Test metrics: {test_metrics}")
-    print(f"Saved v2 checkpoints to {Config.CHECKPOINT_DIR}")
+    print(f"Saved v3 checkpoints to {Config.CHECKPOINT_DIR}")
 
 
 if __name__ == "__main__":

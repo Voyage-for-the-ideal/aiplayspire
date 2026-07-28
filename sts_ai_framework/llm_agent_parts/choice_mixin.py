@@ -230,6 +230,15 @@ class ChoiceMixin:
     def _build_safe_fallback_action(self, state: GameState) -> GameAction:
         """分层回退：选择态优先稳定映射；战斗态先 wait/可执行出牌，最后才 end_turn。"""
         if self._is_choice_state(state):
+            if state.screen_type == "EVENT" and state.event is not None:
+                safe_choice = next(
+                    (choice for choice in state.event.choices
+                     if choice.enabled and choice.action_index is not None
+                     and self._is_safe_event_action_index(state, choice.action_index)),
+                    None,
+                )
+                if safe_choice is not None:
+                    return GameAction(type=ActionType.CHOOSE, choice_index=safe_choice.action_index)
             unified_choices = self._build_unified_choices(state)
             if len(unified_choices) == 1:
                 return unified_choices[0][1]

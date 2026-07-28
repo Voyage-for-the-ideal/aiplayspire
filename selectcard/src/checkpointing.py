@@ -2,39 +2,40 @@ import torch
 
 try:
     from .encoding import PREPROCESSING_VERSION, ItemVocabulary
-    from .dataset import GlobalFeatureNormalizer
+    from .dataset import GlobalFeatureEncoder
 except ImportError:
     from encoding import PREPROCESSING_VERSION, ItemVocabulary
-    from dataset import GlobalFeatureNormalizer
+    from dataset import GlobalFeatureEncoder
 
 
-CHECKPOINT_FORMAT_VERSION = 2
+CHECKPOINT_FORMAT_VERSION = 3
 
 
-def create_checkpoint(model, model_config, vocabulary, normalizer, metadata=None):
+def create_checkpoint(model, model_config, vocabulary, feature_encoder, metadata=None):
     return {
         "format_version": CHECKPOINT_FORMAT_VERSION,
         "preprocessing_version": PREPROCESSING_VERSION,
+        "global_feature_schema_version": feature_encoder.schema_version,
         "model_config": dict(model_config),
         "model_state_dict": model.state_dict(),
         "vocabulary": vocabulary.to_dict(),
-        "normalization": normalizer.to_dict(),
+        "global_feature_encoder": feature_encoder.to_dict(),
         "metadata": dict(metadata or {}),
     }
 
 
-def save_checkpoint(path, model, model_config, vocabulary, normalizer, metadata=None):
+def save_checkpoint(path, model, model_config, vocabulary, feature_encoder, metadata=None):
     torch.save(
-        create_checkpoint(model, model_config, vocabulary, normalizer, metadata), path
+        create_checkpoint(model, model_config, vocabulary, feature_encoder, metadata), path
     )
 
 
 def load_checkpoint(path, map_location="cpu"):
     checkpoint = torch.load(path, map_location=map_location, weights_only=True)
-    if not isinstance(checkpoint, dict) or checkpoint.get("format_version") != 2:
+    if not isinstance(checkpoint, dict) or checkpoint.get("format_version") != 3:
         raise ValueError(
-            "Legacy v1 state_dict checkpoints are incompatible with the v2 model. "
-            "Rebuild processed data and retrain with selectcard/src/train.py."
+            "Legacy v1/v2 checkpoints are incompatible with global features v3. "
+            "Retrain with selectcard/src/train.py; processed_data_v2 can be reused."
         )
     if checkpoint.get("preprocessing_version") != PREPROCESSING_VERSION:
         raise ValueError(
@@ -44,11 +45,20 @@ def load_checkpoint(path, map_location="cpu"):
         "model_config",
         "model_state_dict",
         "vocabulary",
-        "normalization",
+        "global_feature_schema_version",
+        "global_feature_encoder",
     }
     missing = required.difference(checkpoint)
     if missing:
-        raise ValueError(f"Incomplete v2 checkpoint; missing: {sorted(missing)}")
+        raise ValueError(f"Incomplete v3 checkpoint; missing: {sorted(missing)}")
+    if checkpoint["global_feature_schema_version"] != GlobalFeatureEncoder.schema_version:
+        raise ValueError("Checkpoint global feature schema is incompatible")
     vocabulary = ItemVocabulary.from_dict(checkpoint["vocabulary"])
-    normalizer = GlobalFeatureNormalizer.from_dict(checkpoint["normalization"])
-    return checkpoint, vocabulary, normalizer
+    feature_encoder = GlobalFeatureEncoder.from_dict(
+        checkpoint["global_feature_encoder"]
+    )
+    if checkpoint["model_config"].get("num_global_features") != len(
+        feature_encoder.feature_names
+    ):
+        raise ValueError("Checkpoint global feature count is incompatible")
+    return checkpoint, vocabulary, feature_encoder

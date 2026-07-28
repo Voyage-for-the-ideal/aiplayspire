@@ -11,6 +11,8 @@ class ActionMixin:
         if not hasattr(self, "skipped_card_rewards_count"):
             self.skipped_card_rewards_count = 0
 
+        self._sync_pending_event_state(state)
+
         if self.last_screen_type not in ["COMBAT_REWARD", "CARD_REWARD"] and state.screen_type == "COMBAT_REWARD":
             self.skipped_card_rewards_count = 0
 
@@ -25,12 +27,23 @@ class ActionMixin:
         if state.screen_type == "REST":
             return self._handle_rest_room(state)
 
-        # 事件界面交给本地模型处理
-        if state.screen_type == "EVENT" and self.value_engine is not None and getattr(state, "choice_list", None):
-            print(Fore.MAGENTA + "正在使用本地价值网络 (Value Network) 进行事件决策..." + Style.RESET_ALL)
-            action = self._get_model_event_decision(state)
+        # Prefer locale-independent structured event semantics. Text parsing remains
+        # available only for older servers which do not expose state.event.
+        if state.screen_type == "EVENT" and state.event is not None:
+            action = self._get_structured_event_decision(state)
             if action is not None:
                 return action
+            if state.event.semantics_status == "KNOWN" and not any(
+                choice.enabled and choice.action_index is not None for choice in state.event.choices
+            ):
+                return GameAction(type=ActionType.WAIT)
+
+        if state.screen_type == "EVENT" and getattr(state, "choice_list", None):
+            if state.event is None and self.value_engine is not None:
+                print(Fore.MAGENTA + "旧版服务端事件：使用文字解析和本地价值网络..." + Style.RESET_ALL)
+                action = self._get_model_event_decision(state)
+                if action is not None:
+                    return action
 
         # 强制拦截：GRID 界面 — 通用卡牌选择处理 (purge/upgrade/transform/duplicate)
         if state.screen_type == "GRID":
@@ -131,11 +144,28 @@ class ActionMixin:
             # 选择态严格只接受 choose + choice_index
             if self._is_choice_state(state):
                 if action_dict.get("type") == "choose" and isinstance(action_dict.get("choice_index"), int):
-                    mapped_action = self._map_unified_choice_to_action(state, action_dict["choice_index"])
+                    requested_index = action_dict["choice_index"]
+                    event_safe = (
+                        state.screen_type != "EVENT"
+                        or self._is_safe_event_action_index(state, requested_index)
+                    )
+                    mapped_action = self._map_unified_choice_to_action(state, requested_index) if event_safe else None
                     if mapped_action:
+                        if state.screen_type == "EVENT":
+                            self._remember_event_followup(state, requested_index)
                         return mapped_action
 
                 print(Fore.YELLOW + "选择态返回无效动作，回退到 choice_list 的第一个选项。" + Style.RESET_ALL)
+                if state.screen_type == "EVENT" and state.event is not None:
+                    safe_choice = next(
+                        (choice for choice in state.event.choices
+                         if choice.enabled and choice.action_index is not None
+                         and self._is_safe_event_action_index(state, choice.action_index)),
+                        None,
+                    )
+                    if safe_choice is not None:
+                        self._remember_event_followup(state, safe_choice.action_index)
+                        return GameAction(type=ActionType.CHOOSE, choice_index=safe_choice.action_index)
                 unified_choices = self._build_unified_choices(state)
                 if unified_choices:
                     return unified_choices[0][1]
@@ -158,6 +188,27 @@ class ActionMixin:
         except Exception as e:
             print(Fore.RED + f"生成行动时出错: {e}" + Style.RESET_ALL)
             return self._build_safe_fallback_action(state)
+
+    def _sync_pending_event_state(self, state: GameState) -> None:
+        pending = getattr(self, "_pending_event", None)
+        if not pending:
+            return
+        if state.floor != pending.get("floor"):
+            self._pending_event = None
+            self._pending_grid = None
+            return
+        if state.screen_type == "EVENT" and state.event is not None:
+            if state.event.id != pending.get("event_id"):
+                self._pending_event = None
+                self._pending_grid = None
+            return
+        if state.screen_type in ("GRID", "CARD_REWARD", "COMBAT_REWARD"):
+            return
+        if state.room_phase == "COMBAT":
+            return
+        self._pending_event = None
+        if state.screen_type != "GRID":
+            self._pending_grid = None
 
     def _handle_grid_selection(self, state: GameState):
         """Universal GRID card selection handler.

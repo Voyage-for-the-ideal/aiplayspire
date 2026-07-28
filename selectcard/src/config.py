@@ -30,7 +30,7 @@ class Config:
     D_MODEL = 128            # 隐藏层/嵌入层维度
     N_HEADS = 4              # 注意力头数
     N_LAYERS = 3             # 注意力层数
-    NUM_GLOBAL_FEATURES = 4  # floor, hp, gold, ascension
+    NUM_GLOBAL_FEATURES = 9
     DROPOUT = 0.1            # Dropout 比例
     GLOBAL_CONDITIONING = "token"  # "token" or "late_concat"
     NORM_POSITION = "pre"           # "pre" or "post"

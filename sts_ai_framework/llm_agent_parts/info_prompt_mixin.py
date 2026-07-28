@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import json
 from typing import Dict, List, Optional, Set, Tuple
 
 from colorama import Fore, Style
@@ -309,10 +310,27 @@ class InfoPromptMixin:
             unified_choices = self._build_unified_choices(state)
             choices_str = ""
             for i, (choice_text, _) in enumerate(unified_choices):
+                if (state.screen_type == "EVENT" and state.event is not None
+                        and not self._is_safe_event_action_index(state, i)):
+                    continue
                 display_text = self._get_map_choice_display_text(state, i, choice_text)
                 map_summary = self._build_map_choice_summary(state, i, choice_text)
                 if map_summary:
                     choices_str += f"  {i}: {display_text} | 路线摘要: {map_summary}\n"
+                elif state.screen_type == "EVENT" and state.event is not None:
+                    event_choice = next(
+                        (item for item in state.event.choices if item.enabled and item.action_index == i),
+                        None,
+                    )
+                    if event_choice is not None:
+                        semantic = {
+                            "kind": event_choice.kind,
+                            "followup": event_choice.followup,
+                            "outcomes": [outcome.model_dump(exclude_none=True) for outcome in event_choice.outcomes],
+                        }
+                        choices_str += f"  {i}: {display_text} | 结构化效果: {json.dumps(semantic, ensure_ascii=False)}\n"
+                    else:
+                        choices_str += f"  {i}: {display_text}\n"
                 else:
                     choice_info = self._get_choice_card_info(state, choice_text)
                     if choice_info != "未知卡牌效果。":
@@ -324,6 +342,12 @@ class InfoPromptMixin:
 - 可选列表 (Choices):
 {choices_str}
 """
+            if state.screen_type == "EVENT" and state.event is not None:
+                specific_info += (
+                    f"\n- 事件: {state.event.id} ({state.event.class_name})"
+                    f"，阶段: {state.event.phase}，决策类型: {state.event.decision_kind}"
+                    f"，语义状态: {state.event.semantics_status}\n"
+                )
             if state.screen_type == "COMBAT_REWARD":
                 specific_info += "\n- 这是一个战斗奖励界面 (COMBAT_REWARD)。\n"
             if state.screen_type == "MAP":

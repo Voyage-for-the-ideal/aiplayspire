@@ -9,9 +9,11 @@ This is **aiplayspire** — an AI bot for Slay the Spire. Six subsystems work to
 1. **StSCommunicationMod** (Java) — A mod that opens HTTP port 5000 inside the game, exposing `/state`, `/action`, `/card_info`.
 2. **sts_ai_framework** (Python) — The main AI client that polls game state, decides actions via LLM + local value network, and submits them.
 3. **selectcard** (Python) — A deep learning project that trains a Set Transformer survival-value network used by the AI framework for card/relic/event/shop decisions.
-4. **STSStateSaver** (Java) — Game state serialization. Captures full battle state (player, monsters, powers, relics, orbs, actions, select screens) to JSON.
-5. **LudicrousSpeed** (Java) — Fast simulation engine. Replaces normal game action loop with blocking simulation via `Controller` interface. Command system for card plays, potions, screen selects.
-6. **scumthespire** (Java) — Battle AI (BattleAiMod). Server/client architecture — AI server runs headless, client sends battle state, server tree-searches optimal plays via `BattleAiController`.
+4. **STSStateSaver** (Java) — Autofight state layer. Captures and restores full battle state (player, monsters, powers, relics, orbs, actions, RNG, select screens) so battle search can branch and roll back.
+5. **LudicrousSpeed** (Java) — Autofight simulation layer. Replaces the normal animation-driven action loop with a blocking `Controller` loop and JSON-encodable commands for cards, potions, end turn, and battle select screens.
+6. **scumthespire** (Java) — Autofight search and orchestration layer (BattleAiMod). Uses a client/server architecture: the client submits a `SaveState`, the headless server tree-searches command paths via `BattleAiController`, and the client replays the returned path.
+
+For the external-facing architecture of the three autofight modules, see `AUTOFIGHT.md`.
 
 ## Common Commands
 
@@ -43,7 +45,7 @@ cd "D:\Program Files\Slay the Spire"
 jre\bin\java.exe -jar ModTheSpire.jar
 ```
 
-### STSStateSaver, LudicrousSpeed, scumthespire (Java — Battle AI mods)
+### STSStateSaver, LudicrousSpeed, scumthespire (Java — Autofight mods)
 
 These three mods form a pipeline: **STSStateSaver** serializes game state → **LudicrousSpeed** simulates actions fast → **scumthespire** (BattleAiMod) tree-searches optimal plays.
 
@@ -208,6 +210,8 @@ Decision flow: local value network handles CARD_REWARD, SHOP_SCREEN, EVENT, REST
 - **StateFactories** — registry mapping class names to state constructors for deserialization.
 - Monster/power/relic/action states organized by game zone (exordium, city, beyond, ending) and character class (ironclad, silent, defect, watcher).
 - **fastobjects/** — optimized replacement objects that skip logging/rendering for simulation speed.
+- Autofight-specific behavior: records and restores turn-end flags, select-screen state, RNG, cards played, drawn-card tracking, `lesson_learned_count`, `parasite_count`, `grid_card_select_amount`, and `lastCombatMetricKey`.
+- Supports both full JSON state transfer and `diffEncode()` state snapshots for command replay validation.
 
 ### LudicrousSpeed — Command Pattern
 
@@ -216,6 +220,8 @@ Decision flow: local value network handles CARD_REWARD, SHOP_SCREEN, EVENT, REST
 - **ActionSimulator.actionLoop()** — blocking loop that replaces `GameActionManager.update()`. Runs controller steps.
 - **Controller** (interface) — `step()` called each frame while game waits for input; `isDone()` exits the simulation loop.
 - Patches in `simulator/patches/` override game behavior for speed.
+- Command enumeration covers combat cards, potions, end turn, hand select, grid select, and card-reward selection. It also deduplicates repeated command encodings to reduce search noise.
+- Command execution can validate expected `SaveState.diffEncode()` snapshots before mutating the client state; mismatches request a simulator restart instead of continuing down a divergent path.
 
 ### scumthespire (BattleAiMod) — AI Tree Search
 
@@ -224,9 +230,14 @@ Decision flow: local value network handles CARD_REWARD, SHOP_SCREEN, EVENT, REST
 - **StateNode** — a single state snapshot after one command.
 - **ValueFunctions** — scores game states to guide search.
 - Character-specific card play heuristics: IronCladPlayOrder, DefectPlayOrder, SilentPlayOrder.
+- Search uses `SaveState.loadState()` to branch from prior nodes and `LudicrousSpeed` commands to advance each branch.
+- `CommandRunnerController` can receive improved paths while the client is executing and verifies that the replacement path shares the already-consumed command prefix.
+- Optional `FightPredictor` integration reports predicted combat damage when the mod is present; it is not a hard dependency.
 
 ### Networking (scumthespire)
 
 - **AiServer** (port 5125) — runs on headless game instance. Receives JSON run requests, runs BattleAiController, streams progress updates, returns command list.
 - **AiClient** — runs on player's game instance. Serializes current state, sends to server, receives command list, executes via CommandRunnerController.
 - Wire format: JSON with `type`, `commands`, `message` fields. `state` field uses diff encoding (`diffEncode()`) to pass state along command chain.
+- Client requests include absolute start-state and command-file paths plus `client_cwd`, because client and server instances can run with different working directories.
+- Client/server networking uses explicit timeouts and cleanup paths for parse failures, socket disconnects, and stale controllers.

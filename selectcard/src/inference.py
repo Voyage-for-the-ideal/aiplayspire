@@ -3,7 +3,7 @@ import copy
 from src.model import STSValueNetwork
 from src.checkpointing import load_checkpoint
 from src.encoding import ItemVocabulary, encode_items
-from src.dataset import GlobalFeatureNormalizer
+from src.dataset import GlobalFeatureEncoder
 from src.config import Config
 import re
 
@@ -33,15 +33,15 @@ class InferenceTokenizer:
 class STSInferenceEngine:
     def __init__(self, model_path=None, vocab_path=None):
         if vocab_path is not None:
-            raise ValueError("v2 checkpoints embed the vocabulary; vocab_path is no longer used")
+            raise ValueError("v3 checkpoints embed the vocabulary; vocab_path is no longer used")
         if model_path:
-            checkpoint, vocabulary, self.normalizer = load_checkpoint(model_path)
+            checkpoint, vocabulary, self.feature_encoder = load_checkpoint(model_path)
             architecture = checkpoint["model_config"]
             self.model = STSValueNetwork(**architecture)
             self.model.load_state_dict(checkpoint["model_state_dict"])
         else:
             vocabulary = ItemVocabulary().freeze()
-            self.normalizer = GlobalFeatureNormalizer()
+            self.feature_encoder = GlobalFeatureEncoder()
             architecture = {
                 "vocab_size": len(vocabulary),
                 "max_upgrade": Config.MAX_UPGRADE,
@@ -64,7 +64,7 @@ class STSInferenceEngine:
         self.model.eval()
 
     def _global_features(self, state):
-        values = self.normalizer.transform_state(state)
+        values = self.feature_encoder.transform_state(state)
         return torch.tensor([values], dtype=torch.float32)
         
     def evaluate_state(self, state):
@@ -150,6 +150,8 @@ class STSInferenceEngine:
                     new_state["gold"] += effect["amount"]
                 elif e_type == "lose_gold":
                     new_state["gold"] = max(0, new_state["gold"] - effect["amount"])
+                elif e_type == "lose_all_gold":
+                    new_state["gold"] = 0
                 elif e_type == "remove_card":
                     card_id = effect.get("card_id")
                     if card_id and card_id in new_state["deck"]:
@@ -198,15 +200,46 @@ class STSInferenceEngine:
                             new_state["deck"].append("Searing Blow+1")
                         elif not target_card.endswith("+1"):
                             new_state["deck"].append(target_card + "+1")
-                        else:
-                            new_state["deck"].append(target_card)
+                    else:
+                        new_state["deck"].append(target_card)
+                elif e_type == "duplicate":
+                    target_card = effect.get("card_id")
+                    amount = effect.get("amount", 1)
+                    if target_card and target_card in new_state["deck"]:
+                        new_state["deck"].extend([target_card] * amount)
                 elif e_type == "obtain_relic":
                     new_state["relics"].append(effect["relic_id"])
+                elif e_type == "lose_relic":
+                    relic_id = effect.get("relic_id")
+                    if relic_id in new_state["relics"]:
+                        new_state["relics"].remove(relic_id)
                 elif e_type == "add_card":
                     card_id = effect.get("card_id")
                     if _should_block_curse_add(card_id):
                         continue
-                    new_state["deck"].append(card_id)
+                    new_state["deck"].extend([card_id] * effect.get("amount", 1))
+                elif e_type == "remove_curses":
+                    exact_ids = set(effect.get("card_ids", []))
+                    if exact_ids:
+                        new_state["deck"] = [card for card in new_state["deck"] if card not in exact_ids]
+                        continue
+                    curse_names = {
+                        "Regret", "Pain", "Normality", "Doubt", "Shame", "Clumsy",
+                        "Injury", "Writhe", "Decay", "Parasite", "Pride",
+                    }
+                    excluded = set(effect.get("exclude_ids", []))
+                    new_state["deck"] = [card for card in new_state["deck"] if card not in curse_names or card in excluded]
+                elif e_type == "full_heal":
+                    new_state["hp"] = new_state["max_hp"]
+                elif e_type == "upgrade_all_cards":
+                    new_state["deck"] = [card if "+" in card else card + "+1" for card in new_state["deck"]]
+                elif e_type == "upgrade_matching":
+                    starters = {"Strike_R", "Strike_G", "Strike_B", "Strike_P", "Strike", "Defend_R", "Defend_G", "Defend_B", "Defend_P", "Defend"}
+                    new_state["deck"] = [card + "+1" if card in starters else card for card in new_state["deck"]]
+                elif e_type == "replace_starter_strikes":
+                    starters = {"Strike_R", "Strike_G", "Strike_B", "Strike_P", "Strike"}
+                    new_state["deck"] = [card for card in new_state["deck"] if card not in starters]
+                    new_state["deck"].extend([effect.get("card_id", "Bite")] * effect.get("amount", 5))
         elif action == "pick_card" and target:
             new_state["deck"].append(target)
         elif action == "buy_card" and target:
@@ -272,6 +305,8 @@ class STSInferenceEngine:
                         needs_purge_eval = True
                     if ef.get("type") == "upgrade_card" and (not ef.get("card_id") or ef.get("card_id") == "unknown_card"):
                         needs_upgrade_eval = True
+                    if ef.get("type") == "duplicate" and (not ef.get("card_id") or ef.get("card_id") == "unknown_card"):
+                        needs_duplicate_eval = True
             elif choice.get("action") == "remove_card" and not choice.get("target"):
                 needs_purge_eval = True
             elif choice.get("action") == "upgrade_card" and not choice.get("target"):
@@ -366,7 +401,12 @@ class STSInferenceEngine:
                 else:
                     for card in unique_cards:
                         mod_choice = copy.deepcopy(choice)
-                        mod_choice["target"] = card
+                        if mod_choice.get("action") == "composite_event":
+                            for ef in mod_choice.get("effects", []):
+                                if ef.get("type") == "duplicate" and (not ef.get("card_id") or ef.get("card_id") == "unknown_card"):
+                                    ef["card_id"] = card
+                        else:
+                            mod_choice["target"] = card
 
                         hypo_state = self._apply_choice(current_state, mod_choice)
                         score = self.evaluate_state(hypo_state)

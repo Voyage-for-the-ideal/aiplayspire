@@ -272,6 +272,302 @@ class DecisionMixin:
 
         return None
 
+    def _event_current_state(self, state: GameState) -> dict:
+        return {
+            "hp": state.player.current_hp,
+            "max_hp": state.player.max_hp,
+            "gold": state.player.gold,
+            "floor": state.floor,
+            "ascension": 20,
+            "deck": [card.id for card in state.deck],
+            "relics": [relic.id for relic in state.relics],
+            "relic_states": self._build_relic_state_payload(state),
+        }
+
+    def _event_choice_effects(self, choice) -> list:
+        """Flatten a deterministic event outcome into inference effects."""
+        if len(choice.outcomes) != 1:
+            return []
+        outcome = choice.outcomes[0]
+        if outcome.probability not in (None, 1, 1.0):
+            return []
+
+        effects = []
+        for model in outcome.effects:
+            effect = model.model_dump(exclude_none=True)
+            if effect["type"] == "select_cards":
+                purpose = effect.get("purpose", "").lower()
+                count = effect.get("count", 1)
+                if purpose in ("purge", "transform"):
+                    effects.append({"type": "remove_card", "card_id": "unknown_card", "amount": count})
+                elif purpose == "upgrade":
+                    effects.append({"type": "upgrade_card", "card_id": "unknown_card", "amount": count})
+                elif purpose == "duplicate":
+                    effects.append({"type": "duplicate", "card_id": "unknown_card", "amount": count})
+                else:
+                    return []
+            else:
+                effects.append(effect)
+        return effects
+
+    def _effects_supported_by_value_model(self, effects: list) -> bool:
+        supported = {
+            "lose_hp", "gain_hp", "lose_max_hp", "gain_max_hp",
+            "gain_gold", "lose_gold", "lose_all_gold", "remove_card",
+            "remove_curses", "upgrade_card", "upgrade_matching",
+            "upgrade_all_cards", "duplicate", "add_card", "obtain_relic",
+            "lose_relic", "full_heal", "replace_starter_strikes",
+        }
+        return all(effect.get("type") in supported for effect in effects)
+
+    def _remember_event_followup(self, state: GameState, action_index: int, best: Optional[dict] = None) -> None:
+        event = getattr(state, "event", None)
+        if event is None:
+            return
+        choice = next(
+            (item for item in event.choices if item.enabled and item.action_index == action_index),
+            None,
+        )
+        if choice is None:
+            return
+
+        pending = {
+            "event_id": event.id,
+            "phase": event.phase,
+            "followup": choice.followup,
+            "floor": state.floor,
+        }
+        self._pending_event = pending
+
+        select_effect = None
+        if len(choice.outcomes) == 1:
+            select_effect = next(
+                (effect for effect in choice.outcomes[0].effects if effect.type == "select_cards"),
+                None,
+            )
+        if select_effect is None:
+            return
+
+        purpose = (select_effect.purpose or "").lower()
+        target_ids = []
+        best = best or {}
+        for key in ("_purge_intent_id", "_smith_intent_id", "_duplicate_intent_id"):
+            if best.get(key):
+                target_ids.append(best[key])
+        requested_count = select_effect.count or 1
+        if self.value_engine is not None and len(target_ids) < requested_count:
+            if event.class_name == "Bonfire":
+                target_ids = self._rank_bonfire_targets(state)
+                purpose = "purge"
+            elif purpose in ("purge", "transform", "upgrade", "duplicate"):
+                excluded = None
+                if purpose == "transform":
+                    excluded = {card.id for card in state.deck if card.type == "CURSE"}
+                target_ids = self.value_engine.rank_cards_for_purpose(
+                    self._event_current_state(state), purpose, requested_count, exclude_ids=excluded
+                )
+        self._pending_grid = {
+            "event_id": event.id,
+            "event_phase": event.phase,
+            "purpose": purpose,
+            "target_ids": target_ids,
+            "num_to_select": requested_count,
+            "selected_count": 0,
+        }
+
+    def _rank_bonfire_targets(self, state: GameState) -> list:
+        """Score the exact rarity-dependent Bonfire reward for each legal card."""
+        best_card = None
+        best_score = float("-inf")
+        current = self._event_current_state(state)
+        for card in state.deck:
+            if card.is_bottled:
+                continue
+            effects = [{"type": "remove_card", "card_id": card.id}]
+            rarity = card.rarity.upper()
+            if rarity == "CURSE":
+                relic_id = "Circlet" if "Spirit Poop" in current["relics"] else "Spirit Poop"
+                effects.append({"type": "obtain_relic", "relic_id": relic_id})
+            elif rarity in ("COMMON", "SPECIAL"):
+                effects.append({"type": "gain_hp", "amount": 5})
+            elif rarity == "UNCOMMON":
+                effects.append({"type": "full_heal"})
+            elif rarity == "RARE":
+                effects.extend([{"type": "gain_max_hp", "amount": 10}, {"type": "full_heal"}])
+            hypothetical = self.value_engine._apply_choice(
+                current, {"action": "composite_event", "effects": effects}
+            )
+            score = self.value_engine.evaluate_state(hypothetical)
+            if score > best_score:
+                best_score = score
+                best_card = card.id
+        return [best_card] if best_card else []
+
+    def _choice_guaranteed_hp_loss(self, choice) -> Optional[int]:
+        if len(choice.outcomes) != 1 or choice.outcomes[0].probability not in (None, 1, 1.0):
+            return None
+        return sum(
+            effect.amount or 0
+            for effect in choice.outcomes[0].effects
+            if effect.type == "lose_hp"
+        )
+
+    def _get_safe_complex_event_rule(self, state: GameState) -> Optional[GameAction]:
+        enabled = [choice for choice in state.event.choices if choice.enabled and choice.action_index is not None]
+        if len(enabled) < 2:
+            return None
+
+        safe = []
+        for choice in enabled:
+            hp_loss = self._choice_guaranteed_hp_loss(choice)
+            if hp_loss is None or hp_loss < state.player.current_hp:
+                safe.append(choice)
+        if len(safe) == 1:
+            choice = safe[0]
+            self._remember_event_followup(state, choice.action_index)
+            return GameAction(type=ActionType.CHOOSE, choice_index=choice.action_index)
+
+        # A deterministic, cost-free positive effect strictly dominates a no-op.
+        no_op = [item for item in safe if len(item.outcomes) == 1 and not item.outcomes[0].effects]
+        positive = []
+        for item in safe:
+            if len(item.outcomes) != 1 or item.outcomes[0].probability not in (None, 1, 1.0):
+                continue
+            effects = item.outcomes[0].effects
+            effect_types = {effect.type for effect in effects}
+            strictly_positive = any(
+                (effect.type == "gain_hp" and (effect.amount or 0) > 0
+                 and state.player.current_hp < state.player.max_hp)
+                or (effect.type in ("gain_max_hp", "gain_gold") and (effect.amount or 0) > 0)
+                or (effect.type == "remove_curses" and bool(effect.card_ids))
+                for effect in effects
+            )
+            if strictly_positive and effect_types.issubset(
+                {"gain_hp", "gain_max_hp", "gain_gold", "remove_curses"}
+            ):
+                positive.append(item)
+        if no_op and len(positive) == 1:
+            choice = positive[0]
+            self._remember_event_followup(state, choice.action_index)
+            return GameAction(type=ActionType.CHOOSE, choice_index=choice.action_index)
+        return None
+
+    def _is_safe_event_action_index(self, state: GameState, action_index: int) -> bool:
+        event = getattr(state, "event", None)
+        if event is None:
+            return True
+        choice = next(
+            (item for item in event.choices
+             if item.enabled and item.action_index == action_index),
+            None,
+        )
+        if choice is None:
+            return False
+        hp_loss = self._choice_guaranteed_hp_loss(choice)
+        return hp_loss is None or hp_loss < state.player.current_hp
+
+    def _get_structured_event_decision(self, state: GameState) -> Optional[GameAction]:
+        event = getattr(state, "event", None)
+        if event is None or event.semantics_status != "KNOWN":
+            return None
+
+        if event.class_name == "GremlinMatchGame" and event.phase == "PLAY":
+            return self._get_match_game_decision(state)
+
+        enabled = [choice for choice in event.choices if choice.enabled and choice.action_index is not None]
+        if event.decision_kind == "FORCED" and len(enabled) == 1:
+            choice = enabled[0]
+            self._remember_event_followup(state, choice.action_index)
+            return GameAction(type=ActionType.CHOOSE, choice_index=choice.action_index)
+
+        if event.decision_kind == "DETERMINISTIC" and self.value_engine is not None:
+            candidates = []
+            for choice in enabled:
+                hp_loss = self._choice_guaranteed_hp_loss(choice)
+                if hp_loss is not None and hp_loss >= state.player.current_hp:
+                    continue
+                effects = self._event_choice_effects(choice)
+                if not self._effects_supported_by_value_model(effects):
+                    return None
+                candidate = {
+                    "action": "composite_event",
+                    "effects": effects,
+                    "index": choice.action_index,
+                    "raw_text": choice.label,
+                }
+                for effect in choice.outcomes[0].effects if choice.outcomes else []:
+                    if effect.type == "select_cards" and (effect.purpose or "").lower() == "transform":
+                        candidate["_is_transform"] = True
+                candidates.append(candidate)
+
+            if candidates:
+                curse_ids = {card.id for card in state.deck if card.type == "CURSE"}
+                best = self.value_engine.recommend_choice(
+                    self._event_current_state(state),
+                    candidates,
+                    exclude_purge_ids=curse_ids,
+                )
+                if best is not None:
+                    action_index = best["index"]
+                    self._store_grid_intent_from_choice(best, state)
+                    self._remember_event_followup(state, action_index, best)
+                    return GameAction(type=ActionType.CHOOSE, choice_index=action_index)
+
+        if event.decision_kind == "COMPLEX":
+            return self._get_safe_complex_event_rule(state)
+        return None
+
+    def _get_match_game_decision(self, state: GameState) -> GameAction:
+        event = state.event
+        memory_key = (state.floor, event.id)
+        if getattr(self, "_match_game_memory_key", None) != memory_key:
+            self._match_game_memory_key = memory_key
+            self._match_game_memory = {}
+        memory = self._match_game_memory
+
+        enabled = []
+        visible = []
+        for choice in event.choices:
+            effect = next(
+                (item for outcome in choice.outcomes for item in outcome.effects
+                 if item.type == "reveal_match_card"),
+                None,
+            )
+            if effect is None or effect.slot is None:
+                continue
+            if effect.revealed_card_id:
+                memory[effect.slot] = effect.revealed_card_id
+                visible.append((effect.slot, effect.revealed_card_id))
+            if choice.enabled and choice.action_index is not None:
+                enabled.append((effect.slot, choice.action_index))
+
+        if not enabled:
+            return GameAction(type=ActionType.WAIT)
+
+        enabled_by_slot = dict(enabled)
+        if visible:
+            open_slot, open_card = visible[0]
+            matching_slots = [
+                slot for slot, card_id in memory.items()
+                if slot != open_slot and card_id == open_card and slot in enabled_by_slot
+            ]
+            if matching_slots:
+                return GameAction(type=ActionType.CHOOSE,
+                                  choice_index=enabled_by_slot[min(matching_slots)])
+
+        by_card = {}
+        for slot, action_index in enabled:
+            card_id = memory.get(slot)
+            if card_id is not None:
+                by_card.setdefault(card_id, []).append((slot, action_index))
+        known_pair = next((pairs for pairs in by_card.values() if len(pairs) >= 2), None)
+        if known_pair:
+            return GameAction(type=ActionType.CHOOSE, choice_index=min(known_pair)[1])
+
+        unknown = [(slot, action_index) for slot, action_index in enabled if slot not in memory]
+        target = min(unknown or enabled)
+        return GameAction(type=ActionType.CHOOSE, choice_index=target[1])
+
     def _get_model_event_decision(self, state: GameState) -> Optional[GameAction]:
         current_state = {
             "hp": state.player.current_hp,

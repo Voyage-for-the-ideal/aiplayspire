@@ -87,24 +87,25 @@ class RunReconstructor:
                     break
                     
             if matched_missing:
-                # ====== 核心修复：根据遗物或场景，计算确切的升级楼层 ======
-                # 情况 A: 蛋类遗物效应 (获得卡牌时自动升级)
-                # 这类升级应该在获取卡牌时处理，这里我们将它们记录到“获得该基础牌的楼层”
-                # 但更简单的方法是：如果玩家在此时（全回放后）拥有对应的蛋，那么每一张被记录在此时的
-                # 升级差异都可以追溯到该牌被获得的时刻。
-                
-                # 情况 B: 战纹涂料 (War Paint) / 磨刀石 (Whetstone)
-                # 这种是一次性的，我们需要定位玩家获得该遗物的楼层。
-                relic_upgraders = {'War Paint', 'Whetstone'}
-                found_relic_floor = -1
-                for item in self.raw_data.get('relics_obtained', []):
-                    if item.get('key') in relic_upgraders:
-                        # 如果升级的是基础攻击/防御，大概率是这类遗物干的
-                        if self._is_starter_card(base_ex):
-                            found_relic_floor = item.get('floor', 0)
-                            break
-                
-                up_floor = found_relic_floor if found_relic_floor != -1 else self.floor_reached
+                # ====== 根据遗物或场景，计算确切的升级楼层 ======
+                # 蛋类遗物(Molten/Frozen/Toxic Egg): 升级在卡牌获得时发生，
+                # master_deck 中的卡名已经是升级版(如 Strike_R+)，不会造成隐性差异
+
+                # War Paint / Whetstone: 获得时随机升级2张，事件日志不记录具体哪张，
+                # 必须按卡牌类型匹配正确遗物的获取楼层
+                relic_floors_map = self._get_relic_upgrader_floors()
+                up_floor = self.floor_reached
+
+                is_attack = self._is_attack_card(base_ex)
+                if is_attack is True:
+                    candidates = relic_floors_map.get('ATTACK', [])
+                elif is_attack is False:
+                    candidates = relic_floors_map.get('SKILL', [])
+                else:
+                    candidates = relic_floors_map.get('SKILL', []) or relic_floors_map.get('ATTACK', [])
+
+                if candidates:
+                    up_floor = candidates[0]
                 
                 # 记录这种隐性变动
                 self._implicit_removals[up_floor].append(c_excess)
@@ -202,6 +203,46 @@ class RunReconstructor:
         base_name, _ = self._split_upgrade_level(card_name)
         return base_name.startswith('Strike') or base_name.startswith('Defend')
 
+    def _is_attack_card(self, card_name: str):
+        """基于卡名启发式判断是否为攻击牌。返回 True/False/None(无法判定)。"""
+        base, _ = self._split_upgrade_level(card_name)
+        if base in {'Bash', 'Neutralize', 'Eruption', 'Zap', 'Dualcast'}:
+            return True
+        if base in {'Survivor', 'Vigilance'}:
+            return False
+        if base.startswith('Strike'):
+            return True
+        if base.startswith('Defend'):
+            return False
+        return None
+
+    def _get_relic_upgrader_floors(self):
+        """返回 {'ATTACK': [floors], 'SKILL': [floors]}，记录 War Paint/Whetstone 在各楼层的获取。"""
+        result = {'ATTACK': [], 'SKILL': []}
+        for item in self.raw_data.get('relics_obtained', []):
+            key = item.get('key', '')
+            floor = item.get('floor', 0)
+            if key == 'Whetstone':
+                result['ATTACK'].append(floor)
+            elif key == 'War Paint':
+                result['SKILL'].append(floor)
+        for r in self.raw_data.get('relics', []):
+            if r == 'Whetstone':
+                already = any(it.get('key') == 'Whetstone' for it in self.raw_data.get('relics_obtained', []))
+                if not already:
+                    result['ATTACK'].append(0)
+            elif r == 'War Paint':
+                already = any(it.get('key') == 'War Paint' for it in self.raw_data.get('relics_obtained', []))
+                if not already:
+                    result['SKILL'].append(0)
+        for br in self.raw_data.get('boss_relics', []):
+            picked = br.get('picked', '')
+            if picked == 'War Paint':
+                result['SKILL'].append(0)
+            elif picked == 'Whetstone':
+                result['ATTACK'].append(0)
+        return result
+
     def _add_relic(self, relic):
         if relic and relic not in self.relics:
             self.relics.append(relic)
@@ -212,35 +253,16 @@ class RunReconstructor:
                     self.omamori_charges -= 1
                 else:
                     self.deck.append('CurseOfTheBell')
-            elif relic == 'War Paint':
-                # 随机升级 2 张技能牌
-                self._handle_random_relic_upgrade(target_type='SKILL', count=2)
-            elif relic == 'Whetstone':
-                # 随机升级 2 张攻击牌
-                self._handle_random_relic_upgrade(target_type='ATTACK', count=2)
+            # War Paint / Whetstone 的随机升级由 _reconcile_all_diffs Phase 1 全权处理
+            # 因为升级目标由 miscRng 随机决定，无法在干跑中预测，只能靠对账 master_deck 反推
 
     def _handle_random_relic_upgrade(self, target_type, count):
         """
-        处理战纹涂料（War Paint）或磨刀石（Whetstone）的隐性升级。
-        由于是随机升级，具体升级了哪两张牌，我们必须与 master_deck 的终态进行交叉验证。
+        War Paint (SKILL) / Whetstone (ATTACK) 的升级由 _reconcile_all_diffs Phase 1 处理。
+        原因：这两个遗物在 onEquip 时用 AbstractDungeon.miscRng 随机选牌，
+        事件日志中不记录具体升级了哪张，只能通过比对 dry-run 结果和 master_deck 反推。
+        此方法保留仅为文档说明，不在运行时执行任何操作。
         """
-        # 我们不能真正“随机”选择，必须找到 master_deck 中哪些牌被升级了，
-        # 且这些牌目前在我们的 deck 中还是基础形态。
-        potential_upgrades = []
-        
-        sim_cnt = collections.Counter(self.deck)
-        master_cnt = collections.Counter(self.master_deck)
-        
-        # 找出 master_deck 里是升级版，但此时 deck 里还是基础版的牌（且符合类型要求）
-        # 这里的 diff 记录的是最终差值。如果一张牌被 War Paint 升级了，
-        # 那么它在此时（获取遗物那一层）的基础形态就会少一张，升级形态就会多一张。
-        
-        # 虽然我们不知道具体的卡牌类型（因为没有外部库），
-        # 但我们可以通过“此时基础牌在 excess 中，升级牌在 missing 中”来锁定此时最合理的升级目标。
-        
-        # 获取当前的差分对账结果（基于最终卡组）
-        # 注意：这需要 _reconcile_all_diffs 已经运行过，并且我们将一些升级记录到了 _implicit 列表
-        pass
 
     def _is_starter_card(self, card_name: str) -> bool:
         base_name, _ = self._split_upgrade_level(card_name)

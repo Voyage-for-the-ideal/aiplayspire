@@ -54,6 +54,10 @@ def _is_action_effective(prev_state, next_state, action) -> bool:
         return True
     if next_state.choice_list != prev_state.choice_list:
         return True
+    prev_event = getattr(prev_state, "event", None)
+    next_event = getattr(next_state, "event", None)
+    if prev_event != next_event:
+        return True
     if next_state.can_proceed != prev_state.can_proceed or next_state.can_cancel != prev_state.can_cancel:
         return True
     if next_state.floor != prev_state.floor or next_state.room_phase != prev_state.room_phase:

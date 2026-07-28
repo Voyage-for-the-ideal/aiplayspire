@@ -1,5 +1,5 @@
 from typing import List, Optional, Dict, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from enum import Enum
 
 
@@ -14,6 +14,10 @@ class Card(BaseModel):
     target: str = "UNKNOWN"
     is_playable: bool = True
     description: Optional[str] = None
+    rarity: str = "UNKNOWN"
+    upgrades: int = 0
+    is_bottled: bool = False
+    can_upgrade: bool = True
 
 class PlayerState(BaseModel):
     current_hp: int
@@ -91,6 +95,60 @@ class MapPositionState(BaseModel):
     symbol: str = "?"
     human_label: str = ""
 
+
+class EventEffect(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: str
+    amount: Optional[int] = None
+    count: Optional[int] = None
+    card_id: Optional[str] = None
+    card_ids: List[str] = Field(default_factory=list)
+    relic_id: Optional[str] = None
+    purpose: Optional[str] = None
+    pool: Optional[str] = None
+    encounter: Optional[str] = None
+    id: Optional[str] = None
+    result: Optional[str] = None
+    percent: Optional[int] = None
+    min: Optional[int] = None
+    max: Optional[int] = None
+    pattern: Optional[str] = None
+    exclude_ids: List[str] = Field(default_factory=list)
+    unavoidable_hp_loss: Optional[int] = None
+    slot: Optional[int] = None
+    revealed_card_id: Optional[str] = None
+
+
+class EventOutcome(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    probability: Optional[float] = None
+    effects: List[EventEffect] = Field(default_factory=list)
+
+
+class EventChoiceState(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    button_index: int
+    action_index: Optional[int] = None
+    enabled: bool
+    label: str
+    kind: str = "UNKNOWN"
+    outcomes: List[EventOutcome] = Field(default_factory=list)
+    followup: str = "NONE"
+
+
+class EventState(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    class_name: str
+    phase: str
+    semantics_status: str
+    decision_kind: str
+    choices: List[EventChoiceState] = Field(default_factory=list)
+
 class GameState(BaseModel):
     player: PlayerState
     deck: List[Card] = []
@@ -123,6 +181,7 @@ class GameState(BaseModel):
     grid_num_cards: int = 1
     grid_purpose: str = ""
     is_end_turn_button_enabled: bool = False
+    event: Optional[EventState] = None
 
 class ActionType(str, Enum):
     PLAY = "play"

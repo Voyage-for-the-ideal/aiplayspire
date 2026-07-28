@@ -1,5 +1,6 @@
 import bisect
 import glob
+import math
 import os
 from functools import lru_cache
 
@@ -21,64 +22,138 @@ REQUIRED_V2_COLUMNS = {
 }
 
 
-class GlobalFeatureNormalizer:
-    feature_names = ("floor", "hp", "gold", "ascension")
+class GlobalFeatureEncoder:
+    schema_version = "global-features-v3"
+    quantile = 0.995
+    source_feature_names = ("floor", "hp", "max_hp", "gold", "ascension")
+    feature_names = (
+        "act_1",
+        "act_2",
+        "act_3_plus",
+        "act_progress",
+        "hp_ratio",
+        "hp_absolute",
+        "max_hp_absolute",
+        "gold_log",
+        "ascension",
+    )
 
-    def __init__(self, means=None, stds=None):
-        self.means = dict(means or {name: 0.0 for name in self.feature_names})
-        self.stds = dict(stds or {name: 1.0 for name in self.feature_names})
+    def __init__(self, hp_q995=1.0, max_hp_q995=1.0, gold_q995=1.0):
+        self.caps = {
+            "hp_q995": self._positive_finite(hp_q995, "hp_q995"),
+            "max_hp_q995": self._positive_finite(max_hp_q995, "max_hp_q995"),
+            "gold_q995": self._positive_finite(gold_q995, "gold_q995"),
+        }
+
+    @staticmethod
+    def _positive_finite(value, name):
+        value = float(value)
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError(f"{name} must be finite and greater than zero")
+        return value
 
     @classmethod
     def fit(cls, frames):
-        sums = {name: 0.0 for name in cls.feature_names}
-        square_sums = {name: 0.0 for name in cls.feature_names}
-        count = 0
+        values = {name: [] for name in ("hp", "max_hp", "gold")}
         for frame in frames:
             if frame.empty:
                 continue
-            values = []
-            for name in cls.feature_names:
-                series = pd.to_numeric(frame[name], errors="coerce").fillna(0.0)
-                values.append(torch.tensor(series.to_numpy(), dtype=torch.float64))
-            stacked = torch.stack(values, dim=1)
-            for index, name in enumerate(cls.feature_names):
-                sums[name] += stacked[:, index].sum().item()
-                square_sums[name] += stacked[:, index].square().sum().item()
-            count += len(frame)
-        if count == 0:
-            raise ValueError("Cannot fit normalization without training samples")
+            for name in values:
+                series = pd.to_numeric(frame[name], errors="raise").astype("float64")
+                if not series.map(math.isfinite).all():
+                    raise ValueError(f"Training feature {name} contains non-finite values")
+                if (series < 0.0).any() or (name == "max_hp" and (series <= 0.0).any()):
+                    raise ValueError(f"Training feature {name} contains invalid values")
+                values[name].append(series)
+        if not values["hp"]:
+            raise ValueError("Cannot fit global features without training samples")
 
-        means = {name: sums[name] / count for name in cls.feature_names}
-        stds = {}
-        for name in cls.feature_names:
-            variance = max(square_sums[name] / count - means[name] ** 2, 1e-8)
-            stds[name] = variance**0.5
-        return cls(means=means, stds=stds)
+        caps = {}
+        for name, series_parts in values.items():
+            series = pd.concat(series_parts, ignore_index=True)
+            caps[f"{name}_q995"] = max(
+                float(series.quantile(cls.quantile, interpolation="linear")), 1.0
+            )
+        return cls(**caps)
+
+    @staticmethod
+    def _clamp(value, lower=0.0, upper=1.0):
+        return min(max(value, lower), upper)
+
+    @staticmethod
+    def _state_value(state, name):
+        try:
+            value = float(state[name])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"Global feature {name} is missing or invalid") from exc
+        if not math.isfinite(value):
+            raise ValueError(f"Global feature {name} must be finite")
+        return value
+
+    def _transform(self, state):
+        floor = self._state_value(state, "floor")
+        hp = self._state_value(state, "hp")
+        max_hp = self._state_value(state, "max_hp")
+        gold = self._state_value(state, "gold")
+        ascension = self._state_value(state, "ascension")
+        if floor < 0.0 or hp < 0.0 or gold < 0.0:
+            raise ValueError("floor, hp, and gold must be non-negative")
+        if max_hp <= 0.0:
+            raise ValueError("max_hp must be greater than zero")
+
+        if floor <= 16.0:
+            act = (1.0, 0.0, 0.0)
+            act_progress = self._clamp(floor / 16.0)
+        elif floor <= 33.0:
+            act = (0.0, 1.0, 0.0)
+            act_progress = self._clamp((floor - 17.0) / 16.0)
+        else:
+            act = (0.0, 0.0, 1.0)
+            act_progress = self._clamp((floor - 34.0) / 16.0)
+
+        return [
+            *act,
+            act_progress,
+            self._clamp(hp / max_hp),
+            self._clamp(hp / self.caps["hp_q995"]),
+            self._clamp(max_hp / self.caps["max_hp_q995"]),
+            self._clamp(
+                math.log1p(gold) / math.log1p(self.caps["gold_q995"])
+            ),
+            self._clamp((ascension - 15.0) / 5.0),
+        ]
 
     def transform_row(self, row):
-        return [
-            (float(row.get(name, 0.0)) - self.means[name]) / self.stds[name]
-            for name in self.feature_names
-        ]
+        return self._transform(row)
 
     def transform_state(self, state):
-        return [
-            (float(state.get(name, 0.0)) - self.means[name]) / self.stds[name]
-            for name in self.feature_names
-        ]
+        return self._transform(state)
 
     def to_dict(self):
         return {
+            "schema_version": self.schema_version,
+            "quantile": self.quantile,
             "feature_names": list(self.feature_names),
-            "means": self.means,
-            "stds": self.stds,
+            "caps": dict(self.caps),
         }
 
     @classmethod
     def from_dict(cls, value):
+        if not isinstance(value, dict):
+            raise ValueError("Checkpoint global feature encoder is invalid")
+        if value.get("schema_version") != cls.schema_version:
+            raise ValueError("Checkpoint global feature schema is incompatible")
+        if value.get("quantile") != cls.quantile:
+            raise ValueError("Checkpoint global feature quantile is incompatible")
         if tuple(value.get("feature_names", ())) != cls.feature_names:
             raise ValueError("Checkpoint global feature order is incompatible")
-        return cls(means=value["means"], stds=value["stds"])
+        expected_caps = {"hp_q995", "max_hp_q995", "gold_q995"}
+        if set(value.get("caps", {})) != expected_caps:
+            raise ValueError("Checkpoint global feature caps are incomplete")
+        try:
+            return cls(**value["caps"])
+        except (KeyError, TypeError) as exc:
+            raise ValueError("Checkpoint global feature caps are incomplete") from exc
 
 
 def _read_v2_frame(path, columns=None):
@@ -101,17 +176,17 @@ def build_training_artifacts(parquet_dir):
         raise ValueError(f"No parquet files found in {parquet_dir}")
 
     vocabulary = ItemVocabulary()
-    normalization_frames = []
+    feature_frames = []
     for path in files:
         frame = _read_v2_frame(path)
         train_frame = frame[(frame["split"] == "train") & frame["target_valid"].astype(bool)]
-        normalization_frames.append(train_frame[list(GlobalFeatureNormalizer.feature_names)])
+        feature_frames.append(train_frame[list(GlobalFeatureEncoder.source_feature_names)])
         for column in ("deck", "relics"):
             for raw_items in train_frame[column]:
                 for item in split_items(raw_items):
                     vocabulary.add(item)
     vocabulary.freeze()
-    return vocabulary, GlobalFeatureNormalizer.fit(normalization_frames)
+    return vocabulary, GlobalFeatureEncoder.fit(feature_frames)
 
 
 class STSDataset(Dataset):
@@ -119,14 +194,14 @@ class STSDataset(Dataset):
         self,
         parquet_dir,
         vocabulary,
-        normalizer,
+        feature_encoder,
         split,
         max_seq_len=64,
         max_upgrade=15,
         max_count=10,
     ):
         self.vocabulary = vocabulary
-        self.normalizer = normalizer
+        self.feature_encoder = feature_encoder
         self.split = split
         self.max_seq_len = max_seq_len
         self.max_upgrade = max_upgrade
@@ -173,7 +248,7 @@ class STSDataset(Dataset):
             self.max_upgrade,
             self.max_count,
         )
-        global_features = self.normalizer.transform_row(row)
+        global_features = self.feature_encoder.transform_row(row)
         label = float(row["label"])
         return (
             torch.tensor(tokens, dtype=torch.long),

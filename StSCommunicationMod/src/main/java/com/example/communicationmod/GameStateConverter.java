@@ -106,6 +106,12 @@ public class GameStateConverter {
         state.put("can_proceed", ChoiceScreenUtils.isConfirmButtonAvailable());
         state.put("can_cancel", ChoiceScreenUtils.isCancelButtonAvailable());
 
+        if (currentChoiceType == ChoiceScreenUtils.ChoiceType.EVENT) {
+            state.put("event", EventStateExtractor.extract(
+                AbstractDungeon.getCurrRoom().event,
+                ChoiceScreenUtils.getEventScreenButtons()));
+        }
+
         // GRID metadata: expose purpose, numCards, and selected count for AI-driven card selection
         if (currentChoiceType == ChoiceScreenUtils.ChoiceType.GRID) {
             GridCardSelectScreen grid = AbstractDungeon.gridSelectScreen;
@@ -210,6 +216,9 @@ public class GameStateConverter {
         jsonCard.put("cost", card.cost);
         jsonCard.put("cost_for_turn", card.costForTurn);
         jsonCard.put("target", card.target.name());
+        jsonCard.put("rarity", card.rarity.name());
+        jsonCard.put("is_bottled", card.inBottleFlame || card.inBottleLightning || card.inBottleTornado);
+        jsonCard.put("can_upgrade", card.canUpgrade());
 
         // Upgrades
         if (card.timesUpgraded > 0) {

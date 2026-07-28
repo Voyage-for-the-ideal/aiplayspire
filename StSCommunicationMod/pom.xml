@@ -13,12 +13,19 @@
     <properties>
         <maven.compiler.source>1.8</maven.compiler.source>
         <maven.compiler.target>1.8</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <!-- CHANGE THESE PATHS TO YOUR SLAY THE SPIRE INSTALLATION -->
         <Steam.path>D:/Program Files/Slay the Spire</Steam.path>
         <Steam.mods>D:/Program Files/Slay the Spire/mods</Steam.mods>
     </properties>
 
     <dependencies>
+        <dependency>
+            <groupId>junit</groupId>
+            <artifactId>junit</artifactId>
+            <version>4.13.2</version>
+            <scope>test</scope>
+        </dependency>
         <!-- Slay the Spire Desktop Jar -->
         <dependency>
             <groupId>com.megacrit.cardcrawl</groupId>

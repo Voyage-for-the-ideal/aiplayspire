@@ -46,7 +46,7 @@ class STSValueNetwork(nn.Module):
         d_model=128,
         n_heads=4,
         n_layers=3,
-        num_global_features=4,
+        num_global_features=9,
         dropout=0.1,
         global_conditioning="token",
         norm_position="pre",

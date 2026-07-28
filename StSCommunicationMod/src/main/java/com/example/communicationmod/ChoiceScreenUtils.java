@@ -1,7 +1,6 @@
 package com.example.communicationmod;
 
 import basemod.ReflectionHacks;
-import com.badlogic.gdx.Gdx;
 import com.megacrit.cardcrawl.cards.AbstractCard;
 import com.megacrit.cardcrawl.cards.CardGroup;
 import com.megacrit.cardcrawl.core.CardCrawlGame;
@@ -11,7 +10,6 @@ import com.megacrit.cardcrawl.events.AbstractImageEvent;
 import com.megacrit.cardcrawl.events.GenericEventDialog;
 import com.megacrit.cardcrawl.events.RoomEventDialog;
 import com.megacrit.cardcrawl.helpers.Hitbox;
-import com.megacrit.cardcrawl.helpers.input.InputHelper;
 import com.megacrit.cardcrawl.map.MapRoomNode;
 import com.megacrit.cardcrawl.rewards.RewardItem;
 import com.megacrit.cardcrawl.rooms.*;
@@ -219,7 +217,11 @@ public class ChoiceScreenUtils {
     // --- Helper Methods ---
 
     public static ArrayList<String> getEventScreenChoices() {
-        ArrayList<String> choices = new ArrayList<>();
+        ArrayList<LargeDialogOptionButton> buttons = getEventScreenButtons();
+        return EventStateExtractor.enabledChoiceLabels(AbstractDungeon.getCurrRoom().event, buttons);
+    }
+
+    public static ArrayList<LargeDialogOptionButton> getEventScreenButtons() {
         ArrayList<LargeDialogOptionButton> buttons = new ArrayList<>();
         boolean genericShown = (boolean) ReflectionHacks.getPrivateStatic(GenericEventDialog.class, "show");
         if (genericShown) {
@@ -227,13 +229,11 @@ public class ChoiceScreenUtils {
         } else {
              buttons = RoomEventDialog.optionList;
         }
-        for(LargeDialogOptionButton b : buttons) {
-            if (!b.isDisabled) choices.add(b.msg);
-        }
-        return choices;
+        return buttons;
     }
 
     public static void makeEventChoice(int choice) {
+        if (makeMiniGameChoice(choice)) return;
         ArrayList<LargeDialogOptionButton> buttons = new ArrayList<>();
         boolean genericShown = (boolean) ReflectionHacks.getPrivateStatic(GenericEventDialog.class, "show");
         if (genericShown) {
@@ -255,6 +255,93 @@ public class ChoiceScreenUtils {
             }
         }
         System.err.println("Event choice index not found: " + choice);
+    }
+
+    private static boolean makeMiniGameChoice(int choice) {
+        if (AbstractDungeon.getCurrRoom().event == null) return false;
+        Object event = AbstractDungeon.getCurrRoom().event;
+        String className = event.getClass().getSimpleName();
+        if ("GremlinWheelGame".equals(className)) {
+            Object startSpin = getPrivateField(event, "startSpin");
+            Object buttonPressed = getPrivateField(event, "buttonPressed");
+            if (choice == 0 && Boolean.TRUE.equals(startSpin) && Boolean.FALSE.equals(buttonPressed)) {
+                setPrivateField(event, "buttonPressed", true);
+                CardCrawlGame.sound.play("WHEEL");
+                return true;
+            }
+            return "SPIN".equals(String.valueOf(getPrivateField(event, "screen")));
+        }
+        if (!"GremlinMatchGame".equals(className) ||
+            !"PLAY".equals(String.valueOf(getPrivateField(event, "screen")))) return false;
+
+        CardGroup cards = (CardGroup) getPrivateField(event, "cards");
+        float waitTimer = ((Number) getPrivateField(event, "waitTimer")).floatValue();
+        boolean gameDone = Boolean.TRUE.equals(getPrivateField(event, "gameDone"));
+        if (cards == null || waitTimer != 0.0F || gameDone) return true;
+        int activeIndex = 0;
+        for (AbstractCard card : cards.group) {
+            if (!card.isFlipped) continue;
+            if (activeIndex++ == choice) {
+                card.isFlipped = false;
+                card.drawScale = 0.7F;
+                card.targetDrawScale = 0.7F;
+                boolean cardFlipped = Boolean.TRUE.equals(getPrivateField(event, "cardFlipped"));
+                AbstractCard chosenCard = (AbstractCard) getPrivateField(event, "chosenCard");
+                if (!cardFlipped || chosenCard == null) {
+                    setPrivateField(event, "cardFlipped", true);
+                    setPrivateField(event, "chosenCard", card);
+                    return true;
+                }
+
+                setPrivateField(event, "cardFlipped", false);
+                setPrivateField(event, "hoveredCard", card);
+                if (chosenCard.cardID.equals(card.cardID)) {
+                    setPrivateField(event, "waitTimer", 1.0F);
+                    chosenCard.targetDrawScale = 0.7F;
+                    chosenCard.target_x = Settings.WIDTH / 2.0F;
+                    chosenCard.target_y = Settings.HEIGHT / 2.0F;
+                    card.targetDrawScale = 0.7F;
+                    card.target_x = Settings.WIDTH / 2.0F;
+                    card.target_y = Settings.HEIGHT / 2.0F;
+                } else {
+                    setPrivateField(event, "waitTimer", 1.25F);
+                    chosenCard.targetDrawScale = 1.0F;
+                    card.targetDrawScale = 1.0F;
+                }
+                return true;
+            }
+        }
+        System.err.println("Match game choice index not found: " + choice);
+        return true;
+    }
+
+    private static Object getPrivateField(Object target, String name) {
+        Class<?> type = target.getClass();
+        while (type != null) {
+            try {
+                java.lang.reflect.Field field = type.getDeclaredField(name);
+                field.setAccessible(true);
+                return field.get(target);
+            } catch (ReflectiveOperationException ignored) {
+                type = type.getSuperclass();
+            }
+        }
+        return null;
+    }
+
+    private static void setPrivateField(Object target, String name, Object value) {
+        Class<?> type = target.getClass();
+        while (type != null) {
+            try {
+                java.lang.reflect.Field field = type.getDeclaredField(name);
+                field.setAccessible(true);
+                field.set(target, value);
+                return;
+            } catch (ReflectiveOperationException ignored) {
+                type = type.getSuperclass();
+            }
+        }
+        throw new IllegalStateException("Missing event field: " + name);
     }
 
     public static ArrayList<String> getRestRoomChoices() {
