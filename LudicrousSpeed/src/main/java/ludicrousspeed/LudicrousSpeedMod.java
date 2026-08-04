@@ -62,7 +62,7 @@ public class LudicrousSpeedMod implements PreUpdateSubscriber, OnStartBattleSubs
     }
 
     private static boolean shouldNormalUpdate() {
-        if (controller == null) {
+        if (controller == null || controller.isDone() || mustRestart) {
             return false;
         }
 

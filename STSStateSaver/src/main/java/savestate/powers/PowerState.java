@@ -67,13 +67,7 @@ public class PowerState {
     }
 
     public String diffEncode() {
-        if (powerJson == null)
-            powerJson = new JsonObject();
-
-        powerJson.addProperty("power_id", powerId);
-        powerJson.addProperty("amount", amount);
-
-        return powerJson.toString();
+        return jsonEncode().toString();
     }
 
     // A generic empty power so that power factories can be used for basic json powers

@@ -73,6 +73,12 @@
             <scope>system</scope>
             <systemPath>${basedir}/../_ModTheSpire/mods/FightPredictor.jar</systemPath>
         </dependency>
+        <dependency>
+            <groupId>junit</groupId>
+            <artifactId>junit</artifactId>
+            <version>4.13.2</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>

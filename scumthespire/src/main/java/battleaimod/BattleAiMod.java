@@ -12,6 +12,8 @@ import battleaimod.battleai.playorder.*;
 import battleaimod.networking.AiClient;
 import battleaimod.networking.AiServer;
 import battleaimod.networking.BattleClientController;
+import battleaimod.networking.BattleReplayController;
+import battleaimod.search.SearchProfile;
 import com.badlogic.gdx.Gdx;
 import com.badlogic.gdx.graphics.Color;
 import com.badlogic.gdx.graphics.Texture;
@@ -74,6 +76,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.List;
 import java.util.function.Function;
 
 import static com.megacrit.cardcrawl.dungeons.AbstractDungeon.actionManager;
@@ -95,17 +98,25 @@ public class BattleAiMod implements PostInitializeSubscriber, PostUpdateSubscrib
     public static AiClient aiClient = null;
     public static boolean shouldStartAiFromServer = false;
     public static BattleAiController battleAiController = null;
+    public static BattleReplayController replayController = null;
+    public static SaveState replayStartState;
+    public static List<ludicrousspeed.simulator.commands.Command> replayCommands;
+    public static volatile boolean shouldStartReplay = false;
 
     public static CommandRunnerController rerunController = null;
 
     public static SaveState saveState;
     public static int requestedTurnNum;
+    public static long requestedTimeoutMillis = SearchProfile.BALANCED.timeoutMillis();
+    public static SearchProfile requestedSearchProfile = SearchProfile.BALANCED;
+    public static SearchProfile searchProfile = SearchProfile.BALANCED;
     public static boolean goFast = false;
     public static boolean shouldStartClient = false;
     public static boolean autoStartAi = false;
 
     public static boolean isServer;
     public static boolean isClient;
+    public static volatile boolean shutdownRequested = false;
 
     public static BattleClientController clientController;
     public static BattleClientController.ControllerMode battleClientControllerMode;
@@ -246,6 +257,7 @@ public class BattleAiMod implements PostInitializeSubscriber, PostUpdateSubscrib
         clientController = new BattleClientController();
         battleClientControllerMode = BattleClientController.getModeOption();
         autoStartAi = BattleClientController.getAutoStartAi();
+        searchProfile = BattleClientController.getSearchProfile();
 
         BaseMod.addTopPanelItem(new StartAiClientTopPanel());
         BaseMod.registerModBadge(ImageMaster
@@ -255,6 +267,10 @@ public class BattleAiMod implements PostInitializeSubscriber, PostUpdateSubscrib
 
     @Override
     public void receivePostUpdate() {
+        if (shutdownRequested && isServer) {
+            Gdx.app.exit();
+            return;
+        }
         if (steveMessage != null) {
             String messageToDisplay = String.format(" %s... NL %s", MESSAGE_WORDS
                     .getOrDefault(AbstractDungeon.player.chosenClass, "Processing"), steveMessage);
@@ -267,7 +283,13 @@ public class BattleAiMod implements PostInitializeSubscriber, PostUpdateSubscrib
 
         if (battleAiController == null && shouldStartAiFromServer) {
             shouldStartAiFromServer = false;
-            controller = battleAiController = new BattleAiController(saveState, requestedTurnNum);
+            controller = battleAiController = new BattleAiController(saveState, requestedSearchProfile,
+                    requestedTurnNum, requestedTimeoutMillis);
+        }
+
+        if (replayController == null && shouldStartReplay) {
+            shouldStartReplay = false;
+            controller = replayController = new BattleReplayController(replayStartState, replayCommands);
         }
 
         clientController.update();
@@ -285,6 +307,12 @@ public class BattleAiMod implements PostInitializeSubscriber, PostUpdateSubscrib
             if (!isEnabled()) {
                 return;
             }
+
+            if (!BattleClientController.canRequestState()) {
+                return;
+            }
+
+            BattleClientController.resetReplayRecovery();
 
 
             if (aiClient == null) {
@@ -321,6 +349,7 @@ public class BattleAiMod implements PostInitializeSubscriber, PostUpdateSubscrib
 
     @Override
     public void receiveOnBattleStart(AbstractRoom abstractRoom) {
+        BattleClientController.resetReplayRecovery();
         if (autoStartAi) {
             shouldStartClient = true;
         }
@@ -330,8 +359,14 @@ public class BattleAiMod implements PostInitializeSubscriber, PostUpdateSubscrib
     public void receivePreUpdate() {
         if (battleAiController == null && shouldStartAiFromServer) {
             shouldStartAiFromServer = false;
-            battleAiController = new BattleAiController(saveState, requestedTurnNum);
+            battleAiController = new BattleAiController(saveState, requestedSearchProfile,
+                    requestedTurnNum, requestedTimeoutMillis);
             controller = battleAiController;
+        }
+
+        if (replayController == null && shouldStartReplay) {
+            shouldStartReplay = false;
+            controller = replayController = new BattleReplayController(replayStartState, replayCommands);
         }
 
         if (actionManager.actions.isEmpty() && actionManager.currentAction == null) {

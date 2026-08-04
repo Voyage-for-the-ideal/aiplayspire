@@ -92,6 +92,9 @@ public class TurnNode implements Comparable<TurnNode> {
 
             int turnNumber = GameActionManager.turn;
             if (AbstractDungeon.player.currentHealth >= 1) {
+                if (!controller.registerTurnState(curState.saveState)) {
+                    return true;
+                }
                 if (turnNumber >= controller.targetTurn) {
                     if (controller.bestTurn == null || toAdd.isBetterThan(controller.bestTurn)) {
                         controller.bestTurn = toAdd;
@@ -104,6 +107,7 @@ public class TurnNode implements Comparable<TurnNode> {
                     }
 
                     controller.turns.add(toAdd);
+                    controller.updateQueueMetrics();
                 }
             }
             return true;
@@ -136,6 +140,7 @@ public class TurnNode implements Comparable<TurnNode> {
 //                    System.err.println("hand " + hand);
 //                    System.err.println("executing " + toExecute);
 
+                    controller.recordExpansion();
                     toExecute.execute();
                     states.push(toAdd);
                 } catch (IndexOutOfBoundsException e) {

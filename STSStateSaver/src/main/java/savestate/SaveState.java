@@ -73,7 +73,7 @@ public class SaveState {
 
     public HashMap<String, StateElement> additionalElements = new HashMap<>();
 
-    //TODO move this into something that always gets called
+    // GridCardSelectScreen retains this value after closing, so it is only state while GRID is active.
     private int gridCardSelectAmount = 0;
 
     private final int bombIdOffset;
@@ -154,8 +154,10 @@ public class SaveState {
         for (AbstractCard card : DrawCardAction.drawnCards) {
             this.drawnCards.add(allCards.indexOf(card));
         }
-        this.gridCardSelectAmount = ReflectionHacks
-                .getPrivate(AbstractDungeon.gridSelectScreen, GridCardSelectScreen.class, "cardSelectAmount");
+        if (this.isScreenUp && this.screen == AbstractDungeon.CurrentScreen.GRID) {
+            this.gridCardSelectAmount = ReflectionHacks
+                    .getPrivate(AbstractDungeon.gridSelectScreen, GridCardSelectScreen.class, "cardSelectAmount");
+        }
 
         for (Map.Entry<String, StateElement.ElementFactories> entry : StateFactories.elementFactories
                 .entrySet()) {
@@ -208,7 +210,9 @@ public class SaveState {
         this.drawnCards = intListFromJson(parsed, "drawn_cards");
         this.endTurnQueued = getOptionalBoolean(parsed, "end_turn_queued", false);
         this.isEndingTurn = getOptionalBoolean(parsed, "is_ending_turn", false);
-        this.gridCardSelectAmount = getOptionalInt(parsed, "grid_card_select_amount", 0);
+        this.gridCardSelectAmount = this.isScreenUp && this.screen == AbstractDungeon.CurrentScreen.GRID
+                ? getOptionalInt(parsed, "grid_card_select_amount", 0)
+                : 0;
 
         for (Map.Entry<String, StateElement.ElementFactories> entry : StateFactories.elementFactories
                 .entrySet()) {
@@ -257,7 +261,9 @@ public class SaveState {
         this.drawnCards = intListFromJson(saveStateObject, "drawn_cards");
         this.endTurnQueued = getOptionalBoolean(saveStateObject, "end_turn_queued", false);
         this.isEndingTurn = getOptionalBoolean(saveStateObject, "is_ending_turn", false);
-        this.gridCardSelectAmount = getOptionalInt(saveStateObject, "grid_card_select_amount", 0);
+        this.gridCardSelectAmount = this.isScreenUp && this.screen == AbstractDungeon.CurrentScreen.GRID
+                ? getOptionalInt(saveStateObject, "grid_card_select_amount", 0)
+                : 0;
 
         for (Map.Entry<String, StateElement.ElementFactories> entry : StateFactories.elementFactories
                 .entrySet()) {

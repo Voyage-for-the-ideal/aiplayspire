@@ -1,0 +1,7 @@
+{
+  "turn": 3,
+  "rng_state": "17",
+  "cards_played_this_turn": ["Attack", "Skill"],
+  "player_state": {"health": 40, "energy": 1},
+  "monster_state": {"health": 20, "block": 0}
+}

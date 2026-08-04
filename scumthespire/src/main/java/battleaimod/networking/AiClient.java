@@ -2,6 +2,7 @@ package battleaimod.networking;
 
 import battleaimod.BattleAiMod;
 import battleaimod.battleai.CommandRunnerController;
+import battleaimod.search.SearchProfile;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -31,11 +32,13 @@ public class AiClient {
     private static final int CONNECT_TIMEOUT_MILLIS = 3000;
     private static final int READ_TIMEOUT_MILLIS = 3000;
     public static int fileIndex = 0;
-    public static boolean waiting = false;
+    public static volatile boolean waiting = false;
+    public static volatile boolean autoReplanPending = false;
     public static String preferredCommandFilename = null;
     public static String preferredStartFilename = null;
 
     private final Socket socket;
+    private final ExecutorService executor = Executors.newSingleThreadExecutor();
 
     public AiClient() throws IOException {
         this(true);
@@ -56,7 +59,8 @@ public class AiClient {
     }
 
     public void sendState() {
-        sendState(15_000);
+        SearchProfile profile = BattleAiMod.searchProfile;
+        sendState(profile.maxExpansions(), profile.timeoutMillis(), profile);
     }
 
     public void sendState(String readFile) {
@@ -71,10 +75,18 @@ public class AiClient {
     }
 
     public void sendState(int numTurns) {
+        sendState(numTurns, BattleAiMod.searchProfile.timeoutMillis(), BattleAiMod.searchProfile);
+    }
+
+    private void sendState(int maxExpansions, long timeoutMillis, SearchProfile profile) {
+        if (waiting) {
+            System.err.println("Ignoring overlapping Battle AI state request");
+            return;
+        }
+
         final SaveState state = new SaveState();
 
         AbstractDungeon.player.hand.refreshHandLayout();
-        ExecutorService executor = Executors.newSingleThreadExecutor();
         waiting = true;
         executor.submit(() -> {
             try {
@@ -117,7 +129,10 @@ public class AiClient {
                     JsonObject runRequest = new JsonObject();
 
                     runRequest.addProperty("fileName", absoluteFileName);
-                    runRequest.addProperty("num_turns", numTurns);
+                    runRequest.addProperty("num_turns", maxExpansions);
+                    runRequest.addProperty("max_expansions", maxExpansions);
+                    runRequest.addProperty("timeout_ms", timeoutMillis);
+                    runRequest.addProperty("search_profile", profile.toString());
                     runRequest.addProperty("command_file", absoluteCommandFileName);
                     runRequest.addProperty("client_cwd", System.getProperty("user.dir"));
 
@@ -127,7 +142,6 @@ public class AiClient {
                     throw e;
                 }
                 BattleAiMod.rerunController = null;
-                waiting = false;
 
                 DataInputStream in = new DataInputStream(new BufferedInputStream(socket
                         .getInputStream()));
@@ -147,6 +161,11 @@ public class AiClient {
                     try {
                         JsonObject parsed = new JsonParser().parse(readLine).getAsJsonObject();
                         updateControllerForCommands(parsed);
+
+                        if (parsed.has("metrics") && parsed.has("type") &&
+                                AiServer.commandListString.equals(parsed.get("type").getAsString())) {
+                            System.err.println("Search metrics " + parsed.get("metrics"));
+                        }
 
                         if (parsed.has("message")) {
                             BattleAiMod.steveMessage = parsed.get("message").getAsString();
@@ -170,7 +189,6 @@ public class AiClient {
     }
 
     public void runQueriedCommands(List<Command> commandsFromServer) {
-        ExecutorService executor = Executors.newSingleThreadExecutor();
         executor.submit(() -> {
             try {
                 BattleAiMod.rerunController = null;
@@ -188,79 +206,11 @@ public class AiClient {
     }
 
     public static Command toCommand(JsonElement jsonElement) {
-        if (jsonElement.isJsonNull()) {
-            return null;
-        }
-
-        JsonObject commandObject = new JsonParser()
-                .parse(jsonElement.getAsJsonObject().get("command").getAsString())
-                .getAsJsonObject();
-        String type = commandObject.get("type").getAsString();
-        String commandString = commandObject.toString();
-
-        if (type.equals("CARD")) {
-            if (jsonElement.getAsJsonObject().has("state")) {
-                return new CardCommand(commandString, jsonElement.getAsJsonObject().get("state")
-                                                                 .getAsString());
-            }
-            return new CardCommand(commandString);
-        } else if (type.equals("POTION")) {
-            if (jsonElement.getAsJsonObject().has("state")) {
-                return new PotionCommand(commandString, jsonElement.getAsJsonObject().get("state")
-                                                                   .getAsString());
-            }
-            return new PotionCommand(commandString);
-        } else if (type.equals("END")) {
-            if (jsonElement.getAsJsonObject().has("state")) {
-                return new EndCommand(commandString, jsonElement.getAsJsonObject().get("state")
-                                                                .getAsString());
-            }
-            return new EndCommand(commandString);
-        } else if (type.equals("HAND_SELECT")) {
-            if (jsonElement.getAsJsonObject().has("state")) {
-                return new HandSelectCommand(commandString, jsonElement.getAsJsonObject()
-                                                                       .get("state")
-                                                                       .getAsString());
-            }
-            return new HandSelectCommand(commandString);
-        } else if (type.equals("HAND_SELECT_CONFIRM")) {
-            if (jsonElement.getAsJsonObject().has("state")) {
-                return new HandSelectConfirmCommand(jsonElement.getAsJsonObject().get("state")
-                                                               .getAsString());
-            }
-            return HandSelectConfirmCommand.INSTANCE;
-        } else if (type.equals("GRID_SELECT")) {
-            return new GridSelectCommand(commandString);
-        } else if (type.equals("GRID_SELECT_CONFIRM")) {
-            return GridSelectConfrimCommand.INSTANCE;
-        } else if (type.equals("CARD_REWARD_SELECT")) {
-            return new CardRewardSelectCommand(commandString);
-        }
-
-        return null;
+        return CommandCodec.decode(jsonElement);
     }
 
     public static Command toCommand(String commandString) {
-        JsonObject commandObject = new JsonParser()
-                .parse(commandString)
-                .getAsJsonObject();
-        String type = commandObject.get("type").getAsString();
-
-        if (type.equals("CARD")) {
-            return new CardCommand(commandString);
-        } else if (type.equals("POTION")) {
-            return new PotionCommand(commandString);
-        } else if (type.equals("END")) {
-            return new EndCommand(commandString);
-        } else if (type.equals("HAND_SELECT")) {
-            return new HandSelectCommand(commandString);
-        } else if (type.equals("HAND_SELECT_CONFIRM")) {
-            return HandSelectConfirmCommand.INSTANCE;
-        } else if (type.equals("GRID_SELECT")) {
-            return new GridSelectCommand(commandString);
-        }
-
-        return null;
+        return CommandCodec.decode(commandString);
     }
 
     private static void updateControllerForCommands(JsonObject jsonMessage) {
@@ -292,7 +242,12 @@ public class AiClient {
 
         boolean complete = jsonMessage.get("type").getAsString()
                                       .equals(AiServer.commandListString);
+        if (complete) {
+            autoReplanPending = jsonMessage.has("should_replan") &&
+                    jsonMessage.get("should_replan").getAsBoolean();
+        }
         if (BattleAiMod.rerunController == null) {
+            LudicrousSpeedMod.mustRestart = false;
             LudicrousSpeedMod.controller = BattleAiMod.rerunController = new CommandRunnerController(commandsFromServer, complete);
         } else {
             BattleAiMod.rerunController
@@ -303,6 +258,7 @@ public class AiClient {
     private static void updateControllerForCommands(List<Command> commandsFromServer) {
         boolean complete = true;
         if (BattleAiMod.rerunController == null) {
+            LudicrousSpeedMod.mustRestart = false;
             LudicrousSpeedMod.controller = BattleAiMod.rerunController = new CommandRunnerController(commandsFromServer, complete);
         } else {
             BattleAiMod.rerunController

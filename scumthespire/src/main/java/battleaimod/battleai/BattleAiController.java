@@ -6,6 +6,10 @@ import FightPredictor.patches.com.megacrit.cardcrawl.combat.CombatPredictionPatc
 import FightPredictor.util.BaseGameConstants;
 import basemod.BaseMod;
 import battleaimod.ValueFunctions;
+import battleaimod.search.SearchBudget;
+import battleaimod.search.SearchMetrics;
+import battleaimod.search.SearchProfile;
+import battleaimod.search.SearchStateKey;
 import com.badlogic.gdx.math.MathUtils;
 import com.megacrit.cardcrawl.cards.AbstractCard;
 import com.megacrit.cardcrawl.dungeons.AbstractDungeon;
@@ -25,7 +29,16 @@ import java.util.stream.Collectors;
 import static savestate.SaveStateMod.addRuntime;
 
 public class BattleAiController implements Controller {
-    private final int maxTurnLoads;
+    private final int maxExpansions;
+    private final long timeoutMillis;
+    private SearchBudget searchBudget;
+    private final Set<SearchStateKey> seenTurnStates = new HashSet<>();
+    private final SearchMetrics searchMetrics = new SearchMetrics();
+    private String stopReason = "RUNNING";
+    private boolean battleComplete = false;
+    private boolean shouldReplan = false;
+    private final SearchProfile searchProfile;
+    private long nextStreamingCommitExpansion;
 
     public int targetTurn;
     public int targetTurnJump;
@@ -66,9 +79,14 @@ public class BattleAiController implements Controller {
     public int expectedDamage = 0;
 
     public BattleAiController(SaveState state, int maxTurnLoads) {
+        this(state, SearchProfile.BALANCED, maxTurnLoads, SearchProfile.BALANCED.timeoutMillis());
+    }
+
+    public BattleAiController(SaveState state, SearchProfile searchProfile, int maxExpansions,
+                              long timeoutMillis) {
         SaveStateMod.runTimes = new HashMap<>();
-        targetTurn = 8;
         targetTurnJump = 6;
+        targetTurn = state.turn + targetTurnJump;
 
         bestEnd = null;
         startingState = state;
@@ -89,7 +107,9 @@ public class BattleAiController implements Controller {
             runPredictions();
         }
 
-        this.maxTurnLoads = maxTurnLoads;
+        this.searchProfile = searchProfile;
+        this.maxExpansions = Math.max(1, maxExpansions);
+        this.timeoutMillis = Math.max(1L, timeoutMillis);
     }
 
     public void runPredictions() {
@@ -168,6 +188,8 @@ public class BattleAiController implements Controller {
             TurnNode.nodeIndex = 0;
             startTime = System.currentTimeMillis();
             initialized = true;
+            searchBudget = new SearchBudget(maxExpansions, timeoutMillis);
+            nextStreamingCommitExpansion = streamingCommitInterval();
             isDone = false;
             StateNode firstStateContainer = new StateNode(null, null, this);
             startingHealth = startingState.getPlayerHealth();
@@ -175,18 +197,26 @@ public class BattleAiController implements Controller {
             turns = new PriorityQueue<>();
             startNode = new TurnNode(firstStateContainer, this, null);
             turns.add(startNode);
+            registerTurnState(startingState);
+            updateQueueMetrics();
 
             SaveStateMod.runTimes = new HashMap<>();
             CardState.resetFreeCards();
         }
 
+        if (finishWhenBudgetReached()) {
+            return;
+        }
+
         if (curTurn == null || curTurn.isDone) {
-            if (turns.isEmpty() || turnsLoaded >= maxTurnLoads) {
+            if (turns.isEmpty() || shouldCommitStreamingStage()) {
                 if (bestEnd != null) {
                     System.err.println("Found end at turn threshold, going into rerun");
                     printRuntimeStats();
 
                     isDone = true;
+                    battleComplete = true;
+                    stopReason = "VICTORY";
                     return;
                 } else if (bestTurn != null || backupTurn != null) {
                     if (bestTurn == null) {
@@ -197,41 +227,30 @@ public class BattleAiController implements Controller {
                     turnsLoaded = 0;
                     turns.clear();
 
-                    int backStep = targetTurnJump / 2;
-
-                    TurnNode backStepTurn = bestTurn;
-                    for (int i = 0; i < backStep; i++) {
-                        if (backStepTurn == null) {
-                            break;
-                        }
-
-                        backStepTurn = backStepTurn.parent;
-                    }
-
-                    if (backStepTurn != null && (committedTurn == null || backStepTurn.startingState.saveState.turn > committedTurn.startingState.saveState.turn)) {
-                        bestTurn = backStepTurn;
-                    }
+                    bestTurn = selectTurnToCommit(bestTurn);
 
                     System.err.println("Backstepping to turn: " + bestTurn);
 
                     TurnNode toAdd = makeResetCopy(bestTurn);
                     turns.add(toAdd);
+                    updateQueueMetrics();
                     targetTurn = bestTurn.startingState.saveState.turn + targetTurnJump;
                     toAdd.startingState.saveState.loadState();
                     committedTurn = toAdd;
+                    nextStreamingCommitExpansion += streamingCommitInterval();
                     bestTurn = null;
                     backupTurn = null;
 
                     return;
-                } else if (turns.isEmpty() || turnsLoaded >= maxTurnLoads * 10) {
-                    if (deathNode != null) {
-                        System.err.println("Sending back death turn");
-                        bestEnd = deathNode;
-                    } else {
-                        System.err.println("No path found, using start state as fallback");
-                        bestEnd = startNode.startingState;
-                    }
+                } else if (turns.isEmpty()) {
+                    System.err.println("No safe path found, using start state as fallback");
+                    bestEnd = committedTurn == null ? startNode.startingState
+                            : committedTurn.startingState;
                     isDone = true;
+                    battleComplete = false;
+                    shouldReplan = hasProgress(bestEnd);
+                    stopReason = "SEARCH_EXHAUSTED";
+                    printRuntimeStats();
                     return;
                 }
             }
@@ -297,6 +316,8 @@ public class BattleAiController implements Controller {
                                                 .map(entry -> entry.toString())
                                                 .sorted()
                                                 .collect(Collectors.joining("\n")));
+        System.err.println("search metrics: " + searchMetrics
+                .jsonEncode(elapsedMillis(), stopReason));
         System.err.println("-------------------------------------------------------------------");
     }
 
@@ -313,7 +334,134 @@ public class BattleAiController implements Controller {
     }
 
     public int maxTurnLoads() {
-        return maxTurnLoads;
+        return maxExpansions();
+    }
+
+    public int maxExpansions() {
+        return maxExpansions;
+    }
+
+    public void recordExpansion() {
+        searchMetrics.expandedNodes++;
+    }
+
+    public boolean registerTurnState(SaveState state) {
+        searchMetrics.generatedTurnStates++;
+        searchMetrics.deepestTurn = Math.max(searchMetrics.deepestTurn, state.turn);
+        long startedAt = System.nanoTime();
+        SearchStateKey key = SearchStateKey.fromSaveState(state);
+        searchMetrics.stateKeyNanos += System.nanoTime() - startedAt;
+        if (!seenTurnStates.add(key)) {
+            searchMetrics.duplicateTurnStates++;
+            return false;
+        }
+        searchMetrics.uniqueTurnStates++;
+        return true;
+    }
+
+    public void updateQueueMetrics() {
+        searchMetrics.maxQueueSize = Math.max(searchMetrics.maxQueueSize, turns.size());
+    }
+
+    public SearchMetrics metrics() {
+        return searchMetrics;
+    }
+
+    public long elapsedMillis() {
+        return searchBudget == null ? 0L : searchBudget.elapsedMillis();
+    }
+
+    public String stopReason() {
+        return stopReason;
+    }
+
+    public boolean battleComplete() {
+        return battleComplete;
+    }
+
+    public boolean shouldReplan() {
+        return shouldReplan;
+    }
+
+    public SearchProfile searchProfile() {
+        return searchProfile;
+    }
+
+    private boolean finishWhenBudgetReached() {
+        boolean expansionLimit = searchBudget.isExpansionLimitReached(searchMetrics.expandedNodes);
+        boolean timedOut = searchBudget.isTimedOut();
+        if (!expansionLimit && !timedOut) {
+            return false;
+        }
+
+        if (bestEnd != null) {
+            battleComplete = true;
+            stopReason = "VICTORY";
+        } else {
+            TurnNode partialResult = bestTurn != null ? bestTurn
+                    : (backupTurn != null ? backupTurn : committedTurn);
+            if (partialResult == null) {
+                bestEnd = startNode.startingState;
+            } else {
+                int committedThroughTurn = searchProfile.streamCommands() && committedTurn != null
+                        ? committedTurn.startingState.saveState.turn : startingState.turn;
+                bestEnd = firstStateAfterTurn(partialResult.startingState, committedThroughTurn);
+            }
+            shouldReplan = hasProgress(bestEnd);
+            stopReason = timedOut ? "TIMEOUT" : "EXPANSION_LIMIT";
+        }
+
+        isDone = true;
+        printRuntimeStats();
+        return true;
+    }
+
+    private boolean shouldCommitStreamingStage() {
+        return searchProfile.streamCommands() &&
+                searchMetrics.expandedNodes >= nextStreamingCommitExpansion &&
+                (bestTurn != null || backupTurn != null);
+    }
+
+    private long streamingCommitInterval() {
+        return Math.max(1L, maxExpansions / 3L);
+    }
+
+    private TurnNode selectTurnToCommit(TurnNode candidate) {
+        if (searchProfile.streamCommands()) {
+            int committedThroughTurn = committedTurn == null ? startingState.turn
+                    : committedTurn.startingState.saveState.turn;
+            while (candidate.parent != null &&
+                    candidate.parent.startingState.saveState.turn > committedThroughTurn) {
+                candidate = candidate.parent;
+            }
+            return candidate;
+        }
+
+        int backStep = targetTurnJump / 2;
+        TurnNode backStepTurn = candidate;
+        for (int i = 0; i < backStep && backStepTurn != null; i++) {
+            backStepTurn = backStepTurn.parent;
+        }
+        if (backStepTurn != null && (committedTurn == null ||
+                backStepTurn.startingState.saveState.turn >
+                        committedTurn.startingState.saveState.turn)) {
+            return backStepTurn;
+        }
+        return candidate;
+    }
+
+    private static StateNode firstStateAfterTurn(StateNode endNode, int completedTurn) {
+        StateNode result = endNode;
+        for (StateNode stateNode : stateNodesToGetToNode(endNode)) {
+            if (stateNode.saveState != null && stateNode.saveState.turn > completedTurn) {
+                return stateNode;
+            }
+        }
+        return result;
+    }
+
+    private static boolean hasProgress(StateNode stateNode) {
+        return stateNode != null && stateNode.parent != null;
     }
 
 

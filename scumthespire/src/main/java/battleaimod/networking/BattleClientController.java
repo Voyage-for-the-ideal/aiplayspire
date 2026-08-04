@@ -2,6 +2,7 @@ package battleaimod.networking;
 
 import basemod.ClickableUIElement;
 import battleaimod.BattleAiMod;
+import battleaimod.search.SearchProfile;
 import com.badlogic.gdx.graphics.Color;
 import com.badlogic.gdx.graphics.Texture;
 import com.badlogic.gdx.graphics.g2d.SpriteBatch;
@@ -47,6 +48,7 @@ public class BattleClientController {
 
     private static boolean serverReady = false;
     private static Process serverProcess;
+    private static final ReplayRecoveryState replayRecoveryState = new ReplayRecoveryState();
 
     public BattleClientController() {
         startButton = new StartUIButton();
@@ -54,6 +56,7 @@ public class BattleClientController {
     }
 
     public void update() {
+        maybeAutoReplan();
         if (!isEnabled()) {
             return;
         }
@@ -109,6 +112,8 @@ public class BattleClientController {
             if (!canSendState()) {
                 return;
             }
+
+            resetReplayRecovery();
 
             if (BattleAiMod.aiClient == null) {
                 try {
@@ -326,9 +331,13 @@ public class BattleClientController {
         return !serverReady && serverProcess != null && serverProcess.isAlive();
     }
 
-    private static boolean canSendState() {
+    public static boolean canSendState() {
+        return serverReady && canRequestState();
+    }
+
+    public static boolean canRequestState() {
         boolean controllerRunning = BattleAiMod.rerunController != null && !BattleAiMod.rerunController.isDone;
-        return serverReady && !controllerRunning && readyForUpdate();
+        return !AiClient.waiting && !controllerRunning && readyForUpdate();
     }
 
     public static boolean readyForUpdate() {
@@ -400,6 +409,64 @@ public class BattleClientController {
                 e.printStackTrace();
             }
         }
+    }
+
+    public static SearchProfile getSearchProfile() {
+        SpireConfig config = BattleAiMod.optionsConfig;
+        if (config == null || !config.has("search_profile")) {
+            return SearchProfile.BALANCED;
+        }
+        return SearchProfile.fromString(config.getString("search_profile"));
+    }
+
+    public static void saveSearchProfile(SearchProfile profile) {
+        SpireConfig config = BattleAiMod.optionsConfig;
+        if (config != null) {
+            config.setString("search_profile", profile.toString());
+            try {
+                config.save();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    private static void maybeAutoReplan() {
+        boolean replayMismatch = LudicrousSpeedMod.mustRestart;
+        if (!AiClient.autoReplanPending && !replayMismatch) {
+            return;
+        }
+        if (!inCombat()) {
+            resetReplayRecovery();
+            return;
+        }
+        boolean runnerDone = BattleAiMod.rerunController == null || BattleAiMod.rerunController.isDone;
+        if (!runnerDone || AiClient.waiting || !readyForUpdate()) {
+            return;
+        }
+
+        if (replayMismatch && !replayRecoveryState.tryUseRetry()) {
+            LudicrousSpeedMod.mustRestart = false;
+            AiClient.autoReplanPending = false;
+            BattleAiMod.steveMessage = "Replay diverged twice; click Start Steve to retry";
+            System.err.println("Battle AI replay diverged again; automatic retry limit reached");
+            return;
+        }
+
+        AiClient.autoReplanPending = false;
+        LudicrousSpeedMod.mustRestart = false;
+        if (BattleAiMod.aiClient != null) {
+            if (replayMismatch) {
+                System.err.println("Battle AI replay diverged; replanning once from the live state");
+            }
+            BattleAiMod.aiClient.sendState();
+        }
+    }
+
+    public static void resetReplayRecovery() {
+        replayRecoveryState.reset();
+        AiClient.autoReplanPending = false;
+        LudicrousSpeedMod.mustRestart = false;
     }
 
     private boolean isEnabled() {

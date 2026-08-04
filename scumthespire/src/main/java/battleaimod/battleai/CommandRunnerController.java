@@ -26,6 +26,7 @@ public class CommandRunnerController implements Controller {
 
     public CommandRunnerController(List<Command> commands, boolean isComplete) {
         runTimes = new HashMap<>();
+        LudicrousSpeedMod.mustRestart = false;
         this.isComplete = isComplete;
         bestPath = commands;
         bestPathRunner = commands.iterator();
@@ -66,6 +67,10 @@ public class CommandRunnerController implements Controller {
             if (command != null) {
                 foundCommand = true;
                 command.execute();
+                if (LudicrousSpeedMod.mustRestart) {
+                    isDone = true;
+                    return;
+                }
             } else {
                 foundCommand = true;
             }

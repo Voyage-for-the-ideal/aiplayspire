@@ -4,6 +4,7 @@ import basemod.ModLabel;
 import basemod.ModLabeledToggleButton;
 import basemod.ModPanel;
 import battleaimod.networking.BattleClientController;
+import battleaimod.search.SearchProfile;
 import com.badlogic.gdx.graphics.g2d.SpriteBatch;
 import com.megacrit.cardcrawl.core.Settings;
 import com.megacrit.cardcrawl.helpers.FontHelper;
@@ -16,6 +17,7 @@ public class BattleAiModOptionsPanel extends ModPanel implements DropdownMenuLis
     private static final float LABEL_X_POS = Settings.WIDTH / 5.0F;
     private static final float LABEL_Y_POS = Settings.HEIGHT * 2.0F / 3.0F;
     public static DropdownMenu controllerMode;
+    public static DropdownMenu searchProfile;
     private ModLabeledToggleButton autoStartToggle;
 
     public BattleAiModOptionsPanel() {
@@ -43,12 +45,26 @@ public class BattleAiModOptionsPanel extends ModPanel implements DropdownMenuLis
                 modToggle -> {}
         );
         this.addUIElement(autoStartToggle);
+
+        ModLabel searchProfileLabel = new ModLabel(
+                "Search Profile", LABEL_X_POS / Settings.scale,
+                LABEL_Y_POS / Settings.scale - 110.0F, Settings.CREAM_COLOR,
+                FontHelper.charDescFont, this, modLabel -> {});
+        this.addUIElement(searchProfileLabel);
+
+        String[] profileValues = Arrays.stream(SearchProfile.values())
+                                       .map(SearchProfile::toString)
+                                       .toArray(String[]::new);
+        searchProfile = new DropdownMenu(this, profileValues, FontHelper.tipBodyFont,
+                Settings.CREAM_COLOR);
+        searchProfile.setSelectedIndex(BattleAiMod.searchProfile.ordinal());
     }
 
     @Override
     public void update() {
         super.update();
         controllerMode.update();
+        searchProfile.update();
 
         if (autoStartToggle.toggle.enabled != BattleAiMod.autoStartAi) {
             BattleAiMod.autoStartAi = autoStartToggle.toggle.enabled;
@@ -61,6 +77,8 @@ public class BattleAiModOptionsPanel extends ModPanel implements DropdownMenuLis
         super.render(sb);
 
         controllerMode.render(sb, LABEL_X_POS + 350 * Settings.scale, LABEL_Y_POS + 22 * Settings.scale);
+        searchProfile.render(sb, LABEL_X_POS + 350 * Settings.scale,
+                LABEL_Y_POS - 88 * Settings.scale);
     }
 
     @Override
@@ -69,6 +87,9 @@ public class BattleAiModOptionsPanel extends ModPanel implements DropdownMenuLis
             BattleAiMod.battleClientControllerMode = BattleClientController.ControllerMode
                     .valueOf(s);
             BattleClientController.saveMode(BattleAiMod.battleClientControllerMode);
+        } else if (dropdownMenu == searchProfile) {
+            BattleAiMod.searchProfile = SearchProfile.fromString(s);
+            BattleClientController.saveSearchProfile(BattleAiMod.searchProfile);
         }
     }
 }

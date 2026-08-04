@@ -4,6 +4,8 @@ import battleaimod.BattleAiMod;
 import battleaimod.battleai.BattleAiController;
 import battleaimod.battleai.StateNode;
 import battleaimod.battleai.TurnNode;
+import battleaimod.search.SearchProfile;
+import battleaimod.search.SearchStateKey;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonNull;
@@ -19,6 +21,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Iterator;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -30,6 +33,10 @@ public class AiServer {
 
     public static final String statusUpdateString = "STATUS_UPDATE";
     public static final String commandListString = "COMMAND_LIST";
+    public static final String pingString = "PING";
+    public static final String pongString = "PONG";
+    public static final String shutdownString = "SHUTDOWN";
+    public static final String replayString = "REPLAY";
 
     public static int fileIndex = 0;
 
@@ -38,13 +45,15 @@ public class AiServer {
                 new ThreadFactoryBuilder().setNameFormat("server-networking-thread-%d").build();
         ExecutorService executor = Executors.newSingleThreadExecutor(namedThreadFactory);
         executor.submit(() -> {
-            try (ServerSocket serverSocket = new ServerSocket(PORT_NUMBER);
+            int port = Integer.getInteger("battleai.port", PORT_NUMBER);
+            try (ServerSocket serverSocket = new ServerSocket(port);
                  Socket socket = serverSocket.accept();
                  DataInputStream in = new DataInputStream(new BufferedInputStream(socket
                          .getInputStream()));
                  DataOutputStream out = new DataOutputStream(socket.getOutputStream())) {
 
-                while (true) {
+                System.err.println("BATTLEAI_SERVER_READY port=" + port + " testMode=" + isTestMode());
+                while (!BattleAiMod.shutdownRequested) {
                     fileIndex = 0;
                     if (BattleAiMod.battleAiController == null) {
                         String requestFilePath = "";
@@ -58,6 +67,29 @@ public class AiServer {
                             String runRequestString = in.readUTF();
                             JsonObject runRequest = new JsonParser().parse(runRequestString)
                                                                     .getAsJsonObject();
+
+                            if (runRequest.has("type") && pingString.equals(runRequest.get("type").getAsString())) {
+                                JsonObject pong = new JsonObject();
+                                pong.addProperty("type", pongString);
+                                pong.addProperty("test_mode", isTestMode());
+                                out.writeUTF(pong.toString());
+                                continue;
+                            }
+                            if (runRequest.has("type") && shutdownString.equals(runRequest.get("type").getAsString())) {
+                                if (!isTestMode()) {
+                                    throw new IllegalArgumentException("SHUTDOWN is only available in test mode");
+                                }
+                                BattleAiMod.shutdownRequested = true;
+                                JsonObject shutdown = new JsonObject();
+                                shutdown.addProperty("type", shutdownString);
+                                shutdown.addProperty("accepted", true);
+                                out.writeUTF(shutdown.toString());
+                                continue;
+                            }
+                            if (runRequest.has("type") && replayString.equals(runRequest.get("type").getAsString())) {
+                                handleReplay(runRequest, out);
+                                continue;
+                            }
 
                             System.err.println("runRequest is " + runRequest);
 
@@ -80,8 +112,15 @@ public class AiServer {
 
                             SaveState originalState = SaveState.forFile(filePath.toString());
 
-                            BattleAiMod.requestedTurnNum = runRequest.get("num_turns")
-                                                                     .getAsInt();
+                            SearchProfile profile = SearchProfile.fromString(runRequest.has("search_profile")
+                                    ? runRequest.get("search_profile").getAsString() : null);
+                            BattleAiMod.requestedSearchProfile = profile;
+                            BattleAiMod.requestedTurnNum = runRequest.has("max_expansions")
+                                    ? runRequest.get("max_expansions").getAsInt()
+                                    : runRequest.get("num_turns").getAsInt();
+                            BattleAiMod.requestedTimeoutMillis = runRequest.has("timeout_ms")
+                                    ? runRequest.get("timeout_ms").getAsLong()
+                                    : profile.timeoutMillis();
                             BattleAiMod.saveState = originalState;
                             BattleAiMod.saveState.initPlayerAndCardPool();
 
@@ -123,7 +162,8 @@ public class AiServer {
 
                             TurnNode committedTurn = BattleAiMod.battleAiController.committedTurn();
 
-                            if (committedTurn != null) {
+                            if (BattleAiMod.battleAiController.searchProfile().streamCommands() &&
+                                    committedTurn != null) {
                                 int committedTurnNumber = committedTurn.startingState.saveState.turn;
 
                                 if (latestWrittenTurn < committedTurnNumber) {
@@ -135,8 +175,11 @@ public class AiServer {
 
                             jsonToSend.addProperty("message", String
                                     .format("%d / %d", BattleAiMod.battleAiController
-                                            .turnsLoaded(), BattleAiMod.battleAiController
-                                            .maxTurnLoads()));
+                                            .metrics().expandedNodes, BattleAiMod.battleAiController
+                                            .maxExpansions()));
+                            jsonToSend.add("metrics", BattleAiMod.battleAiController.metrics()
+                                    .jsonEncode(BattleAiMod.battleAiController.elapsedMillis(),
+                                            BattleAiMod.battleAiController.stopReason()));
 
                             try {
                                 out.writeUTF(jsonToSend.toString());
@@ -169,6 +212,17 @@ public class AiServer {
                             // Send Command List
                             jsonToSend.addProperty("type", commandListString);
                             jsonToSend.add("commands", commands);
+                            jsonToSend.addProperty("battle_complete",
+                                    BattleAiMod.battleAiController.battleComplete());
+                            jsonToSend.addProperty("should_replan",
+                                    BattleAiMod.battleAiController.shouldReplan());
+                            jsonToSend.addProperty("stop_reason",
+                                    BattleAiMod.battleAiController.stopReason());
+                            jsonToSend.addProperty("final_state_key", SearchStateKey
+                                    .fromSaveState(BattleAiMod.battleAiController.bestEnd.saveState).toString());
+                            jsonToSend.add("metrics", BattleAiMod.battleAiController.metrics()
+                                    .jsonEncode(BattleAiMod.battleAiController.elapsedMillis(),
+                                            BattleAiMod.battleAiController.stopReason()));
                             jsonToSend
                                     .addProperty("predictor_damage", BattleAiMod.battleAiController.expectedDamage);
 
@@ -225,6 +279,65 @@ public class AiServer {
         BattleAiMod.shouldStartAiFromServer = false;
         BattleAiMod.battleAiController = null;
         LudicrousSpeedMod.controller = null;
+    }
+
+    private static boolean isTestMode() {
+        return Boolean.getBoolean("battleai.testMode");
+    }
+
+    private static void handleReplay(JsonObject request, DataOutputStream out) throws IOException {
+        if (!isTestMode()) {
+            throw new IllegalArgumentException("REPLAY is only available in test mode");
+        }
+        SaveState start = SaveState.forFile(request.get("fileName").getAsString());
+        start.initPlayerAndCardPool();
+        String baseDirectory = request.has("client_cwd") ? request.get("client_cwd").getAsString() : ".";
+        ArrayList<ludicrousspeed.simulator.commands.Command> commands = new ArrayList<>();
+        for (com.google.gson.JsonElement encoded : request.getAsJsonArray("commands")) {
+            if (!encoded.isJsonNull() && encoded.getAsJsonObject().has("state")) {
+                JsonObject copy = encoded.getAsJsonObject();
+                copy.addProperty("state", Paths.get(baseDirectory, copy.get("state").getAsString()).toString());
+                commands.add(CommandCodec.decode(copy));
+            } else {
+                commands.add(CommandCodec.decode(encoded));
+            }
+        }
+        BattleAiMod.replayStartState = start;
+        BattleAiMod.replayCommands = commands;
+        BattleAiMod.shouldStartReplay = true;
+
+        long deadline = System.currentTimeMillis() + request.get("timeout_ms").getAsLong();
+        while (BattleAiMod.replayController == null && System.currentTimeMillis() < deadline) {
+            sleepBriefly();
+        }
+        while (BattleAiMod.replayController != null && !BattleAiMod.replayController.isDone() &&
+                System.currentTimeMillis() < deadline) {
+            sleepBriefly();
+        }
+
+        JsonObject response = new JsonObject();
+        response.addProperty("type", replayString);
+        if (BattleAiMod.replayController == null || !BattleAiMod.replayController.isDone()) {
+            response.addProperty("error", "replay timed out before the game update completed");
+            response.addProperty("commands_executed", 0);
+            response.addProperty("diff_valid", false);
+        } else {
+            response.addProperty("final_state_key", BattleAiMod.replayController.finalStateKey());
+            response.addProperty("commands_executed", BattleAiMod.replayController.commandsExecuted());
+            response.addProperty("error", BattleAiMod.replayController.error());
+            response.addProperty("diff_valid", BattleAiMod.replayController.error() == null);
+        }
+        out.writeUTF(response.toString());
+        BattleAiMod.replayController = null;
+        LudicrousSpeedMod.controller = null;
+    }
+
+    private static void sleepBriefly() {
+        try {
+            Thread.sleep(10L);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     public static JsonArray commandsForStateNode(StateNode root, boolean shouldPrint, String clientCwd) {
