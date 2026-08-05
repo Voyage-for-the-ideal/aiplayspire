@@ -46,7 +46,7 @@ public class SaveState {
     private final ArrayList<Integer> cardsPlayedThisTurn;
     private final ArrayList<CardStateContainer> cardsPlayedThisCombat;
     private final ArrayList<CardStateContainer> gridSelectedCards;
-    private final ArrayList<Integer> drawnCards;
+    private final ArrayList<CardStateContainer> drawnCards;
 
     // Load cards from scratch if necessary, ideally they'll be released elsewhere
     private final ArrayList<CardState> cardsPlayedThisTurnBackup;
@@ -105,16 +105,8 @@ public class SaveState {
         this.totalDiscardedThisTurn = GameActionManager.totalDiscardedThisTurn;
         this.mantraGained = AbstractDungeon.actionManager.mantraGained;
 
-        ArrayList<AbstractCard> allCards = new ArrayList<>();
-
         AbstractPlayer player = AbstractDungeon.player;
-
-        allCards.addAll(player.masterDeck.group);
-        allCards.addAll(player.drawPile.group);
-        allCards.addAll(player.hand.group);
-        allCards.addAll(player.discardPile.group);
-        allCards.addAll(player.exhaustPile.group);
-        allCards.addAll(player.limbo.group);
+        ArrayList<AbstractCard> allCards = getAllCards(player);
 
         this.cardsPlayedThisTurn = new ArrayList<>();
         this.cardsPlayedThisTurnBackup = new ArrayList<>();
@@ -152,7 +144,7 @@ public class SaveState {
         this.isEndingTurn = AbstractDungeon.player.isEndingTurn;
 
         for (AbstractCard card : DrawCardAction.drawnCards) {
-            this.drawnCards.add(allCards.indexOf(card));
+            this.drawnCards.add(CardStateContainer.forCard(card, allCards));
         }
         if (this.isScreenUp && this.screen == AbstractDungeon.CurrentScreen.GRID) {
             this.gridCardSelectAmount = ReflectionHacks
@@ -207,7 +199,7 @@ public class SaveState {
         this.cardsPlayedThisTurnBackup = cardStateListFromJson(parsed, "cards_played_this_turn_backup");
         this.cardsPlayedThisCombat = cardStateContainerListFromJson(parsed, "cards_played_this_combat");
         this.gridSelectedCards = cardStateContainerListFromJson(parsed, "grid_selected_cards");
-        this.drawnCards = intListFromJson(parsed, "drawn_cards");
+        this.drawnCards = cardStateContainerListFromJson(parsed, "drawn_cards");
         this.endTurnQueued = getOptionalBoolean(parsed, "end_turn_queued", false);
         this.isEndingTurn = getOptionalBoolean(parsed, "is_ending_turn", false);
         this.gridCardSelectAmount = this.isScreenUp && this.screen == AbstractDungeon.CurrentScreen.GRID
@@ -258,7 +250,7 @@ public class SaveState {
         this.cardsPlayedThisTurnBackup = cardStateListFromJson(saveStateObject, "cards_played_this_turn_backup");
         this.cardsPlayedThisCombat = cardStateContainerListFromJson(saveStateObject, "cards_played_this_combat");
         this.gridSelectedCards = cardStateContainerListFromJson(saveStateObject, "grid_selected_cards");
-        this.drawnCards = intListFromJson(saveStateObject, "drawn_cards");
+        this.drawnCards = cardStateContainerListFromJson(saveStateObject, "drawn_cards");
         this.endTurnQueued = getOptionalBoolean(saveStateObject, "end_turn_queued", false);
         this.isEndingTurn = getOptionalBoolean(saveStateObject, "is_ending_turn", false);
         this.gridCardSelectAmount = this.isScreenUp && this.screen == AbstractDungeon.CurrentScreen.GRID
@@ -337,17 +329,9 @@ public class SaveState {
             CombatRewardScreenState.loadCombatRewardScreen();
         }
 
-        ArrayList<AbstractCard> allCards = new ArrayList<>();
-
         addRuntime("load 2", System.currentTimeMillis() - startLoad);
         AbstractPlayer player = AbstractDungeon.player;
-
-        allCards.addAll(player.masterDeck.group);
-        allCards.addAll(player.drawPile.group);
-        allCards.addAll(player.hand.group);
-        allCards.addAll(player.discardPile.group);
-        allCards.addAll(player.exhaustPile.group);
-        allCards.addAll(player.limbo.group);
+        ArrayList<AbstractCard> allCards = getAllCards(player);
 
 
         AbstractDungeon.actionManager.cardsPlayedThisTurn.clear();
@@ -383,10 +367,8 @@ public class SaveState {
         }
 
         DrawCardAction.drawnCards.clear();
-        for (Integer index : this.drawnCards) {
-            if (index != -1) {
-                DrawCardAction.drawnCards.add(allCards.get(index));
-            }
+        for (CardStateContainer card : this.drawnCards) {
+            DrawCardAction.drawnCards.add(card.loadCard(allCards));
         }
 
 
@@ -486,7 +468,7 @@ public class SaveState {
         saveStateJson.add("cards_played_this_turn_backup", cardStateListToJson(cardsPlayedThisTurnBackup));
         saveStateJson.add("cards_played_this_combat", cardStateContainerListToJson(cardsPlayedThisCombat));
         saveStateJson.add("grid_selected_cards", cardStateContainerListToJson(gridSelectedCards));
-        saveStateJson.add("drawn_cards", intListToJson(drawnCards));
+        saveStateJson.add("drawn_cards", cardStateContainerListToJson(drawnCards));
 
         for (String key : StateFactories.elementFactories.keySet()) {
             saveStateJson.addProperty(key, additionalElements.get(key).encode());
@@ -531,7 +513,7 @@ public class SaveState {
         saveStateJson.add("cards_played_this_turn_backup", cardStateListToJson(cardsPlayedThisTurnBackup));
         saveStateJson.add("cards_played_this_combat", cardStateContainerListToJson(cardsPlayedThisCombat));
         saveStateJson.add("grid_selected_cards", cardStateContainerListToJson(gridSelectedCards));
-        saveStateJson.add("drawn_cards", intListToJson(drawnCards));
+        saveStateJson.add("drawn_cards", cardStateContainerListToJson(drawnCards));
 
         for (String key : StateFactories.elementFactories.keySet()) {
             saveStateJson.add(key, additionalElements.get(key).jsonEncode());
@@ -562,7 +544,7 @@ public class SaveState {
         saveStateJson.add("cards_played_this_turn_backup", cardStateListToJson(cardsPlayedThisTurnBackup));
         saveStateJson.add("cards_played_this_combat", cardStateContainerListToJson(cardsPlayedThisCombat));
         saveStateJson.add("grid_selected_cards", cardStateContainerListToJson(gridSelectedCards));
-        saveStateJson.add("drawn_cards", intListToJson(drawnCards));
+        saveStateJson.add("drawn_cards", cardStateContainerListToJson(drawnCards));
         saveStateJson.add("hand_select_screen_state", handSelectScreenState == null ? null : handSelectScreenState
                 .diffEncode());
         saveStateJson.add("grid_card_select_screen_state", gridCardSelectScreenState == null ? null : gridCardSelectScreenState
@@ -655,6 +637,32 @@ public class SaveState {
         }
 
         return matches;
+    }
+
+    private static ArrayList<AbstractCard> getAllCards(AbstractPlayer player) {
+        ArrayList<AbstractCard> allCards = new ArrayList<>();
+        allCards.addAll(player.masterDeck.group);
+        allCards.addAll(player.drawPile.group);
+        allCards.addAll(player.hand.group);
+        allCards.addAll(player.discardPile.group);
+        allCards.addAll(player.exhaustPile.group);
+        allCards.addAll(player.limbo.group);
+
+        // Selection screens can leave the played card reachable only through cardInUse.
+        if (player.cardInUse != null) {
+            boolean alreadyTracked = false;
+            for (AbstractCard card : allCards) {
+                if (card == player.cardInUse) {
+                    alreadyTracked = true;
+                    break;
+                }
+            }
+            if (!alreadyTracked) {
+                allCards.add(player.cardInUse);
+            }
+        }
+
+        return allCards;
     }
 
     private static boolean hasValue(JsonObject json, String key) {
