@@ -31,7 +31,7 @@ public class UseCardActionState implements ActionState {
 
     @Override
     public UpdateOnlyUseCardAction loadAction() {
-        AbstractCard resultCard = card.loadCard();
+        AbstractCard resultCard = card.loadCardReference();
         AbstractCreature target = ActionState
                 .creatureForIndex(targetIndex == null ? ActionState.NULL_INDEX : targetIndex);
 

@@ -253,6 +253,41 @@ public class CardState {
         return result;
     }
 
+    public AbstractCard loadCardReference() {
+        if (AbstractDungeon.player != null) {
+            // Restored actions must retain the same object used by card history and combat piles.
+            AbstractCard existingCard = findReferenceByUuid(uuid, card -> card.uuid,
+                    AbstractDungeon.player.cardInUse,
+                    AbstractDungeon.player.limbo.group,
+                    AbstractDungeon.player.hand.group,
+                    AbstractDungeon.player.discardPile.group,
+                    AbstractDungeon.player.drawPile.group,
+                    AbstractDungeon.player.exhaustPile.group);
+            if (existingCard != null) {
+                return existingCard;
+            }
+        }
+
+        return loadCard();
+    }
+
+    @SafeVarargs
+    static <T> T findReferenceByUuid(UUID uuid, Function<T, UUID> uuidExtractor,
+                                     T preferredReference, Iterable<T>... referenceGroups) {
+        if (preferredReference != null && uuid.equals(uuidExtractor.apply(preferredReference))) {
+            return preferredReference;
+        }
+
+        for (Iterable<T> references : referenceGroups) {
+            for (T reference : references) {
+                if (reference != null && uuid.equals(uuidExtractor.apply(reference))) {
+                    return reference;
+                }
+            }
+        }
+        return null;
+    }
+
     public String getName() {
         return StateFactories.cardIds[cardIdIndex];
     }
