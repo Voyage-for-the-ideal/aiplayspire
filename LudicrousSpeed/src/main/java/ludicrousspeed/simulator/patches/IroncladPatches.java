@@ -112,8 +112,6 @@ public class IroncladPatches {
                     }
 
                     if (monster.currentHealth <= 0) {
-
-                        long deathStartTime = System.currentTimeMillis();
                         monster.die();
 
                         if (AbstractDungeon.getMonsters().areMonstersBasicallyDead()) {

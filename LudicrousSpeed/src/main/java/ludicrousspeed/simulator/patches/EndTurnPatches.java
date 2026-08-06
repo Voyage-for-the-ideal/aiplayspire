@@ -14,6 +14,9 @@ public class EndTurnPatches {
         @SpirePrefixPatch
         public static SpireReturn prefix(EndTurnAction action) {
             if (LudicrousSpeedMod.plaidMode) {
+                // Mirror GameActionManager.endTurn(), which also resets
+                // controller values (gamepad hover/keyboard state)
+                AbstractDungeon.player.resetControllerValues();
                 AbstractDungeon.actionManager.turnHasEnded = true;
                 GameActionManager.playerHpLastTurn = AbstractDungeon.player.currentHealth;
 

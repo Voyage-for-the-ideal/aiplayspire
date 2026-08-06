@@ -19,13 +19,20 @@ public class PlayerPatches {
             method = "draw"
     )
     public static class NoSoundDrawPatch {
-        public static void Replace(AbstractPlayer _instance) {
-            if (_instance.hand.size() == 10) {
-                _instance.createHandIsFullDialog();
-            } else {
-                _instance.draw(1);
-                _instance.onCardDrawOrDiscard();
+        // Replaces draw() only in plaid mode; normal mode keeps the vanilla
+        // draw sound and the hand-full dialog behavior
+        @SpirePrefixPatch
+        public static SpireReturn fastDraw(AbstractPlayer _instance) {
+            if (LudicrousSpeedMod.plaidMode) {
+                if (_instance.hand.size() == 10) {
+                    _instance.createHandIsFullDialog();
+                } else {
+                    _instance.draw(1);
+                    _instance.onCardDrawOrDiscard();
+                }
+                return SpireReturn.Return(null);
             }
+            return SpireReturn.Continue();
         }
     }
 

@@ -55,7 +55,10 @@ public class UnlockTrackerPatches {
     )
     public static class AllAscensionUnlockedPatch {
         public static SpireReturn<Boolean> Prefix(AbstractPlayer player) {
-            return SpireReturn.Return(true);
+            if (LudicrousSpeedMod.plaidMode) {
+                return SpireReturn.Return(true);
+            }
+            return SpireReturn.Continue();
         }
     }
 }

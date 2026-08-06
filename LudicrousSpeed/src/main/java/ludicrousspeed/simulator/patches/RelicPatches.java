@@ -9,7 +9,6 @@ import com.evacipated.cardcrawl.modthespire.lib.SpireReturn;
 import com.megacrit.cardcrawl.actions.common.ApplyPowerToRandomEnemyAction;
 import com.megacrit.cardcrawl.cards.AbstractCard;
 import com.megacrit.cardcrawl.characters.AbstractPlayer;
-import com.megacrit.cardcrawl.core.CardCrawlGame;
 import com.megacrit.cardcrawl.dungeons.AbstractDungeon;
 import com.megacrit.cardcrawl.helpers.ImageMaster;
 import com.megacrit.cardcrawl.localization.RelicStrings;
@@ -20,7 +19,6 @@ import ludicrousspeed.LudicrousSpeedMod;
 import relicstats.patches.relics.TheSpecimenInfo;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 
 public class RelicPatches {
     // Fast Mode doesn't load images which will NPE when trying to render, turn off rendering
@@ -44,6 +42,12 @@ public class RelicPatches {
     public static class InstantObtainPatch {
         @SpirePrefixPatch
         public static SpireReturn<Void> noDesc(AbstractRelic relic, AbstractPlayer p, int slot, boolean callOnEquip) {
+            if (!LudicrousSpeedMod.plaidMode) {
+                // Normal mode keeps vanilla behavior (including
+                // getUpdatedDescription, which the fast path skips)
+                return SpireReturn.Continue();
+            }
+
             if (relic.relicId.equals("Circlet") && p != null && p.hasRelic("Circlet")) {
                 AbstractRelic circ = p.getRelic("Circlet");
                 ++circ.counter;
@@ -92,15 +96,12 @@ public class RelicPatches {
         @SpireInsertPatch(loc = 127)
         public static SpireReturn Insert(AbstractRelic _instance, String setId, String imgName, AbstractRelic.RelicTier tier, AbstractRelic.LandingSound sfx) {
             if (LudicrousSpeedMod.plaidMode) {
+                // Guard against the field not being initialized at the insert
+                // point; the debug prints (3 lines of stderr per relic) are gone
                 RelicStrings relicStrings = ReflectionHacks.getPrivate(_instance, AbstractRelic.class, "relicStrings");
-                System.err.println(relicStrings.NAME);
-                System.err.println(_instance.relicId);
-
-                RelicStrings values = CardCrawlGame.languagePack.getRelicStrings(_instance.relicId);
-
-                System.err.println("relic strings " + values.NAME + " " + values.FLAVOR + " " + Arrays.toString(values.DESCRIPTIONS));
-
-                ReflectionHacks.setPrivateFinal(_instance, AbstractRelic.class, "name", relicStrings.NAME);
+                if (relicStrings != null) {
+                    ReflectionHacks.setPrivateFinal(_instance, AbstractRelic.class, "name", relicStrings.NAME);
+                }
                 _instance.tier = tier;
                 return SpireReturn.Return(null);
             }
@@ -196,8 +197,14 @@ public class RelicPatches {
             method = "setDescriptionAfterLoading"
     )
     public static class FixDescriptionNPE {
-        public static void Replace(BottledFlame _instance) {
-
+        // Only skip the description update in plaid mode; normal mode keeps
+        // the vanilla description set after loading
+        @SpirePrefixPatch
+        public static SpireReturn fixNPE(BottledFlame _instance) {
+            if (LudicrousSpeedMod.plaidMode) {
+                return SpireReturn.Return(null);
+            }
+            return SpireReturn.Continue();
         }
     }
 
@@ -252,7 +259,6 @@ public class RelicPatches {
             if (LudicrousSpeedMod.plaidMode) {
                 return SpireReturn.Return(ImageMaster.BOSS_CHEST_OPEN);
             }
-//            System.err.println("sanity this is happening");
             return SpireReturn.Continue();
         }
     }

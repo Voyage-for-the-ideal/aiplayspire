@@ -28,7 +28,9 @@ public class PotionPatches {
                     }
                 }
 
-                if (index < _instance.potionSlots) {
+                // Guard against a transient state where potions is shorter than
+                // potionSlots during initialization (potions.set would throw)
+                if (index < _instance.potions.size() && _instance.potions.get(index) instanceof PotionSlot) {
                     _instance.potions.set(index, potionToObtain);
                     potionToObtain.setAsObtained(index);
                     return SpireReturn.Return(true);
