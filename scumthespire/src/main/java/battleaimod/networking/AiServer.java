@@ -220,6 +220,7 @@ public class AiServer {
                                     BattleAiMod.battleAiController.stopReason());
                             jsonToSend.addProperty("final_state_key", SearchStateKey
                                     .fromSaveState(BattleAiMod.battleAiController.bestEnd.saveState).toString());
+                            jsonToSend.addProperty("state_key_algorithm", SearchStateKey.algorithm());
                             jsonToSend.add("metrics", BattleAiMod.battleAiController.metrics()
                                     .jsonEncode(BattleAiMod.battleAiController.elapsedMillis(),
                                             BattleAiMod.battleAiController.stopReason()));
@@ -323,6 +324,7 @@ public class AiServer {
             response.addProperty("diff_valid", false);
         } else {
             response.addProperty("final_state_key", BattleAiMod.replayController.finalStateKey());
+            response.addProperty("state_key_algorithm", SearchStateKey.algorithm());
             response.addProperty("commands_executed", BattleAiMod.replayController.commandsExecuted());
             response.addProperty("error", BattleAiMod.replayController.error());
             response.addProperty("diff_valid", BattleAiMod.replayController.error() == null);

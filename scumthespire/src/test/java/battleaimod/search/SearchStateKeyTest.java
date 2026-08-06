@@ -28,6 +28,7 @@ public class SearchStateKeyTest {
     public void rendersLowercaseSha256Hex() {
         String encoded = key("{\"turn\":1}").toString();
 
+        assertEquals("sha256", SearchStateKey.algorithm());
         assertEquals(64, encoded.length());
         assertTrue(encoded.matches("[0-9a-f]{64}"));
     }

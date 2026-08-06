@@ -60,12 +60,12 @@ public class TurnNode implements Comparable<TurnNode> {
         StateNode curState = states.peek();
         if (!runningCommands) {
             runningCommands = true;
-            curState.saveState.loadState();
+            controller.loadState(curState.saveState);
             return false;
         }
 
         if (AbstractDungeon.player.currentHealth < 1) {
-            curState.saveState = new SaveState();
+            curState.saveState = controller.captureState();
 
             // Try to die as late as possible
             if (controller.deathNode == null ||
@@ -76,7 +76,7 @@ public class TurnNode implements Comparable<TurnNode> {
 
         if (curState != startingState && isNewTurn(curState)) {
             if (curState.saveState == null) {
-                curState.saveState = new SaveState();
+                curState.saveState = controller.captureState();
             }
 
             controller.turnsLoaded++;
@@ -116,7 +116,7 @@ public class TurnNode implements Comparable<TurnNode> {
         if (curState.isDone()) {
             states.pop();
             if (!states.empty()) {
-                states.peek().saveState.loadState();
+                controller.loadState(states.peek().saveState);
             }
         } else {
             Command toExecute = curState.step();
@@ -125,7 +125,7 @@ public class TurnNode implements Comparable<TurnNode> {
                 controller.turnsLoaded++;
                 states.pop();
                 if (!states.isEmpty()) {
-                    states.peek().saveState.loadState();
+                    controller.loadState(states.peek().saveState);
                 }
                 return true;
             } else {

@@ -60,7 +60,7 @@ public class StateNode {
      */
     public Command step() {
         if (saveState == null) {
-            saveState = new SaveState();
+            saveState = controller.captureState();
         }
 
         if (parent == null || parent.saveState.turn < saveState.turn) {

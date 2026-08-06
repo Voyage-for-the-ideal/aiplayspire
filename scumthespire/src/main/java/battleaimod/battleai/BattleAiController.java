@@ -11,6 +11,7 @@ import battleaimod.search.SearchMetrics;
 import battleaimod.search.SearchProfile;
 import battleaimod.search.SearchStateKey;
 import com.badlogic.gdx.math.MathUtils;
+import com.google.gson.JsonElement;
 import com.megacrit.cardcrawl.cards.AbstractCard;
 import com.megacrit.cardcrawl.dungeons.AbstractDungeon;
 import com.megacrit.cardcrawl.helpers.CardLibrary;
@@ -235,7 +236,7 @@ public class BattleAiController implements Controller {
                     turns.add(toAdd);
                     updateQueueMetrics();
                     targetTurn = bestTurn.startingState.saveState.turn + targetTurnJump;
-                    toAdd.startingState.saveState.loadState();
+                    loadState(toAdd.startingState.saveState);
                     committedTurn = toAdd;
                     nextStreamingCommitExpansion += streamingCommitInterval();
                     bestTurn = null;
@@ -348,15 +349,41 @@ public class BattleAiController implements Controller {
     public boolean registerTurnState(SaveState state) {
         searchMetrics.generatedTurnStates++;
         searchMetrics.deepestTurn = Math.max(searchMetrics.deepestTurn, state.turn);
-        long startedAt = System.nanoTime();
-        SearchStateKey key = SearchStateKey.fromSaveState(state);
-        searchMetrics.stateKeyNanos += System.nanoTime() - startedAt;
+        long encodeStartedAt = System.nanoTime();
+        JsonElement encodedState = state.jsonEncode();
+        long encodeNanos = System.nanoTime() - encodeStartedAt;
+        long canonicalHashStartedAt = System.nanoTime();
+        SearchStateKey key = SearchStateKey.fromJson(encodedState);
+        long canonicalHashNanos = System.nanoTime() - canonicalHashStartedAt;
+        searchMetrics.stateKeyEncodeNanos += encodeNanos;
+        searchMetrics.stateKeyCanonicalHashNanos += canonicalHashNanos;
+        searchMetrics.stateKeyNanos += encodeNanos + canonicalHashNanos;
         if (!seenTurnStates.add(key)) {
             searchMetrics.duplicateTurnStates++;
             return false;
         }
         searchMetrics.uniqueTurnStates++;
         return true;
+    }
+
+    SaveState captureState() {
+        long startedAt = System.nanoTime();
+        try {
+            return new SaveState();
+        } finally {
+            searchMetrics.snapshotNanos += System.nanoTime() - startedAt;
+            searchMetrics.snapshotCount++;
+        }
+    }
+
+    void loadState(SaveState state) {
+        long startedAt = System.nanoTime();
+        try {
+            state.loadState();
+        } finally {
+            searchMetrics.loadStateNanos += System.nanoTime() - startedAt;
+            searchMetrics.loadStateCount++;
+        }
     }
 
     public void updateQueueMetrics() {

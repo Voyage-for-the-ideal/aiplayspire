@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Map;
 
 public final class SearchStateKey {
+    public static final String ALGORITHM = "sha256";
     private final String digest;
 
     private SearchStateKey(String canonicalState) {
@@ -23,6 +24,10 @@ public final class SearchStateKey {
 
     public static SearchStateKey fromSaveState(SaveState state) {
         return fromJson(state.jsonEncode());
+    }
+
+    public static String algorithm() {
+        return ALGORITHM;
     }
 
     public static SearchStateKey fromJson(JsonElement state) {

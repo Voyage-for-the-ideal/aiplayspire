@@ -277,7 +277,8 @@ public class SaveState {
 
     public void loadState() {
 
-        long startLoad = System.currentTimeMillis();
+        long startLoad = System.nanoTime();
+        long phaseStart = startLoad;
 
         // TODO: this is being cleared to prevent grid rewards from going back to a bad state,
         // the combat reward state might need to be set properly if I want to export savestate mod
@@ -296,9 +297,9 @@ public class SaveState {
 
         AbstractDungeon.player = playerState.loadPlayer();
 
-        addRuntime("load 0", System.currentTimeMillis() - startLoad);
+        phaseStart = recordLoadPhase("load_player_ns", phaseStart);
         curMapNodeState.loadMapRoomNode(AbstractDungeon.currMapNode);
-        addRuntime("load 1", System.currentTimeMillis() - startLoad);
+        phaseStart = recordLoadPhase("load_map_ns", phaseStart);
 
         AbstractDungeon.isScreenUp = isScreenUp;
         AbstractDungeon.screen = screen;
@@ -329,7 +330,6 @@ public class SaveState {
             CombatRewardScreenState.loadCombatRewardScreen();
         }
 
-        addRuntime("load 2", System.currentTimeMillis() - startLoad);
         AbstractPlayer player = AbstractDungeon.player;
         ArrayList<AbstractCard> allCards = getAllCards(player);
 
@@ -358,8 +358,6 @@ public class SaveState {
             AbstractDungeon.gridSelectScreen.selectedCards
                     .add(container.loadCard(allCards));
         }
-        addRuntime("load 3", System.currentTimeMillis() - startLoad);
-
         if (!this.gridSelectedCards.isEmpty()) {
 //            System.err
 //                    .println("there were selected cards " + this.gridSelectedCards + " " + allCards
@@ -371,6 +369,8 @@ public class SaveState {
             DrawCardAction.drawnCards.add(card.loadCard(allCards));
         }
 
+        phaseStart = recordLoadPhase("load_ui_history_ns", phaseStart);
+
 
         for (AbstractMonster monster : AbstractDungeon.getCurrRoom().monsters.monsters) {
             monster.applyPowers();
@@ -379,7 +379,6 @@ public class SaveState {
 
         rngState.loadRng(floorNum);
 
-        addRuntime("load total", System.currentTimeMillis() - startLoad);
         AbstractDungeon.player.isEndingTurn = false;
         AbstractDungeon.player.endTurnQueued = false;
         AbstractDungeon.overlayMenu.endTurnButton.enable();
@@ -396,6 +395,14 @@ public class SaveState {
         }
 
         AbstractDungeon.lastCombatMetricKey = this.lastCombatMetricKey;
+        recordLoadPhase("load_postprocess_ns", phaseStart);
+        addRuntime("load_total_ns", System.nanoTime() - startLoad);
+    }
+
+    private static long recordLoadPhase(String name, long phaseStart) {
+        long now = System.nanoTime();
+        addRuntime(name, now - phaseStart);
+        return now;
     }
 
     public void loadInitialState() {
