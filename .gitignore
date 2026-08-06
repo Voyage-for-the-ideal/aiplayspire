@@ -4,6 +4,8 @@ lib/
 
 # STS Data - large JSON.gz run files
 STS Data/
+# Heart Rate crawl data (fetch_heartrate_runs.py)
+raw_heartrate/
 
 # ML checkpoints and processed data
 checkpoints/
