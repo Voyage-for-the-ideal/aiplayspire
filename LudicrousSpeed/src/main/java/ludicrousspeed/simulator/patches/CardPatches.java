@@ -73,6 +73,13 @@ public class CardPatches {
     public static class NoRandomEtherealPatch {
         @SpirePrefixPatch
         public static SpireReturn noShuffle(DiscardAtEndOfTurnAction action) {
+            // Only skip the vanilla shuffle in plaid mode; normal mode keeps
+            // vanilla behavior (shuffle uses an unseeded Random, so the plaid
+            // path skips it without affecting the game's RNG sequence)
+            if (!LudicrousSpeedMod.plaidMode) {
+                return SpireReturn.Continue();
+            }
+
             float duration = ReflectionHacks.getPrivate(action, AbstractGameAction.class, "duration");
             if (duration == Settings.ACTION_DUR_XFAST) {
                 Iterator c = AbstractDungeon.player.hand.group.iterator();
@@ -131,21 +138,20 @@ public class CardPatches {
     public static class FastDiscardPatch {
         @SpirePrefixPatch
         public static SpireReturn Prefix(CardGroup cardGroup, AbstractCard card) {
-            card.clearPowers();
             if (LudicrousSpeedMod.plaidMode) {
-                int startingSize = cardGroup.group.size();
+                // clearPowers only belongs on the fast path; vanilla
+                // moveToDiscardPile does not clear powers (only moveToExhaustPile does)
+                card.clearPowers();
 
                 ReflectionHacks
                         .privateMethod(CardGroup.class, "resetCardBeforeMoving", AbstractCard.class)
                         .invoke(cardGroup, card);
 
-                if (cardGroup.group.size() == startingSize) {
-                    for (AbstractCard groupCard : cardGroup.group) {
-                        if (groupCard.uuid.equals(card.uuid)) {
-                            cardGroup.group.remove(groupCard);
-                            break;
-                        }
-                    }
+                // resetCardBeforeMoving does not remove the card; remove it by
+                // object identity (makeSameInstanceOf copies share UUIDs, so a
+                // UUID match could remove the wrong card)
+                if (cardGroup.group.contains(card)) {
+                    cardGroup.group.remove(card);
                 }
 
                 AbstractDungeon.player.discardPile.addToTop(card);
@@ -175,17 +181,20 @@ public class CardPatches {
     )
     public static class FastMoveToDeckDiscardPatch {
         public static SpireReturn Prefix(CardGroup _instance, AbstractCard card, boolean randomSpot) {
-            ReflectionHacks
-                    .privateMethod(CardGroup.class, "resetCardBeforeMoving", AbstractCard.class)
-                    .invoke(_instance, card);
+            if (LudicrousSpeedMod.plaidMode) {
+                ReflectionHacks
+                        .privateMethod(CardGroup.class, "resetCardBeforeMoving", AbstractCard.class)
+                        .invoke(_instance, card);
 
-            if (randomSpot) {
-                AbstractDungeon.player.drawPile.addToRandomSpot(card);
-            } else {
-                AbstractDungeon.player.drawPile.addToTop(card);
+                if (randomSpot) {
+                    AbstractDungeon.player.drawPile.addToRandomSpot(card);
+                } else {
+                    AbstractDungeon.player.drawPile.addToTop(card);
+                }
+
+                return SpireReturn.Return(null);
             }
-
-            return SpireReturn.Return(null);
+            return SpireReturn.Continue();
         }
     }
 
@@ -303,30 +312,6 @@ public class CardPatches {
     }
 
     @SpirePatch(
-            clz = AbstractCard.class,
-            paramtypez = {},
-            method = "makeSameInstanceOf"
-    )
-    public static class UseCardPoolForRandomCreationAndInstancePatch {
-        public static SpireReturn Prefix(AbstractCard _instance) {
-            if (LudicrousSpeedMod.plaidMode) {
-                AbstractCard result = _instance.makeStatEquivalentCopy();
-
-                while (result == null) {
-                    System.err.println("Failed to create card, trying again...");
-                    result = _instance.makeStatEquivalentCopy();
-                }
-
-                result.uuid = _instance.uuid;
-
-                return SpireReturn.Return(result);
-            }
-            return SpireReturn.Continue();
-        }
-    }
-
-
-    @SpirePatch(
             clz = AbstractPlayer.class,
             paramtypez = {AbstractCard.class},
             method = "bottledCardUpgradeCheck"
@@ -415,24 +400,19 @@ public class CardPatches {
             method = "makeNewCard"
     )
     public static class MakeNewCardPatch {
+        // Shared by Prefix and AddToHandPatch; makeStatEquivalentCopy never
+        // returns null, so no retry loop is needed
+        static AbstractCard makeNewCard(MakeTempCardInHandAction action) {
+            AbstractCard card = ReflectionHacks
+                    .getPrivate(action, MakeTempCardInHandAction.class, "c");
+            boolean sameUUID = ReflectionHacks
+                    .getPrivate(action, MakeTempCardInHandAction.class, "sameUUID");
+            return sameUUID ? card.makeSameInstanceOf() : card.makeStatEquivalentCopy();
+        }
+
         public static SpireReturn Prefix(MakeTempCardInHandAction action) {
             if (LudicrousSpeedMod.plaidMode) {
-                AbstractCard card = ReflectionHacks
-                        .getPrivate(action, MakeTempCardInHandAction.class, "c");
-                boolean sameUUID = ReflectionHacks
-                        .getPrivate(action, MakeTempCardInHandAction.class, "sameUUID");
-
-                AbstractCard result = null;
-
-                while (result == null) {
-                    result = sameUUID ? card.makeSameInstanceOf() : card.makeStatEquivalentCopy();
-
-                    if (result == null) {
-                        System.err.println("Failed to create card, retrying");
-                    }
-                }
-
-                return SpireReturn.Return(result);
+                return SpireReturn.Return(makeNewCard(action));
             }
             return SpireReturn.Continue();
         }
@@ -447,14 +427,7 @@ public class CardPatches {
         public static SpireReturn Prefix(MakeTempCardInHandAction action, int handAmt) {
             if (LudicrousSpeedMod.plaidMode) {
                 for (int i = 0; i < handAmt; ++i) {
-                    AbstractCard card = null;
-                    while (card == null) {
-                        card = (AbstractCard) MakeNewCardPatch.Prefix(action)
-                                                              .get();
-                        if (card == null) {
-                            System.err.println("card was null, retrying...");
-                        }
-                    }
+                    AbstractCard card = MakeNewCardPatch.makeNewCard(action);
 
                     if (card.type != AbstractCard.CardType.CURSE && card.type != AbstractCard.CardType.STATUS && AbstractDungeon.player
                             .hasPower("MasterRealityPower")) {
@@ -564,7 +537,8 @@ public class CardPatches {
                 AbstractDungeon.actionManager
                         .addToBottom(new DamageAllEnemiesAction(p, spray.multiDamage, spray.damageTypeForTurn, AbstractGameAction.AttackEffect.NONE));
 
-                return SpireReturn.Return(false);
+                // DaggerSpray.use is a void method; return null, not false
+                return SpireReturn.Return(null);
             }
 
             return SpireReturn.Continue();
@@ -603,7 +577,10 @@ public class CardPatches {
                     AbstractDungeon.player.limbo.removeCard(card);
                 }
 
-                AbstractDungeon.player.cardInUse = null;
+                // Only clear cardInUse if it is actually this card
+                if (AbstractDungeon.player.cardInUse == card) {
+                    AbstractDungeon.player.cardInUse = null;
+                }
                 _instance.isDone = true;
                 return SpireReturn.Return(null);
             }
@@ -734,7 +711,9 @@ public class CardPatches {
                 if (!AbstractDungeon.isScreenUp) {
                     ReflectionHacks.setPrivate(action, AbstractGameAction.class, "duration", 0);
                     action.isDone = true;
-                } else {
+                } else if (AbstractDungeon.screen == AbstractDungeon.CurrentScreen.HAND_SELECT) {
+                    // Keep waiting only while our own selection screen is up;
+                    // unrelated screens must not stall the action
                     action.isDone = false;
                 }
             }
@@ -775,7 +754,7 @@ public class CardPatches {
 
         @SpireInsertPatch(loc = 366)
         public static SpireReturn Insert(AbstractCard _instance, String id, String name, String imgUrl, int cost, String rawDescription, AbstractCard.CardType type, AbstractCard.CardColor color, AbstractCard.CardRarity rarity, AbstractCard.CardTarget target, DamageInfo.DamageType dType) {
-            if (SaveStateMod.shouldGoFast) {
+            if (LudicrousSpeedMod.plaidMode || SaveStateMod.shouldGoFast) {
                 start = System.currentTimeMillis();
                 _instance.originalName = name;
                 _instance.name = name;
@@ -809,7 +788,7 @@ public class CardPatches {
     public static class classNoLoadCardImagePatc {
         @SpirePrefixPatch
         public static SpireReturn doNothing(CustomCard card, String img) {
-            if (shouldGoFast) {
+            if (LudicrousSpeedMod.plaidMode || shouldGoFast) {
                 return SpireReturn.Return(null);
             }
             return SpireReturn.Continue();
@@ -820,7 +799,7 @@ public class CardPatches {
     public static class skipInitDescription {
         @SpirePrefixPatch
         public static SpireReturn doNothing(AbstractCard card) {
-            if (shouldGoFast) {
+            if (LudicrousSpeedMod.plaidMode || shouldGoFast) {
                 return SpireReturn.Return(null);
             }
             return SpireReturn.Continue();
