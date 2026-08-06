@@ -1,5 +1,6 @@
 package battleaimod.search;
 
+import com.google.common.hash.Hashing;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -8,8 +9,6 @@ import savestate.StateJsonHelper;
 
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.Scanner;
 
 import static org.junit.Assert.assertEquals;
@@ -19,26 +18,26 @@ import static org.junit.Assert.assertTrue;
 
 public class SearchStateKeyTest {
     @Test
-    public void preservesCurrentSha256Digests() {
-        assertEquals("3874dfc4af065b561d52f1030da74edf1f11cabf9efb0f1cee932946aeb5493e",
+    public void preservesMurmur3Digests() {
+        assertEquals("a996b5ff006e386ae5fde91de647314d",
                 key("{\"turn\":2,\"rng\":\"10\",\"cards\":[\"A\",\"B\"]}").toString());
-        assertEquals("91a1ebe182e65c655ba7a5cc4a251a08b2fd61d14737894320335ccc64c24612",
+        assertEquals("d39c999cb0fd2ff41e9c6e44584a17f5",
                 key("{\"z\":null,\"unicode\":\"\\u96ea\\n\\\"\",\"number\":1.25,\"bool\":true,"
                         + "\"array\":[3,\"x\"],\"card\":{\"uuid\":\"client-uuid\",\"id\":\"A\"}}")
                         .toString());
-        assertEquals("5a89a8b8a0fa4a8ac2e06aa48b86a7689a04db8d0f95beb292a0a0cd29f6f00e",
+        assertEquals("cd90ca36a54ae9de66f7474e2fcca90a",
                 key(cardHistory("client-uuid", "client-uuid")).toString());
     }
 
     @Test
-    public void rendersLowercaseSha256Hex() {
+    public void rendersLowercaseMurmur3Hex() {
         String encoded = key("{\"turn\":1}").toString();
         SearchStateKey key = key("{\"turn\":1}");
         String firstEncoding = key.toString();
 
-        assertEquals("sha256", SearchStateKey.algorithm());
-        assertEquals(64, encoded.length());
-        assertTrue(encoded.matches("[0-9a-f]{64}"));
+        assertEquals("murmur3_128", SearchStateKey.algorithm());
+        assertEquals(32, encoded.length());
+        assertTrue(encoded.matches("[0-9a-f]{32}"));
         assertSame(firstEncoding, key.toString());
     }
 
@@ -50,7 +49,7 @@ public class SearchStateKeyTest {
         state.addProperty("text", value);
         JsonElement normalized = StateJsonHelper.normalizeCardUuids(state);
 
-        assertEquals(sha256Hex(normalized.toString()), SearchStateKey.fromJson(state).toString());
+        assertEquals(murmur3Hex(normalized.toString()), SearchStateKey.fromJson(state).toString());
     }
 
     @Test
@@ -106,18 +105,8 @@ public class SearchStateKeyTest {
         return SearchStateKey.fromJson(new JsonParser().parse(json));
     }
 
-    private static String sha256Hex(String value) {
-        try {
-            byte[] digest = MessageDigest.getInstance("SHA-256")
-                    .digest(value.getBytes(StandardCharsets.UTF_8));
-            StringBuilder encoded = new StringBuilder(digest.length * 2);
-            for (byte current : digest) {
-                encoded.append(String.format("%02x", current & 0xff));
-            }
-            return encoded.toString();
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException(e);
-        }
+    private static String murmur3Hex(String value) {
+        return Hashing.murmur3_128().hashString(value, StandardCharsets.UTF_8).toString();
     }
 
     private static String resourceLikeState(String playedCards, String rng) {

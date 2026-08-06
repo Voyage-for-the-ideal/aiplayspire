@@ -1,12 +1,13 @@
 package battleaimod.search;
 
+import com.google.common.hash.HashFunction;
+import com.google.common.hash.Hasher;
+import com.google.common.hash.Hashing;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
 import savestate.SaveState;
 
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -15,7 +16,7 @@ import java.util.List;
 import java.util.Map;
 
 public final class SearchStateKey {
-    public static final String ALGORITHM = "sha256";
+    public static final String ALGORITHM = "murmur3_128";
     private static final char[] HEX = "0123456789abcdef".toCharArray();
     private static final ThreadLocal<CanonicalHasher> HASHER = new ThreadLocal<CanonicalHasher>() {
         @Override
@@ -78,28 +79,21 @@ public final class SearchStateKey {
 
     private static final class CanonicalHasher {
         private static final int BUFFER_SIZE = 8 * 1024;
-        private final MessageDigest digest;
+        private static final HashFunction HASH_FUNCTION = Hashing.murmur3_128();
         private final byte[] buffer = new byte[BUFFER_SIZE];
         private final Map<String, String> uuidAliases = new HashMap<>();
+        private Hasher hasher;
         private int bufferLength;
         private int nextUuidAlias;
 
-        private CanonicalHasher() {
-            try {
-                digest = MessageDigest.getInstance("SHA-256");
-            } catch (NoSuchAlgorithmException e) {
-                throw new IllegalStateException("SHA-256 is unavailable", e);
-            }
-        }
-
         private byte[] hash(JsonElement state) {
-            digest.reset();
+            hasher = HASH_FUNCTION.newHasher();
             bufferLength = 0;
             uuidAliases.clear();
             nextUuidAlias = 0;
             write(state);
             flush();
-            return digest.digest();
+            return hasher.hash().asBytes();
         }
 
         private void write(JsonElement element) {
@@ -253,7 +247,7 @@ public final class SearchStateKey {
 
         private void flush() {
             if (bufferLength > 0) {
-                digest.update(buffer, 0, bufferLength);
+                hasher.putBytes(buffer, 0, bufferLength);
                 bufferLength = 0;
             }
         }
