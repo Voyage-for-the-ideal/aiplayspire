@@ -484,7 +484,6 @@ public class SaveState {
             saveStateJson.addProperty(key, additionalElements.get(key).encode());
         }
 
-        System.err.println("completed encoding");
         return saveStateJson.toString();
     }
 

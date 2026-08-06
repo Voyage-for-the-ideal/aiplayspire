@@ -91,8 +91,6 @@ public class AiServer {
                                 continue;
                             }
 
-                            System.err.println("runRequest is " + runRequest);
-
                             requestFilePath = runRequest.get("fileName").getAsString();
                             clientCwd = runRequest.get("client_cwd").getAsString();
                             Path filePath = Paths.get(requestFilePath);
@@ -121,6 +119,9 @@ public class AiServer {
                             BattleAiMod.requestedTimeoutMillis = runRequest.has("timeout_ms")
                                     ? runRequest.get("timeout_ms").getAsLong()
                                     : profile.timeoutMillis();
+                            System.err.println("runRequest received profile=" + profile
+                                    + " max_expansions=" + BattleAiMod.requestedTurnNum
+                                    + " timeout_ms=" + BattleAiMod.requestedTimeoutMillis);
                             BattleAiMod.saveState = originalState;
                             BattleAiMod.saveState.initPlayerAndCardPool();
 
