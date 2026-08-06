@@ -184,7 +184,7 @@ aiplayspire/
 │   │   ├── inference.py               ← 推理引擎
 │   │   └── api.py                     ← FastAPI 推理服务
 │   ├── checkpoints/                   ← 模型权重
-│   └── processed_data/                ← Parquet 训练数据
+│   └── processed_data_v2/             ← Parquet 训练数据
 ├── STSStateSaver/                     ← 战斗状态序列化 Mod
 │   └── src/main/java/savestate/
 │       ├── SaveState.java             ← 根状态对象,完整战斗状态序列化

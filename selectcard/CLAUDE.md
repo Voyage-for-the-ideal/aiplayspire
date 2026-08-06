@@ -18,11 +18,11 @@ python src/train.py
 # Run inference API server
 uvicorn src.api:app --reload
 
-# Build vocab without full training (faster, uses DataLoader pass)
-python build_vocab_fast.py
-
 # Test reconstructor accuracy (matches simulated deck vs master_deck)
 python src/test_reconstructor.py
+
+# Run model tests
+cd src && python -m unittest test_value_network_v2.py
 
 # Find reconstructor mismatches for debugging
 python src/find_mismatches.py
@@ -36,7 +36,7 @@ No `requirements.txt` exists in this directory — dependencies are PyTorch, pan
 ## Architecture: Data Flow
 
 ```
-STS Data/*.json.gz  →  data_pipeline.py  →  processed_data/*.parquet  →  train.py
+STS Data/*.json.gz  →  data_pipeline.py  →  processed_data_v2/*.parquet  →  train.py
          │                    │                                              │
     raw run history    RunReconstructor                              STSValueNetwork
                        replays each floor                            + STSDataset
@@ -91,9 +91,9 @@ Implicit changes are stored in `_implicit_removals[floor]` / `_implicit_addition
 
 ### Dataset (`dataset.py`)
 
-`STSDataset` lazily loads Parquet chunks via LRU cache (max 16 chunks in memory). Uses binary search (`bisect`) to map global index → (chunk file, local index). Computes standardization stats (mean/std for HP, gold) once at init by scanning all chunks.
+`STSDataset` lazily loads Parquet chunks via LRU cache (max 16 chunks in memory). Uses binary search (`bisect`) to map global index → (chunk file, local index). Only samples from the requested deterministic run-level split are exposed.
 
-`SimpleTokenizer` is built on-the-fly during training — `train.py` saves it to `checkpoints/vocab.json` afterward. For inference, load it via `InferenceTokenizer`.
+The vocabulary and global-feature normalization are fitted from the training split, frozen, and embedded in each checkpoint. Older data and checkpoint formats are unsupported and must be rebuilt or retrained.
 
 **Key detail**: Items are aggregated by `(base_name, upgrade_level)` before tokenization, so 5× Strike_R become one token with count=5. This keeps sequence length manageable (~40-60 tokens vs 200+).
 
@@ -105,7 +105,7 @@ Implicit changes are stored in `_implicit_removals[floor]` / `_implicit_addition
 - **`recommend_choice(state, choices)`**: Evaluates each choice by simulating the resulting state and scoring via `evaluate_state()`. For choices with unknown purge targets (e.g., "remove a card"), it tries removing each unique card in deck and picks the best.
 - **`shop_greedy_search(state, goods)`**: Iteratively buys the single item with the highest marginal V(state) improvement, repeating until nothing improves the score.
 
-**Hardcoded normalization constants** (must match training): `floor/55.0`, `ascension/20.0`, HP `(x - 50.2277) / 158.0118`, gold `(x - 222.6476) / 3719.5747`.
+Global-feature transforms and fitted caps are stored in the checkpoint and reused during inference.
 
 ### API (`api.py`)
 

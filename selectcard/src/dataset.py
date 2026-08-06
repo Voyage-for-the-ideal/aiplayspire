@@ -14,7 +14,7 @@ except ImportError:
     from encoding import ItemVocabulary, PREPROCESSING_VERSION, encode_items, split_items
 
 
-REQUIRED_V2_COLUMNS = {
+REQUIRED_COLUMNS = {
     "run_id",
     "split",
     "target_valid",
@@ -156,12 +156,13 @@ class GlobalFeatureEncoder:
             raise ValueError("Checkpoint global feature caps are incomplete") from exc
 
 
-def _read_v2_frame(path, columns=None):
+def _read_frame(path, columns=None):
     frame = pd.read_parquet(path, columns=columns)
-    missing = REQUIRED_V2_COLUMNS.difference(frame.columns)
+    missing = REQUIRED_COLUMNS.difference(frame.columns)
     if missing:
         raise ValueError(
-            "Processed data is v1 and must be rebuilt with data_pipeline.py; "
+            "Processed data does not match the current schema; "
+            "rebuild it with data_pipeline.py; "
             f"missing columns: {sorted(missing)}"
         )
     versions = set(frame["preprocessing_version"].dropna().unique())
@@ -178,7 +179,7 @@ def build_training_artifacts(parquet_dir):
     vocabulary = ItemVocabulary()
     feature_frames = []
     for path in files:
-        frame = _read_v2_frame(path)
+        frame = _read_frame(path)
         train_frame = frame[(frame["split"] == "train") & frame["target_valid"].astype(bool)]
         feature_frames.append(train_frame[list(GlobalFeatureEncoder.source_feature_names)])
         for column in ("deck", "relics"):
@@ -212,7 +213,7 @@ class STSDataset(Dataset):
         total = 0
 
         for path in self.files:
-            metadata = _read_v2_frame(
+            metadata = _read_frame(
                 path,
                 columns=["run_id", "split", "target_valid", "preprocessing_version"],
             )
@@ -229,7 +230,7 @@ class STSDataset(Dataset):
 
     @lru_cache(maxsize=16)
     def _get_df(self, file_idx):
-        return _read_v2_frame(self.files[file_idx])
+        return _read_frame(self.files[file_idx])
 
     def __getitem__(self, idx):
         if idx < 0:

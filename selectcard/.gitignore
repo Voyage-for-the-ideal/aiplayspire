@@ -161,6 +161,9 @@ mismatched_runs.txt
 mismatch_failure_types_98_sample.txt
 _summary.csv
 
+# Local data collection tools
+src/fetch_heartrate_runs.py
+
 # Temporary or local files
 temp.ipynb
 *.txt

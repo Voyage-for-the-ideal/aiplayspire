@@ -32,10 +32,13 @@ def save_checkpoint(path, model, model_config, vocabulary, feature_encoder, meta
 
 def load_checkpoint(path, map_location="cpu"):
     checkpoint = torch.load(path, map_location=map_location, weights_only=True)
-    if not isinstance(checkpoint, dict) or checkpoint.get("format_version") != 3:
+    if (
+        not isinstance(checkpoint, dict)
+        or checkpoint.get("format_version") != CHECKPOINT_FORMAT_VERSION
+    ):
         raise ValueError(
-            "Legacy v1/v2 checkpoints are incompatible with global features v3. "
-            "Retrain with selectcard/src/train.py; processed_data_v2 can be reused."
+            f"Unsupported checkpoint format; expected version {CHECKPOINT_FORMAT_VERSION}. "
+            "Retrain with selectcard/src/train.py."
         )
     if checkpoint.get("preprocessing_version") != PREPROCESSING_VERSION:
         raise ValueError(
@@ -50,7 +53,7 @@ def load_checkpoint(path, map_location="cpu"):
     }
     missing = required.difference(checkpoint)
     if missing:
-        raise ValueError(f"Incomplete v3 checkpoint; missing: {sorted(missing)}")
+        raise ValueError(f"Incomplete checkpoint; missing: {sorted(missing)}")
     if checkpoint["global_feature_schema_version"] != GlobalFeatureEncoder.schema_version:
         raise ValueError("Checkpoint global feature schema is incompatible")
     vocabulary = ItemVocabulary.from_dict(checkpoint["vocabulary"])

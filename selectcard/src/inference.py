@@ -31,9 +31,7 @@ class InferenceTokenizer:
         )
 
 class STSInferenceEngine:
-    def __init__(self, model_path=None, vocab_path=None):
-        if vocab_path is not None:
-            raise ValueError("v3 checkpoints embed the vocabulary; vocab_path is no longer used")
+    def __init__(self, model_path=None):
         if model_path:
             checkpoint, vocabulary, self.feature_encoder = load_checkpoint(model_path)
             architecture = checkpoint["model_config"]

@@ -251,11 +251,11 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(loaded_vocab.to_dict(), vocabulary.to_dict())
         self.assertEqual(loaded_encoder.to_dict(), feature_encoder.to_dict())
 
-    def test_v2_checkpoint_is_rejected(self):
+    def test_wrong_checkpoint_format_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "model.pth")
             torch.save({"format_version": 2}, path)
-            with self.assertRaisesRegex(ValueError, "v1/v2 checkpoints"):
+            with self.assertRaisesRegex(ValueError, "expected version 3"):
                 load_checkpoint(path)
 
     def test_incompatible_feature_order_is_rejected(self):

@@ -20,7 +20,7 @@ This repository contains an AI-driven system for **Slay the Spire** that predict
   - `data_pipeline.py`: Utilities for data cleaning and transformation.
 - `checkpoints/`: (Ignored) Storage for trained model weights.
 - `STS Data/`: (Ignored) Raw game data files.
-- `processed_data/`: (Ignored) Processed training samples.
+- `processed_data_v2/`: (Ignored) Processed training samples.
 
 ## Getting Started
 
@@ -54,6 +54,9 @@ This repository contains an AI-driven system for **Slay the Spire** that predict
    python src/train.py
    ```
 4. **Inference**: Use the `inference.py` to get card selection advice.
+
+Processed data and checkpoints from earlier versions are not supported. Rebuild the
+dataset and retrain the model when changing to this implementation.
 
 ## Credits
 
