@@ -92,9 +92,7 @@ public class ActionSimulator {
             }
 
 
-//            if (!shouldWaitOnActions()) {
             ActionSimulator.roomUpdate();
-//            }
         }
 
         if (actionManager.currentAction == null && !AbstractDungeon.isScreenUp) {
@@ -245,9 +243,6 @@ public class ActionSimulator {
             actionManager.monsterQueue.remove(0);
         } else if (actionManager.turnHasEnded && !AbstractDungeon.getMonsters()
                                                                  .areMonstersBasicallyDead()) {
-//            actionManager.addToBottom(new TriggerEndOfTurnOrbsAction());
-
-
             if (!AbstractDungeon.isScreenUp) {
                 AbstractDungeon.getMonsters().showIntent();
             }
@@ -332,15 +327,9 @@ public class ActionSimulator {
         updateMonsters();
 
         if (!AbstractDungeon.isScreenUp) {
-//            ActionSimulator.ActionManageUpdate(true);
             if (!AbstractDungeon.getCurrRoom().monsters
                     .areMonstersBasicallyDead() && AbstractDungeon.player.currentHealth > 0) {
-                if (
-                        AbstractDungeon.player.endTurnQueued
-//                                && AbstractDungeon.actionManager.cardQueue.isEmpty() &&
-//                                !AbstractDungeon.actionManager.hasControl && actionManager.actions
-//                                .isEmpty()
-                ) {
+                if (AbstractDungeon.player.endTurnQueued) {
                     AbstractDungeon.player.endTurnQueued = false;
                     AbstractDungeon.player.isEndingTurn = true;
                 }
@@ -414,12 +403,6 @@ public class ActionSimulator {
     }
 
     public static boolean shouldWaitOnActions() {
-        // Only freeze if the AI is pathing
-//        if (LudicrousSpeedMod.controller == null || LudicrousSpeedMod.controller
-//                .isDone() || LudicrousSpeedMod.mustRestart) {
-//            return false;
-//        }
-
         // Screens wait for users even though there are actions in the action manager
         if (AbstractDungeon.isScreenUp) {
             return false;
@@ -450,8 +433,10 @@ public class ActionSimulator {
             return true;
         }
 
+        // The duplicated actions.isEmpty() check was a copy-paste error; the
+        // second check must cover pre-turn actions
         return actionManager.currentAction != null || !actionManager.actions
-                .isEmpty() || !actionManager.actions
+                .isEmpty() || !actionManager.preTurnActions
                 .isEmpty() || actionManager.phase == GameActionManager.Phase.EXECUTING_ACTIONS;
     }
 }

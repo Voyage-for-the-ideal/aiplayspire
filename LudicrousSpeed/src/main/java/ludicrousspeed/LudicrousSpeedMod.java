@@ -10,8 +10,6 @@ import com.megacrit.cardcrawl.vfx.AbstractGameEffect;
 import com.megacrit.cardcrawl.vfx.cardManip.ExhaustCardEffect;
 import ludicrousspeed.simulator.ActionSimulator;
 
-import java.util.ArrayList;
-
 public class LudicrousSpeedMod implements PreUpdateSubscriber, OnStartBattleSubscriber {
     /**
      * Set this controller to your own custom logic
@@ -25,8 +23,6 @@ public class LudicrousSpeedMod implements PreUpdateSubscriber, OnStartBattleSubs
     public static boolean plaidMode = false;
 
     public static boolean mustRestart = false;
-
-    public static ArrayList<String> jsonActionLog = new ArrayList<>();
 
     @Override
     public void receivePreUpdate() {
@@ -42,18 +38,13 @@ public class LudicrousSpeedMod implements PreUpdateSubscriber, OnStartBattleSubs
     }
 
     public static boolean shouldStep() {
-        return shouldCheckForPlays() || isEndCommandAvailable() || ActionSimulator
+        return isEndCommandAvailable() || ActionSimulator
                 .shouldStepAiController();
     }
 
     private static boolean isInDungeon() {
         return CardCrawlGame.mode == CardCrawlGame.GameMode.GAMEPLAY && AbstractDungeon
                 .isPlayerInDungeon() && AbstractDungeon.currMapNode != null;
-    }
-
-    private static boolean shouldCheckForPlays() {
-        return isInDungeon() && (AbstractDungeon
-                .getCurrRoom().phase == AbstractRoom.RoomPhase.COMBAT && !AbstractDungeon.isScreenUp);
     }
 
     private static boolean isEndCommandAvailable() {

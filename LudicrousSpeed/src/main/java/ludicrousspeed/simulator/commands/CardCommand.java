@@ -1,6 +1,5 @@
 package ludicrousspeed.simulator.commands;
 
-import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.megacrit.cardcrawl.actions.GameActionManager;
@@ -14,7 +13,6 @@ import savestate.SaveState;
 
 import java.io.*;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.stream.Collectors;
 
 public class CardCommand implements Command {
@@ -77,37 +75,6 @@ public class CardCommand implements Command {
             } catch (IOException e) {
                 e.printStackTrace();
             }
-        }
-
-        if (!LudicrousSpeedMod.plaidMode) {
-            JsonObject cardLog = new JsonObject();
-            cardLog.addProperty("card_name", AbstractDungeon.player.hand.group.get(cardIndex).name);
-            cardLog.addProperty("card_index", cardIndex);
-            if (monsterIndex != -1) {
-                cardLog.addProperty("monster_index", monsterIndex);
-            }
-
-            JsonObject playerState = new JsonObject();
-            playerState.addProperty("max_health", AbstractDungeon.player.maxHealth);
-            playerState.addProperty("current_health", AbstractDungeon.player.currentHealth);
-            cardLog.add("player_state", playerState);
-
-            JsonArray monstersArray = new JsonArray();
-            ArrayList<AbstractMonster> gameArray = AbstractDungeon.currMapNode.room.monsters.monsters;
-            for(int i = 0; i < gameArray.size(); i++) {
-                AbstractMonster monster = gameArray.get(i);
-                JsonObject monsterJson = new JsonObject();
-
-                monsterJson.addProperty("monster_index", i);
-                monsterJson.addProperty("monster_name", monster.name);
-                monsterJson.addProperty("max_hp", monster.maxHealth);
-                monsterJson.addProperty("current_hp", monster.currentHealth);
-
-                monstersArray.add(monsterJson);
-            }
-            cardLog.add("monster_state", monstersArray);
-
-            LudicrousSpeedMod.jsonActionLog.add(cardLog.toString());
         }
 
         AbstractDungeon.player.hand.refreshHandLayout();
