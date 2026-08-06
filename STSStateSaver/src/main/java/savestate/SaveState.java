@@ -30,6 +30,8 @@ import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
@@ -107,17 +109,18 @@ public class SaveState {
 
         AbstractPlayer player = AbstractDungeon.player;
         ArrayList<AbstractCard> allCards = getAllCards(player);
+        IdentityHashMap<AbstractCard, Integer> cardIndices = identityIndexMap(allCards);
 
         this.cardsPlayedThisTurn = new ArrayList<>();
         this.cardsPlayedThisTurnBackup = new ArrayList<>();
 
         for (AbstractCard abstractCard : AbstractDungeon.actionManager.cardsPlayedThisTurn) {
-            int index = allCards.indexOf(abstractCard);
-            if (index == -1) {
+            Integer index = cardIndices.get(abstractCard);
+            if (index == null) {
                 // Powers don't have indeces
                 this.cardsPlayedThisTurnBackup.add(CardState.forCard(abstractCard));
             } else {
-                this.cardsPlayedThisTurn.add(allCards.indexOf(abstractCard));
+                this.cardsPlayedThisTurn.add(index);
             }
         }
 
@@ -127,14 +130,14 @@ public class SaveState {
 
         for (AbstractCard abstractCard : AbstractDungeon.actionManager.cardsPlayedThisCombat) {
             this.cardsPlayedThisCombat
-                    .add(CardStateContainer.forCard(abstractCard, allCards));
+                    .add(CardStateContainer.forCard(abstractCard, cardIndices));
         }
 
         this.gridSelectedCards = new ArrayList<>();
 
         for (AbstractCard selectedCard : AbstractDungeon.gridSelectScreen.selectedCards) {
             this.gridSelectedCards
-                    .add(CardStateContainer.forCard(selectedCard, allCards));
+                    .add(CardStateContainer.forCard(selectedCard, cardIndices));
         }
 
         this.drawnCards = new ArrayList<>();
@@ -144,7 +147,7 @@ public class SaveState {
         this.isEndingTurn = AbstractDungeon.player.isEndingTurn;
 
         for (AbstractCard card : DrawCardAction.drawnCards) {
-            this.drawnCards.add(CardStateContainer.forCard(card, allCards));
+            this.drawnCards.add(CardStateContainer.forCard(card, cardIndices));
         }
         if (this.isScreenUp && this.screen == AbstractDungeon.CurrentScreen.GRID) {
             this.gridCardSelectAmount = ReflectionHacks
@@ -680,6 +683,17 @@ public class SaveState {
         return allCards;
     }
 
+    static <T> IdentityHashMap<T, Integer> identityIndexMap(List<T> values) {
+        IdentityHashMap<T, Integer> indices = new IdentityHashMap<>();
+        for (int index = 0; index < values.size(); index++) {
+            T value = values.get(index);
+            if (!indices.containsKey(value)) {
+                indices.put(value, index);
+            }
+        }
+        return indices;
+    }
+
     private static boolean hasValue(JsonObject json, String key) {
         return json.has(key) && !json.get(key).isJsonNull();
     }
@@ -774,9 +788,14 @@ public class SaveState {
         private CardState cardState = null;
 
         public static CardStateContainer forCard(AbstractCard card, ArrayList<AbstractCard> allCards) {
+            return forCard(card, identityIndexMap(allCards));
+        }
+
+        private static CardStateContainer forCard(AbstractCard card,
+                                                  IdentityHashMap<AbstractCard, Integer> cardIndices) {
             CardStateContainer result = new CardStateContainer();
-            int index = allCards.indexOf(card);
-            if (index == -1) {
+            Integer index = cardIndices.get(card);
+            if (index == null) {
                 // Powers don't have indeces
                 result.cardState = CardState.forCard(card);
             } else {
