@@ -60,7 +60,6 @@ import com.megacrit.cardcrawl.unlock.UnlockTracker;
 import com.megacrit.cardcrawl.vfx.ThoughtBubble;
 import com.megacrit.cardcrawl.vfx.campfire.CampfireSmithEffect;
 import ludicrousspeed.LudicrousSpeedMod;
-import ludicrousspeed.simulator.commands.GridSelectConfrimCommand;
 import ludicrousspeed.simulator.commands.HandSelectCommand;
 import ludicrousspeed.simulator.commands.HandSelectConfirmCommand;
 import org.lwjgl.opengl.Display;

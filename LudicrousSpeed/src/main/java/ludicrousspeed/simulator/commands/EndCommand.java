@@ -3,12 +3,6 @@ package ludicrousspeed.simulator.commands;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.megacrit.cardcrawl.dungeons.AbstractDungeon;
-import ludicrousspeed.LudicrousSpeedMod;
-import savestate.SaveState;
-
-import java.io.*;
-import java.nio.charset.StandardCharsets;
-import java.util.stream.Collectors;
 
 public class EndCommand implements Command {
     public StateDebugInfo stateDebugInfo = null;
@@ -26,7 +20,7 @@ public class EndCommand implements Command {
                 stateDebugInfo = new StateDebugInfo(parsed.get("state_debug_info").getAsString());
             this.diffStateString = diffStateString;
         } catch (Exception e) {
-            System.err.println("Exception");
+            System.err.println("Exception parsing EndCommand: " + e);
             // still return a plain End Command
         }
 
@@ -39,7 +33,7 @@ public class EndCommand implements Command {
             if (parsed.has("state_debug_info"))
                 stateDebugInfo = new StateDebugInfo(parsed.get("state_debug_info").getAsString());
         } catch (Exception e) {
-            System.err.println("Exception");
+            System.err.println("Exception parsing EndCommand: " + e);
             // still return a plain End Command
         }
 
@@ -47,27 +41,8 @@ public class EndCommand implements Command {
 
     @Override
     public void execute() {
-        if (diffStateString != null) {
-            try {
-                String actualState = new SaveState().diffEncode();
-                String expectedState = "";
-                try (FileInputStream fis = new FileInputStream(diffStateString);
-                     InputStreamReader isr = new InputStreamReader(fis, StandardCharsets.UTF_8);
-                     BufferedReader reader = new BufferedReader(isr)) {
-                    expectedState = reader.lines().collect(Collectors.joining());
-                }
-
-                if (!SaveState.diff(actualState, expectedState)) {
-                    System.err.println("PANIC PANIC PANIC " + this.toString());
-                    LudicrousSpeedMod.mustRestart = true;
-                    return;
-                }
-            } catch (FileNotFoundException e) {
-                e.printStackTrace();
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-
+        if (!StateDiffChecker.check(diffStateString, this.toString())) {
+            return;
         }
 
         AbstractDungeon.overlayMenu.endTurnButton.disable(true);

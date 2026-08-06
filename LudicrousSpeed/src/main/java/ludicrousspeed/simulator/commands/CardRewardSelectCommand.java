@@ -19,6 +19,8 @@ public class CardRewardSelectCommand implements Command {
     public static boolean doHover = false;
     public static AbstractCard hoverCard;
 
+    private String diffStateString = null;
+
     public CardRewardSelectCommand(int cardIndex) {
         this.cardIndex = cardIndex;
     }
@@ -29,15 +31,30 @@ public class CardRewardSelectCommand implements Command {
         this.cardIndex = parsed.get("card_index").getAsInt();
     }
 
+    public CardRewardSelectCommand(String jsonString, String diffStateString) {
+        this(jsonString);
+        this.diffStateString = diffStateString;
+    }
+
     @Override
     public void execute() {
+        if (!StateDiffChecker.check(diffStateString, this.toString())) {
+            return;
+        }
+
         AbstractCard selectedCard = AbstractDungeon.cardRewardScreen.rewardGroup.get(cardIndex);
 
-        CardRewardSelectCommand.doHover = true;
-        CardRewardSelectCommand.hoverCard = selectedCard;
-        selectedCard.hb.clicked = true;
+        try {
+            CardRewardSelectCommand.doHover = true;
+            CardRewardSelectCommand.hoverCard = selectedCard;
+            selectedCard.hb.clicked = true;
 
-        AbstractDungeon.cardRewardScreen.update();
+            AbstractDungeon.cardRewardScreen.update();
+        } finally {
+            // Always reset, even if update throws, or hover logic stays
+            // polluted for every future reward screen
+            CardRewardSelectCommand.doHover = false;
+        }
 
         AbstractDungeon.actionManager.phase = GameActionManager.Phase.EXECUTING_ACTIONS;
     }
@@ -108,7 +125,9 @@ public class CardRewardSelectCommand implements Command {
             public int[] Locate(CtBehavior ctMethodToPatch) throws CannotCompileException, PatchingException {
                 Matcher matcher = new Matcher.MethodCallMatcher(AbstractCard.class, "updateHoverLogic");
                 int[] match = LineFinder.findInOrder(ctMethodToPatch, new ArrayList(), matcher);
-                int var10002 = match[0]++;
+                // Insert one line after the found call so the hover logic
+                // still runs before our patch
+                match[0] = match[0] + 1;
                 return match;
             }
         }

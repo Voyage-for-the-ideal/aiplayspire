@@ -21,26 +21,17 @@ import savestate.PotionState;
 import java.util.*;
 
 public final class CommandList {
-    @Deprecated
-    public static List<Command> getAvailableCommands() {
-        return getAvailableCommands(null);
-    }
-
-    @Deprecated
-    public static List<Command> getAvailableCommands(Comparator<AbstractCard> playHeuristic) {
-        return getAvailableCommands(playHeuristic, new HashMap<>());
-    }
-
     public static List<Command> getAvailableCommands(Comparator<AbstractCard> cardComparator, HashMap<Class, Comparator<AbstractCard>> actionHeuristics) {
         List<Command> commands = new ArrayList<>();
         AbstractPlayer player = AbstractDungeon.player;
         List<AbstractCard> hand = player.hand.group;
         List<AbstractPotion> potions = player.potions;
 
-        List<AbstractMonster> monsters = AbstractDungeon.currMapNode.room.monsters.monsters;
         Set<String> seenCommands = new HashSet<>();
 
         if (shouldCheckForPlays()) {
+            List<AbstractMonster> monsters = AbstractDungeon.currMapNode.room.monsters.monsters;
+
             for(int i = 0; i < hand.size(); i++) {
                 AbstractCard card = hand.get(i);
 
@@ -48,7 +39,7 @@ public final class CommandList {
                     for (int j = 0; j < monsters.size(); j++) {
                         AbstractMonster monster = monsters.get(j);
                         if (card.canUse(player, monster) && !monster.isDeadOrEscaped()) {
-                            addCommandIfNew(commands, seenCommands, new CardCommand(i, j, String.format(card.cardID)));
+                            addCommandIfNew(commands, seenCommands, new CardCommand(i, j, card.cardID));
                         }
                     }
                 }
@@ -74,14 +65,9 @@ public final class CommandList {
                     continue;
                 }
 
-                // Dedupe potions
-                String setName = potion.name;
-                int oldCount = seenCommands.size();
-                seenCommands.add(setName);
-                if (oldCount == seenCommands.size()) {
-                    continue;
-                }
-
+                // Note: no dedupe here. seenCommands is fresh per call, and
+                // the old display-name dedupe made a second same-named potion
+                // (e.g. two Strength Potions) permanently unplayable
                 if (potion.targetRequired) {
                     for (int j = 0; j < monsters.size(); j++) {
                         AbstractMonster monster = monsters.get(j);
@@ -101,8 +87,9 @@ public final class CommandList {
 
                 ArrayList<Integer> orderedIndeces = new ArrayList<>();
 
-                if (actionHeuristics
-                        .containsKey(AbstractDungeon.actionManager.currentAction.getClass())) {
+                Comparator<AbstractCard> heuristic = actionHeuristics
+                        .get(AbstractDungeon.actionManager.currentAction.getClass());
+                if (heuristic != null) {
                     HashMap<Integer, AbstractCard> indexToCardMap = new HashMap<>();
 
                     for (int i = 0; i < AbstractDungeon.player.hand.group.size(); i++) {
@@ -110,8 +97,6 @@ public final class CommandList {
                     }
 
                     indexToCardMap.entrySet().stream().sorted((e1, e2) -> {
-                        Comparator<AbstractCard> heuristic = actionHeuristics
-                                .get(AbstractDungeon.actionManager.currentAction.getClass());
                         int compValue = heuristic.compare(e1.getValue(), e2.getValue());
                         if (compValue == 0) {
                             return e1.getKey() - e2.getKey();
@@ -143,13 +128,13 @@ public final class CommandList {
                     if (AbstractDungeon.actionManager.currentAction instanceof ScryAction) {
                         canClick = false;
                         if (card.type == AbstractCard.CardType.STATUS) {
-                            if (card.cardID != Dazed.ID && card.cardID != VoidCard.ID) {
+                            if (!card.cardID.equals(Dazed.ID) && !card.cardID.equals(VoidCard.ID)) {
                                 canClick = true;
                             }
                         }
 
                         if (card.type == AbstractCard.CardType.CURSE) {
-                            if (card.cardID != Clumsy.ID) {
+                            if (!card.cardID.equals(Clumsy.ID)) {
                                 canClick = true;
                             }
                         }
@@ -168,7 +153,7 @@ public final class CommandList {
             }
 
             if (isGridScreenConfirmAvailable()) {
-                commands.add(GridSelectConfrimCommand.INSTANCE);
+                commands.add(GridSelectConfirmCommand.INSTANCE);
             }
         }
 
@@ -201,8 +186,9 @@ public final class CommandList {
     }
 
     private static boolean isEndCommandAvailable() {
-        return isInDungeon() && AbstractDungeon
-                .getCurrRoom().phase == AbstractRoom.RoomPhase.COMBAT && !AbstractDungeon.isScreenUp;
+        // Same guards as shouldCheckForPlays: alive player, in combat, no
+        // screen up, and no actions in flight
+        return shouldCheckForPlays();
     }
 
     private static boolean isInGridSelect() {

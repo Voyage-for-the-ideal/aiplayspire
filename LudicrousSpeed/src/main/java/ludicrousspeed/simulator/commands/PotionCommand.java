@@ -2,17 +2,12 @@ package ludicrousspeed.simulator.commands;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.megacrit.cardcrawl.actions.GameActionManager;
 import com.megacrit.cardcrawl.actions.utility.WaitAction;
 import com.megacrit.cardcrawl.core.AbstractCreature;
 import com.megacrit.cardcrawl.dungeons.AbstractDungeon;
 import com.megacrit.cardcrawl.potions.AbstractPotion;
 import ludicrousspeed.LudicrousSpeedMod;
-import ludicrousspeed.simulator.ActionSimulator;
-import savestate.SaveState;
-
-import java.io.*;
-import java.nio.charset.StandardCharsets;
-import java.util.stream.Collectors;
 
 public class PotionCommand implements Command {
     private final int potionIndex;
@@ -47,38 +42,16 @@ public class PotionCommand implements Command {
 
     @Override
     public void execute() {
-        if (diffStateString != null) {
-            try {
-                String actualState = new SaveState().diffEncode();
-                String expectedState = "";
-                try (FileInputStream fis = new FileInputStream(diffStateString);
-                     InputStreamReader isr = new InputStreamReader(fis, StandardCharsets.UTF_8);
-                     BufferedReader reader = new BufferedReader(isr)) {
-                    expectedState = reader.lines().collect(Collectors.joining());
-                }
-
-                if (!SaveState.diff(actualState, expectedState)) {
-                    System.err.println("PANIC PANIC PANIC " + this.toString());
-                    LudicrousSpeedMod.mustRestart = true;
-                    return;
-                }
-            } catch (FileNotFoundException e) {
-                e.printStackTrace();
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
+        if (!StateDiffChecker.check(diffStateString, this.toString())) {
+            return;
         }
 
-
         AbstractPotion potion = AbstractDungeon.player.potions.get(potionIndex);
-        AbstractCreature target = AbstractDungeon.player;
+        // Match vanilla PotionPopUp: targetless potions get a null target
+        AbstractCreature target = null;
 
         if (monsterIndex != -1) {
             target = AbstractDungeon.getMonsters().monsters.get(monsterIndex);
-            if (!LudicrousSpeedMod.plaidMode) {
-                String allMonsters = AbstractDungeon.getMonsters().monsters.stream().map(m -> String
-                        .format("hp:%s\t", m.currentHealth)).collect(Collectors.joining());
-            }
         }
 
         potion.use(target);
@@ -89,7 +62,8 @@ public class PotionCommand implements Command {
         if (!LudicrousSpeedMod.plaidMode) {
             AbstractDungeon.actionManager.addToBottom(new WaitAction(.2F));
         } else {
-            ActionSimulator.ActionManageUpdate();
+            // Same fast-path style as CardCommand
+            AbstractDungeon.actionManager.phase = GameActionManager.Phase.EXECUTING_ACTIONS;
         }
     }
 

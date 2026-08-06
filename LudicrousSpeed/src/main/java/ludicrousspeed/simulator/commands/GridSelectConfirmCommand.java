@@ -4,20 +4,32 @@ import com.google.gson.JsonObject;
 import com.megacrit.cardcrawl.dungeons.AbstractDungeon;
 import com.megacrit.cardcrawl.screens.select.GridCardSelectScreen;
 
-public class GridSelectConfrimCommand implements Command {
-    public static final GridSelectConfrimCommand INSTANCE = new GridSelectConfrimCommand();
+public class GridSelectConfirmCommand implements Command {
+    public static final GridSelectConfirmCommand INSTANCE = new GridSelectConfirmCommand();
+
+    private final String diffStateString;
+
+    private GridSelectConfirmCommand() {
+        this.diffStateString = null;
+    }
+
+    public GridSelectConfirmCommand(String diffStateString) {
+        this.diffStateString = diffStateString;
+    }
 
     @Override
     public void execute() {
+        if (!StateDiffChecker.check(diffStateString, this.toString())) {
+            return;
+        }
+
         GridCardSelectScreen screen = AbstractDungeon.gridSelectScreen;
         screen.confirmButton.hb.clicked = true;
         screen.update();
 
         if (AbstractDungeon.isScreenUp) {
-            System.err.println("screen didn't close after pressing confirm button");
+            AbstractDungeon.closeCurrentScreen();
         }
-        AbstractDungeon.closeCurrentScreen();
-
     }
 
     @Override

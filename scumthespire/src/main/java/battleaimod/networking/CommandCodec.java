@@ -8,7 +8,7 @@ import ludicrousspeed.simulator.commands.CardRewardSelectCommand;
 import ludicrousspeed.simulator.commands.Command;
 import ludicrousspeed.simulator.commands.EndCommand;
 import ludicrousspeed.simulator.commands.GridSelectCommand;
-import ludicrousspeed.simulator.commands.GridSelectConfrimCommand;
+import ludicrousspeed.simulator.commands.GridSelectConfirmCommand;
 import ludicrousspeed.simulator.commands.HandSelectCommand;
 import ludicrousspeed.simulator.commands.HandSelectConfirmCommand;
 import ludicrousspeed.simulator.commands.PotionCommand;
@@ -51,13 +51,13 @@ public final class CommandCodec {
             return statePath == null ? HandSelectConfirmCommand.INSTANCE : new HandSelectConfirmCommand(statePath);
         }
         if ("GRID_SELECT".equals(type)) {
-            return new GridSelectCommand(commandString);
+            return statePath == null ? new GridSelectCommand(commandString) : new GridSelectCommand(commandString, statePath);
         }
         if ("GRID_SELECT_CONFIRM".equals(type)) {
-            return GridSelectConfrimCommand.INSTANCE;
+            return statePath == null ? GridSelectConfirmCommand.INSTANCE : new GridSelectConfirmCommand(statePath);
         }
         if ("CARD_REWARD_SELECT".equals(type)) {
-            return new CardRewardSelectCommand(commandString);
+            return statePath == null ? new CardRewardSelectCommand(commandString) : new CardRewardSelectCommand(commandString, statePath);
         }
         throw new IllegalArgumentException("unknown command type: " + type);
     }

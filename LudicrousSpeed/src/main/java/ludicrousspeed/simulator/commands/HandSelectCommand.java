@@ -6,9 +6,6 @@ import com.google.gson.JsonParser;
 import com.megacrit.cardcrawl.dungeons.AbstractDungeon;
 import com.megacrit.cardcrawl.screens.select.HandCardSelectScreen;
 
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
-
 public class HandSelectCommand implements Command {
     private final int cardIndex;
     public final String diffStateString;
@@ -34,9 +31,15 @@ public class HandSelectCommand implements Command {
 
     @Override
     public void execute() {
+        if (!StateDiffChecker.check(diffStateString, this.toString())) {
+            return;
+        }
+
         AbstractDungeon.handCardSelectScreen.hoveredCard = AbstractDungeon.player.hand.group
                 .get(cardIndex);
 
+        // selectHoveredCard is private in this STS version; if the signature
+        // changes on a game update the reflection silently fails
         ReflectionHacks.privateMethod(HandCardSelectScreen.class, "selectHoveredCard")
                        .invoke(AbstractDungeon.handCardSelectScreen);
     }

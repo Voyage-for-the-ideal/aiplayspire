@@ -19,8 +19,14 @@ public class HandSelectConfirmCommand implements Command {
 
     @Override
     public void execute() {
+        if (!StateDiffChecker.check(diffStateString, this.toString())) {
+            return;
+        }
+
         HandCardSelectScreen screen = AbstractDungeon.handCardSelectScreen;
 
+        // Redundant safety net: prep() and HandSelectScreenState already
+        // point the screen's hand at player.hand
         ReflectionHacks
                 .setPrivate(AbstractDungeon.handCardSelectScreen, HandCardSelectScreen.class, "hand", AbstractDungeon.player.hand);
 

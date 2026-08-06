@@ -14,6 +14,8 @@ public class GridSelectCommand implements Command {
     private final int cardIndex;
     private static boolean ignoreHoverLogic = false;
 
+    private String diffStateString = null;
+
     public GridSelectCommand(int cardIndex) {
         this.cardIndex = cardIndex;
     }
@@ -24,10 +26,16 @@ public class GridSelectCommand implements Command {
         this.cardIndex = parsed.get("card_index").getAsInt();
     }
 
+    public GridSelectCommand(String jsonString, String diffStateString) {
+        this(jsonString);
+        this.diffStateString = diffStateString;
+    }
+
     @Override
     public void execute() {
-        AbstractDungeon.CurrentScreen screenBeforeCommand = AbstractDungeon.screen;
-        AbstractDungeon.CurrentScreen previousScreenBeforeCommand = AbstractDungeon.previousScreen;
+        if (!StateDiffChecker.check(diffStateString, this.toString())) {
+            return;
+        }
 
         AbstractCard target = AbstractDungeon.gridSelectScreen.targetGroup.group.get(cardIndex);
 
@@ -39,17 +47,18 @@ public class GridSelectCommand implements Command {
         target.hb.hovered = true;
         target.hb.clicked = true;
 
-        ignoreHoverLogic = true;
-        AbstractDungeon.gridSelectScreen.update();
-
-        if (AbstractDungeon.gridSelectScreen.confirmScreenUp) {
-            AbstractDungeon.gridSelectScreen.confirmButton.hb.clicked = true;
+        try {
+            ignoreHoverLogic = true;
             AbstractDungeon.gridSelectScreen.update();
-        }
-        ignoreHoverLogic = false;
 
-        if (target.hb.clicked) {
-            System.err.println("should have unclicked");
+            if (AbstractDungeon.gridSelectScreen.confirmScreenUp) {
+                AbstractDungeon.gridSelectScreen.confirmButton.hb.clicked = true;
+                AbstractDungeon.gridSelectScreen.update();
+            }
+        } finally {
+            // Always reset, even if update throws, or the hover logic
+            // stays globally disabled
+            ignoreHoverLogic = false;
         }
 
         target.hb.clicked = false;
