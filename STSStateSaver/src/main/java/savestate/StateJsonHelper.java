@@ -7,6 +7,11 @@ import savestate.actions.CurrentActionState;
 import savestate.powers.PowerState;
 
 import java.lang.reflect.Type;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 public class StateJsonHelper {
     private static final Gson GSON = new GsonBuilder()
@@ -65,6 +70,55 @@ public class StateJsonHelper {
 
     public static CurrentActionState currentActionStateFromJson(JsonElement json) {
         return typedStateFromJson(json, CurrentActionState.class);
+    }
+
+    public static JsonElement normalizeCardUuids(JsonElement json) {
+        return normalizeCardUuids(json, new HashMap<String, String>(), new int[]{0});
+    }
+
+    private static JsonElement normalizeCardUuids(JsonElement json, Map<String, String> aliases,
+                                                   int[] nextAlias) {
+        if (isNull(json)) {
+            return JsonNull.INSTANCE;
+        }
+
+        if (json.isJsonArray()) {
+            JsonArray result = new JsonArray();
+            for (JsonElement element : json.getAsJsonArray()) {
+                result.add(normalizeCardUuids(element, aliases, nextAlias));
+            }
+            return result;
+        }
+
+        if (json.isJsonObject()) {
+            JsonObject source = json.getAsJsonObject();
+            JsonObject result = new JsonObject();
+            List<String> keys = new ArrayList<>();
+            for (Map.Entry<String, JsonElement> entry : source.entrySet()) {
+                keys.add(entry.getKey());
+            }
+            Collections.sort(keys);
+
+            for (String key : keys) {
+                JsonElement value = source.get(key);
+                if ("uuid".equals(key) && value != null && value.isJsonPrimitive()
+                        && value.getAsJsonPrimitive().isString()) {
+                    String uuid = value.getAsString();
+                    String alias = aliases.get(uuid);
+                    if (alias == null) {
+                        alias = "card-uuid-" + nextAlias[0]++;
+                        aliases.put(uuid, alias);
+                    }
+                    result.addProperty(key, alias);
+                } else {
+                    result.add(key, normalizeCardUuids(value, aliases, nextAlias));
+                }
+            }
+            return result;
+        }
+
+        // JsonPrimitive is immutable, so sharing it does not compromise the copied tree.
+        return json;
     }
 
     private static JsonObject typedStateToJson(Object state) {

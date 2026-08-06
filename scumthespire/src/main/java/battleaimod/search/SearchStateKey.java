@@ -4,6 +4,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import savestate.SaveState;
+import savestate.StateJsonHelper;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -25,7 +26,7 @@ public final class SearchStateKey {
     }
 
     public static SearchStateKey fromJson(JsonElement state) {
-        return new SearchStateKey(canonicalize(state));
+        return new SearchStateKey(canonicalize(StateJsonHelper.normalizeCardUuids(state)));
     }
 
     static String canonicalize(JsonElement element) {

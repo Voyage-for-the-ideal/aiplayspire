@@ -40,6 +40,26 @@ public class SearchStateKeyTest {
         assertNotEquals(normalCost, freeThisTurn);
     }
 
+    @Test
+    public void ignoresConcreteCardUuidsWhenReferenceTopologyMatches() {
+        SearchStateKey client = key(cardHistory("10590ee7-4b45-477f-aa38-f94a3012e5de",
+                "10590ee7-4b45-477f-aa38-f94a3012e5de"));
+        SearchStateKey server = key(cardHistory("00000000-0000-0000-0000-0000000da991",
+                "00000000-0000-0000-0000-0000000da991"));
+
+        assertEquals(client, server);
+    }
+
+    @Test
+    public void distinguishesDifferentCardReferenceTopology() {
+        SearchStateKey sameCard = key(cardHistory("10590ee7-4b45-477f-aa38-f94a3012e5de",
+                "10590ee7-4b45-477f-aa38-f94a3012e5de"));
+        SearchStateKey differentCards = key(cardHistory("00000000-0000-0000-0000-0000000da991",
+                "00000000-0000-0000-0000-0000000da992"));
+
+        assertNotEquals(sameCard, differentCards);
+    }
+
     private static SearchStateKey key(String json) {
         return SearchStateKey.fromJson(new JsonParser().parse(json));
     }
@@ -49,6 +69,12 @@ public class SearchStateKeyTest {
                 + "\"cards_played_this_turn\":" + playedCards + ","
                 + "\"player_state\":{\"health\":40},"
                 + "\"monster_state\":{\"health\":20}}";
+    }
+
+    private static String cardHistory(String turnUuid, String combatUuid) {
+        return "{\"cards_played_this_turn_backup\":[{\"card_id\":\"Creative AI\",\"uuid\":\""
+                + turnUuid + "\"}],\"cards_played_this_combat\":[{\"card_index\":-1,"
+                + "\"card_state\":{\"card_id\":\"Creative AI\",\"uuid\":\"" + combatUuid + "\"}}]}";
     }
 
     private static String readFixture(String name) {

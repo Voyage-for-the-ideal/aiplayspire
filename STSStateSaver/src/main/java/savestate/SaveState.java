@@ -558,6 +558,8 @@ public class SaveState {
     public static boolean diff(String diffString1, String diffString2) {
         JsonObject one = new JsonParser().parse(diffString1).getAsJsonObject();
         JsonObject two = new JsonParser().parse(diffString2).getAsJsonObject();
+        JsonObject normalizedOne = StateJsonHelper.normalizeCardUuids(one).getAsJsonObject();
+        JsonObject normalizedTwo = StateJsonHelper.normalizeCardUuids(two).getAsJsonObject();
 
         boolean allMatch = true;
 
@@ -595,31 +597,32 @@ public class SaveState {
             System.err.println(two.get("total_discarded_this_turn").getAsInt());
         }
 
-        allMatch = compareJsonField(one, two, "screen_name") && allMatch;
-        allMatch = compareJsonField(one, two, "previous_screen_name") && allMatch;
-        allMatch = compareJsonField(one, two, "is_screen_up") && allMatch;
-        allMatch = compareJsonField(one, two, "turn") && allMatch;
-        allMatch = compareJsonField(one, two, "mantra_gained") && allMatch;
-        allMatch = compareJsonField(one, two, "end_turn_queued") && allMatch;
-        allMatch = compareJsonField(one, two, "is_ending_turn") && allMatch;
-        allMatch = compareJsonField(one, two, "lesson_learned_count") && allMatch;
-        allMatch = compareJsonField(one, two, "parasite_count") && allMatch;
-        allMatch = compareJsonField(one, two, "grid_card_select_amount") && allMatch;
-        allMatch = compareJsonField(one, two, "cards_played_this_turn") && allMatch;
-        allMatch = compareJsonField(one, two, "cards_played_this_turn_backup") && allMatch;
-        allMatch = compareJsonField(one, two, "cards_played_this_combat") && allMatch;
-        allMatch = compareJsonField(one, two, "grid_selected_cards") && allMatch;
-        allMatch = compareJsonField(one, two, "drawn_cards") && allMatch;
-        allMatch = compareJsonField(one, two, "hand_select_screen_state") && allMatch;
-        allMatch = compareJsonField(one, two, "grid_card_select_screen_state") && allMatch;
-        allMatch = compareJsonField(one, two, "card_reward_screen_state") && allMatch;
+        allMatch = compareJsonField(normalizedOne, normalizedTwo, one, two, "screen_name") && allMatch;
+        allMatch = compareJsonField(normalizedOne, normalizedTwo, one, two, "previous_screen_name") && allMatch;
+        allMatch = compareJsonField(normalizedOne, normalizedTwo, one, two, "is_screen_up") && allMatch;
+        allMatch = compareJsonField(normalizedOne, normalizedTwo, one, two, "turn") && allMatch;
+        allMatch = compareJsonField(normalizedOne, normalizedTwo, one, two, "mantra_gained") && allMatch;
+        allMatch = compareJsonField(normalizedOne, normalizedTwo, one, two, "end_turn_queued") && allMatch;
+        allMatch = compareJsonField(normalizedOne, normalizedTwo, one, two, "is_ending_turn") && allMatch;
+        allMatch = compareJsonField(normalizedOne, normalizedTwo, one, two, "lesson_learned_count") && allMatch;
+        allMatch = compareJsonField(normalizedOne, normalizedTwo, one, two, "parasite_count") && allMatch;
+        allMatch = compareJsonField(normalizedOne, normalizedTwo, one, two, "grid_card_select_amount") && allMatch;
+        allMatch = compareJsonField(normalizedOne, normalizedTwo, one, two, "cards_played_this_turn") && allMatch;
+        allMatch = compareJsonField(normalizedOne, normalizedTwo, one, two, "cards_played_this_turn_backup") && allMatch;
+        allMatch = compareJsonField(normalizedOne, normalizedTwo, one, two, "cards_played_this_combat") && allMatch;
+        allMatch = compareJsonField(normalizedOne, normalizedTwo, one, two, "grid_selected_cards") && allMatch;
+        allMatch = compareJsonField(normalizedOne, normalizedTwo, one, two, "drawn_cards") && allMatch;
+        allMatch = compareJsonField(normalizedOne, normalizedTwo, one, two, "hand_select_screen_state") && allMatch;
+        allMatch = compareJsonField(normalizedOne, normalizedTwo, one, two, "grid_card_select_screen_state") && allMatch;
+        allMatch = compareJsonField(normalizedOne, normalizedTwo, one, two, "card_reward_screen_state") && allMatch;
 
         return allMatch;
     }
 
-    private static boolean compareJsonField(JsonObject one, JsonObject two, String key) {
-        JsonElement oneElement = one.get(key);
-        JsonElement twoElement = two.get(key);
+    private static boolean compareJsonField(JsonObject normalizedOne, JsonObject normalizedTwo,
+                                            JsonObject originalOne, JsonObject originalTwo, String key) {
+        JsonElement oneElement = normalizedOne.get(key);
+        JsonElement twoElement = normalizedTwo.get(key);
 
         if (oneElement == null) {
             oneElement = com.google.gson.JsonNull.INSTANCE;
@@ -631,12 +634,17 @@ public class SaveState {
         boolean matches = oneElement.equals(twoElement);
         if (!matches) {
             System.err.println(key + " state mismatch");
-            System.err.println(oneElement.toString());
+            System.err.println(valueOrNull(originalOne, key).toString());
             System.err.println("----------------------------------------------");
-            System.err.println(twoElement.toString());
+            System.err.println(valueOrNull(originalTwo, key).toString());
         }
 
         return matches;
+    }
+
+    private static JsonElement valueOrNull(JsonObject json, String key) {
+        JsonElement value = json.get(key);
+        return value == null ? com.google.gson.JsonNull.INSTANCE : value;
     }
 
     private static ArrayList<AbstractCard> getAllCards(AbstractPlayer player) {

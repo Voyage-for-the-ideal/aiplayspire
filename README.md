@@ -225,7 +225,3 @@ aiplayspire/
     ├── events/                        ← 事件类
     └── ...
 ```
-
-## 许可证
-
-本项目仅供学习和研究使用。《杀戮尖塔》(Slay the Spire) 版权归 Mega Crit Games 所有。
