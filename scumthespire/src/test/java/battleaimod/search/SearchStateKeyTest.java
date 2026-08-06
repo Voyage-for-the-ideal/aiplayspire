@@ -9,8 +9,29 @@ import java.util.Scanner;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertTrue;
 
 public class SearchStateKeyTest {
+    @Test
+    public void preservesCurrentSha256Digests() {
+        assertEquals("3874dfc4af065b561d52f1030da74edf1f11cabf9efb0f1cee932946aeb5493e",
+                key("{\"turn\":2,\"rng\":\"10\",\"cards\":[\"A\",\"B\"]}").toString());
+        assertEquals("91a1ebe182e65c655ba7a5cc4a251a08b2fd61d14737894320335ccc64c24612",
+                key("{\"z\":null,\"unicode\":\"\\u96ea\\n\\\"\",\"number\":1.25,\"bool\":true,"
+                        + "\"array\":[3,\"x\"],\"card\":{\"uuid\":\"client-uuid\",\"id\":\"A\"}}")
+                        .toString());
+        assertEquals("5a89a8b8a0fa4a8ac2e06aa48b86a7689a04db8d0f95beb292a0a0cd29f6f00e",
+                key(cardHistory("client-uuid", "client-uuid")).toString());
+    }
+
+    @Test
+    public void rendersLowercaseSha256Hex() {
+        String encoded = key("{\"turn\":1}").toString();
+
+        assertEquals(64, encoded.length());
+        assertTrue(encoded.matches("[0-9a-f]{64}"));
+    }
+
     @Test
     public void ignoresJsonObjectFieldOrderButPreservesArrayOrder() {
         SearchStateKey first = key("{\"turn\":2,\"rng\":\"10\",\"cards\":[\"A\",\"B\"]}");
