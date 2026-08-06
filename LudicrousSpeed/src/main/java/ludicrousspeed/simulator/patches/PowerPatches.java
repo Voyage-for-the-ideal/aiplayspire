@@ -39,9 +39,12 @@ public class PowerPatches {
     public static class FastRelicInitializeTipsPatch {
         public static SpireReturn Prefix(AbstractPower _instance, int amount) {
             if (LudicrousSpeedMod.plaidMode) {
-                if (amount != -1) {
-                    _instance.amount += amount;
+                // Match vanilla stackPower: the "does not stack" check is on the
+                // power's current amount (-1 marker), not the incoming parameter
+                if (_instance.amount == -1) {
+                    return SpireReturn.Return(null);
                 }
+                _instance.amount += amount;
                 return SpireReturn.Return(null);
             }
             return SpireReturn.Continue();
@@ -55,13 +58,16 @@ public class PowerPatches {
     public static class MayhemPowerActionPatch {
         @SpirePrefixPatch
         public static SpireReturn betterAction(MayhemPower power) {
-            power.flash();
+            if (LudicrousSpeedMod.plaidMode) {
+                power.flash();
 
-            for(int i = 0; i < power.amount; i++) {
-                AbstractDungeon.actionManager.addToBottom(new MayhemAction());
+                for(int i = 0; i < power.amount; i++) {
+                    AbstractDungeon.actionManager.addToBottom(new MayhemAction());
+                }
+
+                return SpireReturn.Return(null);
             }
-
-            return SpireReturn.Return(null);
+            return SpireReturn.Continue();
         }
     }
 
@@ -82,7 +88,6 @@ public class PowerPatches {
 
                     if (powerToApply instanceof NoDrawPower && target
                             .hasPower(powerToApply.ID)) {
-                        action.isDone = true;
                         return SpireReturn.Return(null);
                     }
 
@@ -208,8 +213,9 @@ public class PowerPatches {
     public static class FastRemovePowerPatch {
         public static void Prefix(RemoveSpecificPowerAction _instance) {
             if (LudicrousSpeedMod.plaidMode) {
+                // Finish in a single frame; Postfix forces isDone anyway
                 ReflectionHacks
-                        .setPrivate(_instance, AbstractGameAction.class, "duration", .1F);
+                        .setPrivate(_instance, AbstractGameAction.class, "duration", 0F);
             }
         }
 
@@ -261,7 +267,7 @@ public class PowerPatches {
     public static class OnModifyPowerPatch {
         @SpirePrefixPatch
         public static SpireReturn doNothing() {
-            if (shouldGoFast) {
+            if (LudicrousSpeedMod.plaidMode || shouldGoFast) {
                 if (AbstractDungeon.player != null) {
                     AbstractDungeon.player.hand.applyPowers();
                     if (AbstractDungeon.player.hasPower("Focus")) {
@@ -290,7 +296,7 @@ public class PowerPatches {
     public static class NoLoadRegionPatch {
         @SpirePrefixPatch
         public static SpireReturn doNothing(AbstractPower power, String fileName) {
-            if(shouldGoFast) {
+            if(LudicrousSpeedMod.plaidMode || shouldGoFast) {
                 return SpireReturn.Return(null);
             }
             return SpireReturn.Continue();
