@@ -1,14 +1,20 @@
 package battleaimod.search;
 
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import org.junit.Test;
+import savestate.StateJsonHelper;
 
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Scanner;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
 public class SearchStateKeyTest {
@@ -27,10 +33,24 @@ public class SearchStateKeyTest {
     @Test
     public void rendersLowercaseSha256Hex() {
         String encoded = key("{\"turn\":1}").toString();
+        SearchStateKey key = key("{\"turn\":1}");
+        String firstEncoding = key.toString();
 
         assertEquals("sha256", SearchStateKey.algorithm());
         assertEquals(64, encoded.length());
         assertTrue(encoded.matches("[0-9a-f]{64}"));
+        assertSame(firstEncoding, key.toString());
+    }
+
+    @Test
+    public void matchesGsonEncodingForEscapedAndUnicodeStrings() {
+        String value = "<>&='\\\"\t\b\n\r\f" + (char) 0x01 + (char) 0x2028 + (char) 0x2029
+                + new String(Character.toChars(0x1f603)) + (char) 0xd800;
+        JsonObject state = new JsonObject();
+        state.addProperty("text", value);
+        JsonElement normalized = StateJsonHelper.normalizeCardUuids(state);
+
+        assertEquals(sha256Hex(normalized.toString()), SearchStateKey.fromJson(state).toString());
     }
 
     @Test
@@ -84,6 +104,20 @@ public class SearchStateKeyTest {
 
     private static SearchStateKey key(String json) {
         return SearchStateKey.fromJson(new JsonParser().parse(json));
+    }
+
+    private static String sha256Hex(String value) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(value.getBytes(StandardCharsets.UTF_8));
+            StringBuilder encoded = new StringBuilder(digest.length * 2);
+            for (byte current : digest) {
+                encoded.append(String.format("%02x", current & 0xff));
+            }
+            return encoded.toString();
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     private static String resourceLikeState(String playedCards, String rng) {
