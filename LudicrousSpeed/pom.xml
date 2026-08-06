@@ -4,10 +4,10 @@
 
     <groupId>autoplay</groupId>
     <artifactId>LudicrousSpeed</artifactId>
-    <version>1.1.2</version>
+    <version>1.1.3</version>
     <packaging>jar</packaging>
     <name>Ludicrous Speed</name>
-    <description>Fast-forward combat simulation engine. Replaces the animation-driven action loop with a blocking simulator that skips delays and visual effects, and exposes card plays, potions, end-turn, and screen selections (hand/grid/card reward) as JSON-scriptable commands with deduplication. Designed to power battle search together with STSStateSaver and Battle Ai Mod. Requires BaseMod, SaveStateMod, and StSLib.</description>
+    <description>Fast-forward combat simulation engine. Replaces the animation-driven action loop with a blocking simulator that skips delays and visual effects, and exposes card plays, potions, end-turn, and screen selections (hand/grid/card reward) as JSON-scriptable commands with replay state-diff verification across all command types. Fixes fast-path patches leaking into normal play (monster spawn slots, discard powers, exhaust particles, intent data) and corrects power stacking semantics. Designed to power battle search together with STSStateSaver and Battle Ai Mod. Requires BaseMod, SaveStateMod, and StSLib.</description>
 
     <properties>
         <maven.compiler.source>1.8</maven.compiler.source>
