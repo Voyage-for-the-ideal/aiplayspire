@@ -1,0 +1,35 @@
+# Server training environment (Linux + CUDA)
+# Usage:
+#   conda env create -f environment.yml
+#   conda activate spire
+#   cd selectcard && python src/train.py
+#
+# CUDA version: adjust pytorch-cuda to match the server's driver
+#   nvidia-smi  -> shows the max supported CUDA version
+#   RTX 50 series (Blackwell, sm_120) -> REQUIRES pytorch>=2.6 + pytorch-cuda>=12.6;
+#     older torch (e.g. 2.5.x cu121) only supports sm_50..sm_90 and crashes
+#     with "no kernel image is available for execution on the device".
+#   RTX 30/40 series  -> pytorch-cuda=12.1 works (or 11.8)
+name: spire
+
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.11
+  - pip
+  # --- deep learning ---
+  - pytorch=2.7.1
+  - pytorch-cuda=12.8
+  # --- data processing (reads processed_data_v2/*.parquet) ---
+  - numpy
+  - pandas>=2.0
+  - pyarrow>=14.0
+  - scikit-learn>=1.3
+  # --- inference API (optional; safe to remove if only training) ---
+  - fastapi
+  - uvicorn
+  - pydantic

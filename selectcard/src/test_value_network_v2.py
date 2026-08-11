@@ -1,13 +1,21 @@
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 import pandas as pd
 import torch
+from torch.utils.data import DataLoader
 
 from checkpointing import load_checkpoint, save_checkpoint
+from data_contract import FILTER_VERSION
 from data_pipeline import act_target, assign_split
-from dataset import GlobalFeatureEncoder, build_training_artifacts
+from dataset import (
+    TRAINING_ARTIFACT_CACHE_NAME,
+    GlobalFeatureEncoder,
+    STSDataset,
+    build_training_artifacts,
+)
 from encoding import (
     PREPROCESSING_VERSION,
     ItemVocabulary,
@@ -125,9 +133,12 @@ class GlobalFeatureEncoderTests(unittest.TestCase):
         self.assertLess(normal, 1.0)
         self.assertEqual(extreme, 1.0)
 
-    def test_ascension_maps_a15_to_zero_and_a20_to_one(self):
+    def test_ascension_maps_a0_a10_and_a20(self):
         self.assertEqual(
-            self.encoder.transform_state(self._state(ascension=15))[8], 0.0
+            self.encoder.transform_state(self._state(ascension=0))[8], 0.0
+        )
+        self.assertEqual(
+            self.encoder.transform_state(self._state(ascension=10))[8], 0.5
         )
         self.assertEqual(
             self.encoder.transform_state(self._state(ascension=20))[8], 1.0
@@ -139,6 +150,7 @@ class GlobalFeatureEncoderTests(unittest.TestCase):
             {"max_hp": 0},
             {"gold": -1},
             {"floor": float("inf")},
+            {"ascension": 21},
         ):
             with self.subTest(overrides=overrides):
                 with self.assertRaises(ValueError):
@@ -159,6 +171,8 @@ class GlobalFeatureEncoderTests(unittest.TestCase):
                     "split": split,
                     "target_valid": target_valid,
                     "preprocessing_version": PREPROCESSING_VERSION,
+                    "filter_version": FILTER_VERSION,
+                    "ascension_band": 5,
                     "floor": 10,
                     "hp": 50.0,
                     "max_hp": 80.0,
@@ -171,9 +185,82 @@ class GlobalFeatureEncoderTests(unittest.TestCase):
             ]
         )
         with tempfile.TemporaryDirectory() as directory:
-            frame.to_parquet(os.path.join(directory, "data.parquet"))
+            frame.to_parquet(
+                os.path.join(directory, "train_valid_chunk_00000.parquet")
+            )
             _, encoder = build_training_artifacts(directory)
         self.assertAlmostEqual(encoder.caps["gold_q995"], 19.95)
+
+    def test_training_artifacts_are_loaded_from_cache(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "run_id": "run-1",
+                    "split": "train",
+                    "target_valid": True,
+                    "preprocessing_version": PREPROCESSING_VERSION,
+                    "filter_version": FILTER_VERSION,
+                    "ascension_band": 0,
+                    "floor": 1,
+                    "hp": 70.0,
+                    "max_hp": 80.0,
+                    "gold": 99.0,
+                    "ascension": 0,
+                    "deck": "Bash",
+                    "relics": "Burning Blood",
+                }
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            frame.to_parquet(
+                os.path.join(directory, "train_valid_chunk_00000.parquet")
+            )
+            expected_vocabulary, expected_encoder = build_training_artifacts(directory)
+            self.assertTrue(
+                os.path.isfile(os.path.join(directory, TRAINING_ARTIFACT_CACHE_NAME))
+            )
+            with mock.patch(
+                "dataset._read_frame",
+                side_effect=AssertionError("parquet should not be read on a cache hit"),
+            ):
+                vocabulary, encoder = build_training_artifacts(directory)
+
+        self.assertEqual(vocabulary.to_dict(), expected_vocabulary.to_dict())
+        self.assertEqual(encoder.to_dict(), expected_encoder.to_dict())
+
+    def test_dataset_loads_with_multiple_workers(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "run_id": f"run-{index}",
+                    "split": "train",
+                    "target_valid": True,
+                    "preprocessing_version": PREPROCESSING_VERSION,
+                    "filter_version": FILTER_VERSION,
+                    "ascension_band": 0,
+                    "floor": index + 1,
+                    "hp": 70.0,
+                    "max_hp": 80.0,
+                    "gold": 99.0,
+                    "ascension": 0,
+                    "deck": "Bash",
+                    "relics": "Burning Blood",
+                    "label": float(index % 2),
+                }
+                for index in range(4)
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            frame.to_parquet(
+                os.path.join(directory, "train_valid_chunk_00000.parquet")
+            )
+            vocabulary, encoder = build_training_artifacts(directory)
+            dataset = STSDataset(directory, vocabulary, encoder, split="train")
+            loader = DataLoader(dataset, batch_size=2, num_workers=2)
+            batches = list(loader)
+
+        self.assertEqual(len(batches), 2)
+        self.assertEqual(sum(batch[0].shape[0] for batch in batches), 4)
 
 
 class ModelTests(unittest.TestCase):
@@ -221,7 +308,7 @@ class ModelTests(unittest.TestCase):
             for norm in ("pre", "post"):
                 self.assertEqual(self._model(conditioning, norm)(*inputs).shape, (1, 1))
 
-    def test_v3_checkpoint_round_trip(self):
+    def test_v4_checkpoint_round_trip(self):
         model = self._model()
         config = {
             "vocab_size": 12,
@@ -247,15 +334,15 @@ class ModelTests(unittest.TestCase):
             path = os.path.join(directory, "model.pth")
             save_checkpoint(path, model, config, vocabulary, feature_encoder)
             checkpoint, loaded_vocab, loaded_encoder = load_checkpoint(path)
-        self.assertEqual(checkpoint["format_version"], 3)
+        self.assertEqual(checkpoint["format_version"], 4)
         self.assertEqual(loaded_vocab.to_dict(), vocabulary.to_dict())
         self.assertEqual(loaded_encoder.to_dict(), feature_encoder.to_dict())
 
     def test_wrong_checkpoint_format_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "model.pth")
-            torch.save({"format_version": 2}, path)
-            with self.assertRaisesRegex(ValueError, "expected version 3"):
+            torch.save({"format_version": 3}, path)
+            with self.assertRaisesRegex(ValueError, "expected version 4"):
                 load_checkpoint(path)
 
     def test_incompatible_feature_order_is_rejected(self):
@@ -266,7 +353,7 @@ class ModelTests(unittest.TestCase):
 
     def test_incompatible_feature_schema_is_rejected(self):
         encoded = self.encoder_dict()
-        encoded["schema_version"] = "global-features-v2"
+        encoded["schema_version"] = "global-features-v3"
         with self.assertRaisesRegex(ValueError, "feature schema"):
             GlobalFeatureEncoder.from_dict(encoded)
 

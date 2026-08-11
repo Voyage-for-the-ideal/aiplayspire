@@ -45,14 +45,15 @@ STS Data/*.json.gz  →  data_pipeline.py  →  processed_data_v2/*.parquet  →
 
 ### Data Pipeline (`data_pipeline.py`)
 
-`process_file()` reads `.json`/`.json.gz` files (each containing one or more runs), instantiates `RunReconstructor` per run, validates via `validate_run()`, then calls `replay()` which yields one snapshot per card-choice event. Samples are batched into Parquet chunks (50k rows each) via `ProcessPoolExecutor`.
+`process_file()` reads `.json`/`.json.gz` archives and isolates failures per run. The pipeline performs cheap mode/version checks, validates all logged content against the vanilla Java source catalog, replays the run, then requires exact final deck and relic reconstruction. Accepted samples are streamed into split/validity-partitioned Parquet chunks via a bounded `ProcessPoolExecutor`.
 
-**Filters applied in `RunReconstructor.validate_run()`:**
-- A15+ only (`ascension >= 15`)
-- Excludes abandoned runs (`victory: false` without `killed_by`)
-- Excludes PrismaticShard runs
-- Excludes non-vanilla characters (must be IRONCLAD/THE_SILENT/DEFECT/WATCHER)
-- Excludes runs where simulated deck diverges from `master_deck` by >10 cards (or >0 with shop visit)
+**Filters applied in `data_pipeline.validate_raw_run()`:**
+- Standard unseeded, non-beta A0-A20 runs only; Daily, Trial, Endless, and special-seed runs are excluded
+- Both `local_time` and `build_version` must be at least 2020-01-14
+- Characters, cards, relics, potions, shop items, and enemies must resolve to the vanilla source catalog
+- PrismaticShard, malformed telemetry, missing enemy history, and unknown content are excluded
+- Final reconstructed deck and relic multisets must exactly match `master_deck` and `relics`
+- Abandoned runs are retained as censored: completed-act positives remain valid, unresolved current-act negatives do not train
 
 **Labeling scheme** (in `data_pipeline.py` lines 49-54):
 - Floor ≤16: label=1 if run reached floor >16 (survived Act 1 boss)
@@ -91,7 +92,7 @@ Implicit changes are stored in `_implicit_removals[floor]` / `_implicit_addition
 
 ### Dataset (`dataset.py`)
 
-`STSDataset` lazily loads Parquet chunks via LRU cache (max 16 chunks in memory). Uses binary search (`bisect`) to map global index → (chunk file, local index). Only samples from the requested deterministic run-level split are exposed.
+`STSDataset` lazily loads pre-partitioned valid Parquet chunks via LRU cache (max 16 chunks in memory). It uses binary search (`bisect`) to map global index → (chunk file, local index), without retaining one Python index per sample. Training shuffles bounded chunks and applies inverse-frequency BCE weights so A0, A1-5, A6-10, A11-15, A16-19, and A20 contribute equally.
 
 The vocabulary and global-feature normalization are fitted from the training split, frozen, and embedded in each checkpoint. Older data and checkpoint formats are unsupported and must be rebuilt or retrained.
 
@@ -105,7 +106,7 @@ The vocabulary and global-feature normalization are fitted from the training spl
 - **`recommend_choice(state, choices)`**: Evaluates each choice by simulating the resulting state and scoring via `evaluate_state()`. For choices with unknown purge targets (e.g., "remove a card"), it tries removing each unique card in deck and picks the best.
 - **`shop_greedy_search(state, goods)`**: Iteratively buys the single item with the highest marginal V(state) improvement, repeating until nothing improves the score.
 
-Global-feature transforms and fitted caps are stored in the checkpoint and reused during inference.
+Global-feature transforms and fitted caps are stored in the checkpoint and reused during inference. Ascension is encoded as `level / 20`, so A0=0 and A20=1.
 
 ### API (`api.py`)
 

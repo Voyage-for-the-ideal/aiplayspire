@@ -8,7 +8,7 @@ except ImportError:
     from dataset import GlobalFeatureEncoder
 
 
-CHECKPOINT_FORMAT_VERSION = 3
+CHECKPOINT_FORMAT_VERSION = 4
 
 
 def create_checkpoint(model, model_config, vocabulary, feature_encoder, metadata=None):

@@ -1,5 +1,3 @@
-具体说明请见 `CLAUDE.md`。
-
 ## Working Preferences
 
 - Prefer small, reviewable changes.
@@ -7,6 +5,7 @@
 - Always explain what changed and how it was verified.
 - If tests cannot run, state why and provide the exact command to run.
 - Do not modify secrets, credentials, lockfiles, or generated files unless explicitly requested.
+- python中需要的库在conda中的spire环境。
 
 ## Slay the Spire Mods
 

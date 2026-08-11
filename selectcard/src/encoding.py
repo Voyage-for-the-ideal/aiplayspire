@@ -2,12 +2,14 @@ import json
 import re
 from collections import Counter
 
+try:
+    from .data_contract import PREPROCESSING_VERSION
+except ImportError:
+    from data_contract import PREPROCESSING_VERSION
+
 
 PAD_TOKEN = "[PAD]"
 UNK_TOKEN = "[UNK]"
-PREPROCESSING_VERSION = "set-transformer-v2"
-
-
 def parse_item_name(item_name):
     """Return the canonical base name and upgrade level for a card or relic."""
     item_name = str(item_name or "").strip()

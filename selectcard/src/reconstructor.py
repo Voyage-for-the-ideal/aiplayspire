@@ -23,8 +23,9 @@ class RunReconstructor:
         'WATCHER': 'PureWater'
     }
 
-    def __init__(self, run_data):
+    def __init__(self, run_data, content_catalog=None):
         self.raw_data = run_data
+        self.content_catalog = content_catalog
         self.character = self.raw_data.get('character_chosen', 'IRONCLAD')
         self.ascension = self.raw_data.get('ascension_level', 0)
         self.floor_reached = self.raw_data.get('floor_reached', 0)
@@ -244,6 +245,8 @@ class RunReconstructor:
         return result
 
     def _add_relic(self, relic):
+        if self.content_catalog is not None and relic:
+            relic = self.content_catalog.canonical_relic_id(relic)
         if relic and relic not in self.relics:
             self.relics.append(relic)
             if relic == 'Omamori':
@@ -400,7 +403,7 @@ class RunReconstructor:
         )
         
     def validate_run(self) -> bool:
-        if self.ascension < 15:
+        if not 0 <= self.ascension <= 20:
             return False
         if not self.is_victory and not self.killed_by:
             return False
@@ -411,11 +414,7 @@ class RunReconstructor:
         if not self.raw_data.get('character_chosen') or self.floor_reached <= 0:
             return False
             
-        deck_size = len(self.deck)
-        master_deck_size = len(self.master_deck) if self.master_deck else 0
-        if master_deck_size > 0 and abs(deck_size - master_deck_size) > 10:
-            return False
-        if master_deck_size > 0 and abs(deck_size - master_deck_size) > 0 and self._has_shop_visit():
+        if not self.master_deck:
             return False
         return True
         
@@ -481,12 +480,14 @@ class RunReconstructor:
                 
                 # 1. 先买遗物
                 for item in item_list:
-                    if item in all_relics and item not in self.relics:
+                    item_type = self._purchased_item_type(item, all_relics)
+                    if item_type == 'relic' and item not in self.relics:
                         self._add_relic(item)
                 
                 # 2. 再买卡牌
                 for item in item_list:
-                    if item not in all_relics:
+                    item_type = self._purchased_item_type(item, all_relics)
+                    if item_type == 'card':
                         self.deck.append(item)
                         # 触发蛋类遗物对商店购买的即时升级
                         self._handle_egg_upgrade(item)
@@ -523,6 +524,8 @@ class RunReconstructor:
                         self.deck = [c for c in self.deck if not c.startswith('Strike')]
                     
                     for relic in ev.get('relics_lost', []):
+                        if self.content_catalog is not None and relic:
+                            relic = self.content_catalog.canonical_relic_id(relic)
                         if relic in self.relics:
                             self.relics.remove(relic)
 
@@ -578,6 +581,14 @@ class RunReconstructor:
                         self.deck.append(picked)
                         self._handle_egg_upgrade(picked)
 
+    def _purchased_item_type(self, item, all_relics):
+        if self.content_catalog is not None:
+            item_type = self.content_catalog.classify_item(item)
+            if item_type is None:
+                raise ValueError(f'Unknown purchased item: {item}')
+            return item_type
+        return 'relic' if item in all_relics else 'card'
+
     def _handle_egg_upgrade(self, card_name: str):
         """
         蛋类遗物的自动升级逻辑。这些遗物在该卡牌被加入卡组的一瞬间触发。
@@ -618,3 +629,11 @@ class RunReconstructor:
         if not self.master_deck:
             return True
         return collections.Counter(self.deck) == collections.Counter(self.master_deck)
+
+    def is_match_with_final_relics(self) -> bool:
+        if not isinstance(self.raw_data.get('relics'), list):
+            return False
+        expected = self.raw_data['relics']
+        if self.content_catalog is not None:
+            expected = [self.content_catalog.canonical_relic_id(r) for r in expected]
+        return collections.Counter(self.relics) == collections.Counter(expected)
