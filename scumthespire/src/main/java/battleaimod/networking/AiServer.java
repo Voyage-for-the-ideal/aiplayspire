@@ -38,8 +38,6 @@ public class AiServer {
     public static final String shutdownString = "SHUTDOWN";
     public static final String replayString = "REPLAY";
 
-    public static int fileIndex = 0;
-
     public AiServer() {
         ThreadFactory namedThreadFactory =
                 new ThreadFactoryBuilder().setNameFormat("server-networking-thread-%d").build();
@@ -54,7 +52,6 @@ public class AiServer {
 
                 System.err.println("BATTLEAI_SERVER_READY port=" + port + " testMode=" + isTestMode());
                 while (!BattleAiMod.shutdownRequested) {
-                    fileIndex = 0;
                     if (BattleAiMod.battleAiController == null) {
                         String requestFilePath = "";
                         String endSuffix = "/end.txt";
@@ -345,6 +342,12 @@ public class AiServer {
 
     public static JsonArray commandsForStateNode(StateNode root, boolean shouldPrint, String clientCwd) {
         JsonArray commands = new JsonArray();
+        Path planDirectory;
+        try {
+            planDirectory = ReplaySnapshotStore.createPlanDirectory(clientCwd);
+        } catch (IOException e) {
+            throw new IllegalStateException("Unable to create replay snapshot directory", e);
+        }
 
         List<StateNode> stateNodes = BattleAiController.stateNodesToGetToNode(root);
 
@@ -368,12 +371,15 @@ public class AiServer {
                 command.addProperty("command", stateNode.lastCommand.encode());
                 if (stateDiffString != null) {
                     try {
-                        String relativeStatePath = String.format("savestates/%s.txt", fileIndex++);
-                        File toWrite = Paths.get(clientCwd, relativeStatePath).toFile();
-                        new File(toWrite.getParent()).mkdirs();
+                        Path stateFile = planDirectory.resolve(commands.size() + ".txt");
+                        String relativeStatePath = Paths.get(ReplaySnapshotStore.ROOT_DIRECTORY)
+                                                          .resolve(planDirectory.getFileName())
+                                                          .resolve(stateFile.getFileName())
+                                                          .toString()
+                                                          .replace(File.separatorChar, '/');
 
-                        try (OutputStreamWriter writer =
-                                     new OutputStreamWriter(new FileOutputStream(toWrite), StandardCharsets.UTF_8)) {
+                        try (OutputStreamWriter writer = new OutputStreamWriter(
+                                new FileOutputStream(stateFile.toFile()), StandardCharsets.UTF_8)) {
                             writer.write(stateDiffString);
                         }
 

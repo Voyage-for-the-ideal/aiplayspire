@@ -13,6 +13,7 @@ import battleaimod.networking.AiClient;
 import battleaimod.networking.AiServer;
 import battleaimod.networking.BattleClientController;
 import battleaimod.networking.BattleReplayController;
+import battleaimod.networking.ReplaySnapshotStore;
 import battleaimod.search.SearchProfile;
 import com.badlogic.gdx.Gdx;
 import com.badlogic.gdx.graphics.Color;
@@ -206,6 +207,15 @@ public class BattleAiMod implements PostInitializeSubscriber, PostUpdateSubscrib
         if (isClientFlag != null) {
             if (Boolean.parseBoolean(isClientFlag)) {
                 BattleAiMod.isClient = true;
+            }
+        }
+
+        if (BattleAiMod.isClient) {
+            try {
+                ReplaySnapshotStore.clearPreviousPlans(System.getProperty("user.dir"));
+            } catch (IOException e) {
+                System.err.println("Unable to clear replay snapshots from the previous session");
+                e.printStackTrace();
             }
         }
 

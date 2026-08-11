@@ -9,6 +9,8 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.stream.Collectors;
 
 /**
@@ -32,7 +34,7 @@ public class StateDiffChecker {
             }
 
             if (!SaveState.diff(actualState, expectedState)) {
-                System.err.println("PANIC PANIC PANIC " + commandDescription);
+                logVerificationFailure(commandDescription, diffStateString, "state mismatch");
                 LudicrousSpeedMod.mustRestart = true;
                 return false;
             }
@@ -41,13 +43,26 @@ public class StateDiffChecker {
         } catch (FileNotFoundException e) {
             // A missing state file means the recorded state cannot be verified;
             // treat it as a mismatch rather than silently passing
+            logVerificationFailure(commandDescription, diffStateString, "state file missing");
             e.printStackTrace();
             LudicrousSpeedMod.mustRestart = true;
             return false;
         } catch (IOException e) {
+            logVerificationFailure(commandDescription, diffStateString, "state file unreadable");
             e.printStackTrace();
             LudicrousSpeedMod.mustRestart = true;
             return false;
         }
+    }
+
+    private static void logVerificationFailure(String commandDescription, String statePath, String reason) {
+        System.err.println("PANIC PANIC PANIC " + commandDescription + " reason=" + reason +
+                " plan=" + planId(statePath) + " state=" + statePath);
+    }
+
+    private static String planId(String statePath) {
+        Path path = Paths.get(statePath);
+        Path parent = path.getParent();
+        return parent == null ? "legacy" : parent.getFileName().toString();
     }
 }

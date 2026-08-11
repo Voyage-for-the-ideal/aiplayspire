@@ -157,11 +157,8 @@ public class MonsterPatch {
     public static class SpawnMonsterAnimationPatch {
         public static void Prefix(SpawnMonsterAction _instance) {
             if (LudicrousSpeedMod.plaidMode) {
-                // In plaid mode monsters are spawned immediately at the first slot;
-                // in normal mode the vanilla animation and positioning must be kept
-                ReflectionHacks.setPrivate(_instance, SpawnMonsterAction.class, "targetSlot", -99);
-                ReflectionHacks
-                        .setPrivate(_instance, SpawnMonsterAction.class, "useSmartPositioning", false);
+                // Preserve the action's vanilla smart-positioning so the simulator and
+                // the live replay keep summoned monsters in the same list order.
                 _instance.isDone = true;
             }
         }
