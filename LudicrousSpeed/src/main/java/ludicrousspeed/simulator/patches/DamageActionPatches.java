@@ -81,16 +81,16 @@ public class DamageActionPatches {
     public static class SpyOnDamageAllEnemiesUpdatePatch {
         public static SpireReturn Prefix(DamageAllEnemiesAction _instance) {
             if (LudicrousSpeedMod.plaidMode) {
-                for (AbstractPower power : AbstractDungeon.player.powers) {
-                    power.onDamageAllEnemies(_instance.damage);
-                }
-
                 List<AbstractMonster> monsters = AbstractDungeon.getCurrRoom().monsters.monsters;
 
                 if (_instance.damage == null) {
                     int baseDamage = ReflectionHacks
                             .getPrivate(_instance, DamageAllEnemiesAction.class, "baseDamage");
                     _instance.damage = DamageInfo.createDamageMatrix(baseDamage);
+                }
+
+                for (AbstractPower power : AbstractDungeon.player.powers) {
+                    power.onDamageAllEnemies(_instance.damage);
                 }
 
                 // Match vanilla DamageAllEnemiesAction.update: skip dead/escaped monsters

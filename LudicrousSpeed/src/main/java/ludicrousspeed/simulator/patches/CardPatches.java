@@ -139,20 +139,9 @@ public class CardPatches {
         @SpirePrefixPatch
         public static SpireReturn Prefix(CardGroup cardGroup, AbstractCard card) {
             if (LudicrousSpeedMod.plaidMode) {
-                // clearPowers only belongs on the fast path; vanilla
-                // moveToDiscardPile does not clear powers (only moveToExhaustPile does)
-                card.clearPowers();
-
                 ReflectionHacks
                         .privateMethod(CardGroup.class, "resetCardBeforeMoving", AbstractCard.class)
                         .invoke(cardGroup, card);
-
-                // resetCardBeforeMoving does not remove the card; remove it by
-                // object identity (makeSameInstanceOf copies share UUIDs, so a
-                // UUID match could remove the wrong card)
-                if (cardGroup.group.contains(card)) {
-                    cardGroup.group.remove(card);
-                }
 
                 AbstractDungeon.player.discardPile.addToTop(card);
                 AbstractDungeon.player.onCardDrawOrDiscard();

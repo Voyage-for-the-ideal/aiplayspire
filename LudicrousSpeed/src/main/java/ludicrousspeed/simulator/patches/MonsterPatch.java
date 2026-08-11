@@ -11,7 +11,6 @@ import com.megacrit.cardcrawl.actions.animations.SetAnimationAction;
 import com.megacrit.cardcrawl.actions.common.EscapeAction;
 import com.megacrit.cardcrawl.actions.common.MonsterStartTurnAction;
 import com.megacrit.cardcrawl.actions.common.SpawnMonsterAction;
-import com.megacrit.cardcrawl.actions.unique.SummonGremlinAction;
 import com.megacrit.cardcrawl.core.AbstractCreature;
 import com.megacrit.cardcrawl.dungeons.AbstractDungeon;
 import com.megacrit.cardcrawl.monsters.AbstractMonster;
@@ -21,11 +20,6 @@ import ludicrousspeed.LudicrousSpeedMod;
 import savestate.fastobjects.AnimationStateFast;
 
 public class MonsterPatch {
-    @SpirePatch(
-            clz = AbstractMonster.class,
-            paramtypez = {},
-            method = "die"
-    )
     @SpirePatch(
             clz = AbstractMonster.class,
             paramtypez = {boolean.class},
@@ -170,20 +164,6 @@ public class MonsterPatch {
                         .setPrivate(_instance, SpawnMonsterAction.class, "useSmartPositioning", false);
                 _instance.isDone = true;
             }
-        }
-    }
-
-    @SpirePatch(
-            clz = SummonGremlinAction.class,
-            paramtypez = {},
-            method = "getSmartPosition"
-    )
-    public static class SummonGremlinActionPatch {
-        public static SpireReturn Prefix(SummonGremlinAction _instance) {
-            if (LudicrousSpeedMod.plaidMode) {
-                return SpireReturn.Return(0);
-            }
-            return SpireReturn.Continue();
         }
     }
 

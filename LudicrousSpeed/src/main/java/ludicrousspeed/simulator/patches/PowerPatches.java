@@ -213,9 +213,9 @@ public class PowerPatches {
     public static class FastRemovePowerPatch {
         public static void Prefix(RemoveSpecificPowerAction _instance) {
             if (LudicrousSpeedMod.plaidMode) {
-                // Finish in a single frame; Postfix forces isDone anyway
+                // Preserve the vanilla first-update guard; Postfix finishes the action in one frame
                 ReflectionHacks
-                        .setPrivate(_instance, AbstractGameAction.class, "duration", 0F);
+                        .setPrivate(_instance, AbstractGameAction.class, "duration", .1F);
             }
         }
 

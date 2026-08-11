@@ -47,6 +47,19 @@ public class CommandRunnerControllerTest {
         assertFalse(runner.isDone());
     }
 
+    @Test
+    public void cancelledRunnerDoesNotExecuteCommands() {
+        AtomicInteger executions = new AtomicInteger();
+        CommandRunnerController runner = new CommandRunnerController(
+                Arrays.asList(command("stale", executions::incrementAndGet)), true);
+
+        runner.cancel();
+        runner.step();
+
+        assertTrue(runner.isDone());
+        assertEquals(0, executions.get());
+    }
+
     private static Command command(String encoding, Runnable action) {
         return new Command() {
             @Override

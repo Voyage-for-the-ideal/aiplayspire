@@ -5,10 +5,10 @@
 
     <groupId>autoplay</groupId>
     <artifactId>BattleAiMod</artifactId>
-    <version>1.2.0</version>
+    <version>1.2.3</version>
     <packaging>jar</packaging>
     <name>Battle Ai Mod</name>
-    <description>Server/Client setup allowing an AI to control the game</description>
+    <description>Server/client integration for AI-controlled combat, including restart-safe replay cancellation, first-command state verification, replay decoding, and automatic battle startup.</description>
 
     <properties>
         <maven.compiler.source>1.8</maven.compiler.source>
@@ -43,7 +43,7 @@
         <dependency>
             <groupId>LudicrousSpeed</groupId>
             <artifactId>LudicrousSpeed</artifactId>
-            <version>1.1.0</version>
+            <version>1.1.6</version>
             <scope>system</scope>
             <systemPath>${basedir}/../_ModTheSpire/mods/LudicrousSpeed.jar</systemPath>
         </dependency>

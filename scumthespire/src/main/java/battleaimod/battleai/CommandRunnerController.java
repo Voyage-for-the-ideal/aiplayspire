@@ -90,6 +90,11 @@ public class CommandRunnerController implements Controller {
         return isDone;
     }
 
+    public void cancel() {
+        isDone = true;
+        queuedPath = null;
+    }
+
     private boolean applyQueuedPath() {
         if (!isPathCompatible(queuedPath)) {
             queuedPath = null;

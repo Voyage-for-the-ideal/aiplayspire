@@ -386,6 +386,9 @@ public class AiServer {
                 stateDiffString = stateNode.saveState.diffEncode();
                 commands.add(command);
             } else {
+                if (stateNode != null && stateNode.saveState != null) {
+                    stateDiffString = stateNode.saveState.diffEncode();
+                }
                 commands.add(JsonNull.INSTANCE);
             }
         }

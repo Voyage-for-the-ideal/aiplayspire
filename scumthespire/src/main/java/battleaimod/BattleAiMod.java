@@ -21,12 +21,10 @@ import com.badlogic.gdx.graphics.g2d.SpriteBatch;
 import com.evacipated.cardcrawl.modthespire.Loader;
 import com.evacipated.cardcrawl.modthespire.lib.*;
 import com.evacipated.cardcrawl.modthespire.ui.ModSelectWindow;
-import com.megacrit.cardcrawl.actions.AbstractGameAction;
 import com.megacrit.cardcrawl.actions.common.DiscardAction;
 import com.megacrit.cardcrawl.actions.common.ExhaustAction;
 import com.megacrit.cardcrawl.actions.unique.DualWieldAction;
 import com.megacrit.cardcrawl.actions.unique.NightmareAction;
-import com.megacrit.cardcrawl.actions.utility.WaitAction;
 import com.megacrit.cardcrawl.audio.MainMusic;
 import com.megacrit.cardcrawl.audio.Sfx;
 import com.megacrit.cardcrawl.cards.AbstractCard;
@@ -348,6 +346,13 @@ public class BattleAiMod implements PostInitializeSubscriber, PostUpdateSubscrib
 
     @Override
     public void receiveOnBattleStart(AbstractRoom abstractRoom) {
+        if (rerunController != null) {
+            rerunController.cancel();
+            if (controller == rerunController) {
+                controller = null;
+            }
+            rerunController = null;
+        }
         BattleClientController.resetReplayRecovery();
         if (autoStartAi) {
             shouldStartClient = true;
@@ -368,34 +373,21 @@ public class BattleAiMod implements PostInitializeSubscriber, PostUpdateSubscrib
             controller = replayController = new BattleReplayController(replayStartState, replayCommands);
         }
 
-        if (actionManager.actions.isEmpty() && actionManager.currentAction == null) {
-            if (shouldStartClient) {
-                shouldStartClient = false;
-                AbstractDungeon.effectList
-                        .add(new ThoughtBubble(AbstractDungeon.player.dialogX, AbstractDungeon.player.dialogY, 2.0F, "Hello World", true));
+        if (shouldStartClient && BattleClientController.canSendState()) {
+            shouldStartClient = false;
+            AbstractDungeon.effectList
+                    .add(new ThoughtBubble(AbstractDungeon.player.dialogX, AbstractDungeon.player.dialogY, 3.0F, "Here we go", true));
 
-                actionManager.actions.add(new WaitAction(2.0F));
-                actionManager.actions.add(new AbstractGameAction() {
-                    @Override
-                    public void update() {
-                        AbstractDungeon.effectList
-                                .add(new ThoughtBubble(AbstractDungeon.player.dialogX, AbstractDungeon.player.dialogY, 3.0F, "Here we go", true));
+            if (BattleAiMod.aiClient == null) {
+                try {
+                    BattleAiMod.aiClient = new AiClient();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            }
 
-                        if (BattleAiMod.aiClient == null) {
-                            try {
-                                BattleAiMod.aiClient = new AiClient();
-                            } catch (IOException e) {
-                                e.printStackTrace();
-                            }
-                        }
-
-                        isDone = true;
-
-                        if (BattleAiMod.aiClient != null) {
-                            BattleAiMod.aiClient.sendState();
-                        }
-                    }
-                });
+            if (BattleAiMod.aiClient != null) {
+                BattleAiMod.aiClient.sendState();
             }
         }
     }

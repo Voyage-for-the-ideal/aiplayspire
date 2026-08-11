@@ -206,7 +206,10 @@ public class GridCardSelectScreenState {
         json.addProperty("is_discard", isDiscard);
         json.add("group_cards", cardStateContainerListToJson(groupCards));
         json.add("card_queue_state", cardQueueToJson(cardQueueState));
-        json.addProperty("is_confirm_button_disabled", isConfirmButtonDisabled);
+        // Exact-card selections hide the confirm button, whose disabled state is stale UI state.
+        if (anyNumber || forClarity || forUpgrade || forTransform || forPurge) {
+            json.addProperty("is_confirm_button_disabled", isConfirmButtonDisabled);
+        }
         json.addProperty("card_select_amount", cardSelectAmount);
         json.addProperty("num_cards", numCards);
         json.addProperty("any_number", anyNumber);

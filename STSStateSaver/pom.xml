@@ -4,10 +4,10 @@
 
     <groupId>autoplay</groupId>
     <artifactId>SaveStateMod</artifactId>
-    <version>1.4.0</version>
+    <version>1.4.1</version>
     <packaging>jar</packaging>
     <name>STS Save State Mod</name>
-    <description>Serialize, save, and restore the full combat state of Slay the Spire at any point in battle: player HP/energy/draw/discard/exhaust piles, relics, potions, powers, orbs, stance, monster intents and abilities, RNG state, and active selection screens. Enables instant rewind, diff-encoded state verification, and high-throughput snapshots (10k+/s) for battle search and AI pipelines. Requires BaseMod.</description>
+    <description>Serialize, save, and restore the full combat state of Slay the Spire at any point in battle: player HP/energy/draw/discard/exhaust piles, relics, potions, powers, orbs, stance, monster intents and abilities, RNG state, and active selection screens. Enables instant rewind, deterministic diff-encoded state verification that ignores inactive selection controls, and high-throughput snapshots (10k+/s) for battle search and AI pipelines. Requires BaseMod.</description>
 
     <properties>
         <maven.compiler.source>1.8</maven.compiler.source>
