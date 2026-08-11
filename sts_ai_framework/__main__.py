@@ -1,3 +1,4 @@
+import logging
 import time
 import os
 import sys
@@ -7,17 +8,19 @@ from colorama import init, Fore, Style
 
 # Try importing from package, otherwise fall back to local (if user runs script directly inside folder, though discouraged)
 try:
-    from .config import STS_API_BASE_URL, LLM_MODEL, DEBUG_PROMPT_FILE
+    from .config import STS_API_BASE_URL, LLM_MODEL, DEBUG_PROMPT_FILE, RUN_LOG_DIR
     from .game_client import GameClient
     from .llm_agent import LLMAgent
     from .models import ActionType
+    from .run_log import setup_run_log, log_event, install_stdout_tee
 except ImportError:
     # Hack to allow running python sts_ai_framework/__main__.py
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from sts_ai_framework.config import STS_API_BASE_URL, LLM_MODEL, DEBUG_PROMPT_FILE
+    from sts_ai_framework.config import STS_API_BASE_URL, LLM_MODEL, DEBUG_PROMPT_FILE, RUN_LOG_DIR
     from sts_ai_framework.game_client import GameClient
     from sts_ai_framework.llm_agent import LLMAgent
     from sts_ai_framework.models import ActionType
+    from sts_ai_framework.run_log import setup_run_log, log_event, install_stdout_tee
 
 # Initialize colorama
 init()
@@ -80,11 +83,16 @@ def main():
     parser.add_argument("--debug-prompt-file", type=str, default=DEBUG_PROMPT_FILE, help="将最新 Prompt 持续写入到指定文件，便于调试")
     args = parser.parse_args()
 
+    # 安装运行日志:此后所有终端输出同时写入 debug/run_YYYYMMDD_HHMMSS.log
+    run_log_path = setup_run_log(RUN_LOG_DIR)
+    tee = install_stdout_tee()
+
     print(Fore.YELLOW + "正在启动杀戮尖塔 AI 框架..." + Style.RESET_ALL)
     print(f"模型: {args.model}")
     print(f"连接到 Mod 地址: {STS_API_BASE_URL}")
     if args.debug_prompt_file:
         print(f"Prompt 调试文件: {args.debug_prompt_file}")
+    print(f"运行日志: {run_log_path}")
 
     client = GameClient(base_url=STS_API_BASE_URL)
     
@@ -149,6 +157,13 @@ def main():
 
                 if action:
                     pre_action_state = state
+                    # 决策事件(提交前):记录意图与前置状态
+                    log_event(action=action.type.value, card=action.card_index, target=action.target_index,
+                              potion=action.potion_index, choice=action.choice_index,
+                              ts=time.strftime("%H:%M:%S"), floor=state.floor, act=state.act,
+                              phase=state.room_phase, screen=state.screen_type,
+                              hp=f"{state.player.current_hp}/{state.player.max_hp}",
+                              energy=state.player.energy, hand=len(state.hand))
                     msg = f"行动: {action.type}"
                     if action.type == ActionType.PLAY:
                          msg += f" 卡牌索引: {action.card_index} 目标索引: {action.target_index}"
@@ -159,6 +174,7 @@ def main():
                     print(msg)
 
                     submitted, server_resp, error_msg = client.submit_action(action)
+                    post_state = None
                     if submitted:
                         print(Fore.GREEN + "行动已提交到 Mod 队列。" + Style.RESET_ALL)
                         if server_resp is not None:
@@ -171,6 +187,17 @@ def main():
                             print(Fore.YELLOW + "动作已提交，但暂未观察到明显状态变化（可能仍在动画或队列处理中）。" + Style.RESET_ALL)
                     else:
                         print(Fore.RED + f"行动提交失败: {error_msg}" + Style.RESET_ALL)
+
+                    # 结果事件(提交后):提交状态、是否生效、失败原因与后置状态
+                    effective = _is_action_effective(pre_action_state, post_state, action) if submitted else None
+                    log_event(result=action.type.value, submitted=submitted, effective=effective,
+                              error=error_msg if not submitted else None,
+                              ts=time.strftime("%H:%M:%S"), floor=state.floor,
+                              post_hp=f"{post_state.player.current_hp}/{post_state.player.max_hp}" if post_state else None,
+                              post_energy=post_state.player.energy if post_state else None,
+                              post_hand=len(post_state.hand) if post_state else None,
+                              post_screen=post_state.screen_type if post_state else None,
+                              post_phase=post_state.room_phase if post_state else None)
                 else:
                     print(Fore.YELLOW + "Agent 未选择任何行动。" + Style.RESET_ALL)
 
@@ -185,6 +212,10 @@ def main():
 
     except KeyboardInterrupt:
         print("\n正在停止 AI...")
+    finally:
+        # 写入残留行缓冲、恢复 sys.stdout,并关闭日志 handler 确保全部落盘
+        tee.close()
+        logging.shutdown()
 
 if __name__ == "__main__":
     main()
