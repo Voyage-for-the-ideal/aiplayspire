@@ -75,7 +75,7 @@ def _fetch_post_action_state(client, retries: int = 2, delay: float = 0.15):
 
 def main():
     parser = argparse.ArgumentParser(description="运行杀戮尖塔 AI Agent")
-    parser.add_argument("--model", type=str, default=LLM_MODEL, help="使用的 DeepSeek 模型 (例如 deepseek-chat, deepseek-reasoner)")
+    parser.add_argument("--model", type=str, default=LLM_MODEL, help="使用的 DeepSeek 模型 (例如 deepseek-v4-flash)")
     parser.add_argument("--interval", type=float, default=2.0, help="行动间隔时间 (秒)")
     parser.add_argument("--debug-prompt-file", type=str, default=DEBUG_PROMPT_FILE, help="将最新 Prompt 持续写入到指定文件，便于调试")
     args = parser.parse_args()

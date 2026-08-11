@@ -109,7 +109,7 @@ class ActionMixin:
         print(Fore.CYAN + "正在思考..." + Style.RESET_ALL)
 
         try:
-            # Normalize model name: strip provider prefix (e.g. "deepseek/deepseek-chat" -> "deepseek-chat")
+            # Normalize model name: strip provider prefix (e.g. "deepseek/deepseek-v4-flash" -> "deepseek-v4-flash")
             model = self.model_name.split("/", 1)[1] if "/" in self.model_name else self.model_name
             try:
                 response = self.llm_client.chat.completions.create(

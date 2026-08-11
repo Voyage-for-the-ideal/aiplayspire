@@ -19,7 +19,7 @@ except ImportError:
 class LLMAgent(ActionMixin, DecisionMixin, InfoPromptMixin, ChoiceMixin, Agent):
     def __init__(
         self,
-        model_name: str = "deepseek-chat",
+        model_name: str = "deepseek-v4-flash",
         knowledge_base: Optional[KnowledgeBase] = None,
         game_client=None,
         debug_prompt_file: Optional[str] = None,

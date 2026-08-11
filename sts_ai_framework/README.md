@@ -60,13 +60,12 @@ pip install -r sts_ai_framework/requirements.txt
 
 ```env
 STS_API_BASE_URL=http://localhost:5000
-LLM_MODEL=gpt-4o
+LLM_MODEL=deepseek-v4-flash
 DEBUG_PROMPT_FILE=debug/latest_prompt.txt
 
-# 按需配置供应商密钥（litellm）
-# OPENAI_API_KEY=...
-# DEEPSEEK_API_KEY=...
-# ANTHROPIC_API_KEY=...
+# DeepSeek API (OpenAI 兼容格式)
+DEEPSEEK_API_KEY=sk-...
+# DEEPSEEK_BASE_URL=https://api.deepseek.com
 ```
 
 ## 启动
@@ -75,7 +74,7 @@ DEBUG_PROMPT_FILE=debug/latest_prompt.txt
 
 ```bash
 cd D:/code/aiplayspire
-python -m sts_ai_framework --model deepseek/deepseek-chat --interval 2.0
+python -m sts_ai_framework --model deepseek-v4-flash --interval 2.0
 ```
 
 可用参数：
