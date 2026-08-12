@@ -133,6 +133,11 @@ public class GameStateConverter {
                     grid, GridCardSelectScreen.class, "selectedCards");
             state.put("grid_selected_count", selectedCards.size());
 
+            // Whether the grid shows the confirm/preview screen (upgrade / transform /
+            // single-card purge enter it after the target card is picked; selectedCards
+            // is cleared there, so this is the only reliable "card picked" signal).
+            state.put("grid_confirm_up", grid.confirmScreenUp);
+
             boolean forPurge = (boolean) ReflectionHacks.getPrivate(
                 grid, GridCardSelectScreen.class, "forPurge");
             boolean forUpgrade = (boolean) ReflectionHacks.getPrivate(

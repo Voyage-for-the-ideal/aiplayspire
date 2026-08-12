@@ -191,6 +191,7 @@ class GameState(BaseModel):
     grid_num_cards: int = 1
     grid_purpose: str = ""
     grid_cards: List[ChoiceCardState] = Field(default_factory=list)
+    grid_confirm_up: bool = False
     is_end_turn_button_enabled: bool = False
     event: Optional[EventState] = None
 

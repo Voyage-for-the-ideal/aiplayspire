@@ -13,7 +13,7 @@ def card(uuid, upgrades=0, can_upgrade=True, name="Clothesline"):
 
 
 def state(screen="REST", deck=None, choices=None, grid_cards=None,
-          reward_cards=None, selected=0):
+          reward_cards=None, selected=0, grid_confirm_up=False):
     return GameState(
         player={"current_hp": 70, "max_hp": 80, "block": 0, "energy": 0, "gold": 99},
         deck=deck or [], hand=[], monsters=[], floor=8, act=1,
@@ -22,6 +22,7 @@ def state(screen="REST", deck=None, choices=None, grid_cards=None,
         choice_list=choices or [], grid_cards=grid_cards or [],
         reward_cards=reward_cards or [], grid_purpose="upgrade",
         grid_num_cards=1, grid_selected_count=selected,
+        grid_confirm_up=grid_confirm_up,
     )
 
 
@@ -87,6 +88,35 @@ class CardChoiceTests(unittest.TestCase):
         s = state(screen="GRID", choices=["confirm"], grid_cards=[])
         action = agent._handle_grid_selection(s)
         self.assertEqual(ActionType.WAIT, action.type)
+
+    def test_grid_preview_mode_clicks_confirm(self):
+        # 打铁网格点卡后原版进入预览模式并清空 selectedCards;
+        # 此时唯一有效操作是点击 confirm 完成强化
+        agent = Harness()
+        agent.intended_smith_card = "plain"
+        agent._pending_grid = {"purpose": "upgrade", "target_uuids": ["plain"],
+                               "num_to_select": 1}
+        s = state(screen="GRID", choices=["confirm", "clothesline"],
+                  grid_cards=[{"choice_index": 1, "uuid": "plain", "id": "Clothesline",
+                               "name": "Clothesline", "upgrades": 0, "can_upgrade": True}],
+                  grid_confirm_up=True)
+        action = agent._handle_grid_selection(s)
+        self.assertEqual(ActionType.CHOOSE, action.type)
+        self.assertEqual(0, action.choice_index)
+        self.assertIsNone(agent._pending_grid)
+        self.assertIsNone(agent.intended_smith_card)
+
+    def test_grid_no_preview_selects_target_card(self):
+        agent = Harness()
+        agent._pending_grid = {"purpose": "upgrade", "target_uuids": ["plain"],
+                               "num_to_select": 1}
+        s = state(screen="GRID", choices=["confirm", "clothesline"],
+                  grid_cards=[{"choice_index": 1, "uuid": "plain", "id": "Clothesline",
+                               "name": "Clothesline", "upgrades": 0, "can_upgrade": True}],
+                  grid_confirm_up=False)
+        action = agent._handle_grid_selection(s)
+        self.assertEqual(ActionType.CHOOSE, action.type)
+        self.assertEqual(1, action.choice_index)
 
     def test_resumed_multi_grid_chooses_first_remaining_target(self):
         agent = Harness()

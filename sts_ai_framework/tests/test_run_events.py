@@ -107,6 +107,11 @@ class FingerprintTest(unittest.TestCase):
         b = make_state(screen="NONE", phase="COMBAT", monsters=[make_monster(hp=50)])
         self.assertNotEqual(state_fingerprint(a), state_fingerprint(b))
 
+    def test_grid_preview_change_differs(self):
+        a = make_state(screen="GRID", grid_confirm_up=False)
+        b = make_state(screen="GRID", grid_confirm_up=True)
+        self.assertNotEqual(state_fingerprint(a), state_fingerprint(b))
+
 
 class StateDiffTest(unittest.TestCase):
     def test_deck_added(self):
@@ -258,6 +263,44 @@ class PendingTrackerTest(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(1, self.tracker._seq)
         self.assertEqual(1, self.tracker.pending_count())
+
+    def test_grid_card_click_effective_when_preview_shows(self):
+        # 打铁网格: 点卡后原版进入预览模式并清空 selectedCards,
+        # 因此 grid_selected_count 不变; grid_confirm_up 变 true 才是生效信号
+        grid_card = {"choice_index": 1, "uuid": "u1", "id": "Clothesline",
+                     "name": "Clothesline", "upgrades": 0, "can_upgrade": True}
+        state = make_state(screen="GRID", choice_list=["confirm", "clothesline"],
+                           grid_cards=[grid_card], grid_purpose="upgrade",
+                           grid_num_cards=1, grid_selected_count=0,
+                           grid_confirm_up=False)
+        did = self._submit_and_pending(state, GameAction(type=ActionType.CHOOSE, choice_index=1))
+        self.assertEqual(self.tracker.confirm_immediate(did, state, 200.0, 101.0), "pending")
+        preview = make_state(screen="GRID", choice_list=["confirm", "clothesline"],
+                             grid_cards=[grid_card], grid_purpose="upgrade",
+                             grid_num_cards=1, grid_selected_count=0,
+                             grid_confirm_up=True)
+        self.tracker.check(preview, 112.0)
+        decisions = [r for r in read_events(self.events.path) if r["event"] == "decision"]
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(decisions[0]["status"], "confirmed")
+        self.assertEqual(decisions[0]["confirm_method"], "poll")
+
+    def test_grid_confirm_click_effective_when_screen_closes(self):
+        grid_card = {"choice_index": 1, "uuid": "u1", "id": "Clothesline",
+                     "name": "Clothesline", "upgrades": 0, "can_upgrade": True}
+        state = make_state(screen="GRID", choice_list=["confirm", "clothesline"],
+                           grid_cards=[grid_card], grid_purpose="upgrade",
+                           grid_num_cards=1, grid_selected_count=0,
+                           grid_confirm_up=True)
+        did = self._submit_and_pending(state, GameAction(type=ActionType.CHOOSE, choice_index=0))
+        # 预览模式下点击 confirm: 屏幕尚未离开 GRID 时不生效
+        self.tracker.check(state, 110.0)
+        self.assertEqual(1, self.tracker.pending_count())
+        closed = make_state(screen="REST", choice_list=[])
+        self.tracker.check(closed, 112.0)
+        decisions = [r for r in read_events(self.events.path) if r["event"] == "decision"]
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(decisions[0]["status"], "confirmed")
 
     def test_deadline_timeout(self):
         state = make_state(screen="REST", choice_list=["a"])

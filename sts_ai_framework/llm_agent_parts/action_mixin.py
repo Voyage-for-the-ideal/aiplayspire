@@ -239,6 +239,18 @@ class ActionMixin:
         if not choice_list:
             return None
 
+        # Preview/confirm mode (upgrade / transform / single-card purge): the target
+        # card was picked and the game shows the confirm screen. Card clicks are
+        # ignored there, so finalize via the confirm button.
+        if getattr(state, "grid_confirm_up", False):
+            if str(choice_list[0]).lower() == "confirm":
+                print(Fore.MAGENTA + "GRID 预览确认模式, 点击确认..." + Style.RESET_ALL)
+                self._pending_grid = None
+                self.intended_smith_card = None
+                self.intended_purge_card = None
+                return GameAction(type=ActionType.CHOOSE, choice_index=0)
+            return GameAction(type=ActionType.WAIT)
+
         # Step 1: Determine grid purpose and num_to_select
         purpose, target_uuids, num_to_select, selected_count = self._prepare_grid_targets(state)
         if not purpose or not target_uuids:

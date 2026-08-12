@@ -116,6 +116,7 @@ def state_fingerprint(state: GameState) -> Optional[str]:
         "can_proceed": state.can_proceed,
         "can_cancel": state.can_cancel,
         "grid_selected_count": state.grid_selected_count,
+        "grid_confirm_up": state.grid_confirm_up,
         "grid_num_cards": state.grid_num_cards,
         "grid_purpose": _norm_str(state.grid_purpose),
         "grid_cards": [c.model_dump() for c in state.grid_cards] or None,
@@ -491,6 +492,7 @@ class PendingTracker:
             if chosen.get("kind") == "confirm" or chosen.get("name") == "confirm":
                 return post.screen_type != "GRID"
             return (post.screen_type != "GRID" or
+                    post.grid_confirm_up or
                     post.grid_selected_count > pre.grid_selected_count)
         if pre.screen_type == "CARD_REWARD":
             target_uuid = chosen.get("stable_id") if chosen.get("kind") == "card" else None
