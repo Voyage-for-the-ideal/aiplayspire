@@ -30,6 +30,7 @@ class LLMAgent(ActionMixin, DecisionMixin, InfoPromptMixin, ChoiceMixin, Agent):
         self.debug_prompt_file = debug_prompt_file
         self.history = []
         self.last_screen_type = None
+        self.last_decision = None  # 决策插桩: choose_action 后由主循环读取 (source/score/meta)
 
         # Initialize DeepSeek LLM client via OpenAI SDK
         api_key = os.getenv("DEEPSEEK_API_KEY", "")

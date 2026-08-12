@@ -32,6 +32,7 @@ class ChoiceMixin:
 
     def _handle_rest_room(self, state: GameState) -> GameAction:
         print(Fore.MAGENTA + "正在使用本地价值网络 (Value Network) 进行营火 (REST) 决策..." + Style.RESET_ALL)
+        self._set_decision("value_network", score=None, chosen=None)
         if not getattr(state, "choice_list", None):
             if state.can_proceed:
                 return GameAction(type=ActionType.PROCEED)
@@ -105,6 +106,13 @@ class ChoiceMixin:
 
         best = self.value_engine.recommend_choice(current_state, choices)
         if best:
+            self._set_decision(
+                "value_network",
+                score=best.get("_score"),
+                all_scores=best.get("_all_scores"),
+                chosen={"action": best.get("action"), "target": best.get("target"),
+                        "index": best.get("index")},
+            )
             action_type = best.get("action")
             if action_type == "upgrade_card" and "_smith_intent_id" in best:
                 self.intended_smith_card = best["_smith_intent_id"]
@@ -136,6 +144,7 @@ class ChoiceMixin:
 
     def _handle_combat_reward(self, state: GameState) -> GameAction:
         print(Fore.MAGENTA + "自动处理 COMBAT_REWARD (优先遗物>金币>药水>卡牌)..." + Style.RESET_ALL)
+        self._set_decision("heuristic", rule="relic>gold>potion>card")
         if not state.choice_list:
             if state.can_proceed:
                 return GameAction(type=ActionType.PROCEED)

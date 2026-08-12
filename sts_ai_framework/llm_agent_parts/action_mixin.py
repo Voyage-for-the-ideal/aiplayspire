@@ -7,9 +7,19 @@ from ..models import ActionType, GameAction, GameState
 
 
 class ActionMixin:
+    def _set_decision(self, source: str, **meta) -> None:
+        """决策插桩: 记录决策来源与分值供运行日志 (JSONL) 使用, 不改变决策行为。
+
+        source: auto(自动处理) / heuristic(规则) / value_network(价值网络) / llm / fallback
+        """
+        meta["source"] = source
+        self.last_decision = meta
+
     def choose_action(self, state: GameState) -> GameAction:
         if not hasattr(self, "skipped_card_rewards_count"):
             self.skipped_card_rewards_count = 0
+
+        self.last_decision = None
 
         self._sync_pending_event_state(state)
 
@@ -20,6 +30,7 @@ class ActionMixin:
         if self.last_screen_type == "SHOP_SCREEN" and state.screen_type == "SHOP_ROOM" and state.can_proceed:
             print(Fore.YELLOW + "检测到刚离开商店购买界面，自动前进..." + Style.RESET_ALL)
             self.last_screen_type = state.screen_type
+            self._set_decision("auto")
             return GameAction(type=ActionType.PROCEED)
 
         self.last_screen_type = state.screen_type
@@ -52,10 +63,12 @@ class ActionMixin:
                 choice_list = getattr(state, "choice_list", None)
                 if choice_list and "talk" in str(choice_list[0]).lower():
                     print(Fore.MAGENTA + "自动跳过 Neow 开场对话..." + Style.RESET_ALL)
+                    self._set_decision("auto")
                     return GameAction(type=ActionType.CHOOSE, choice_index=0)
 
             grid_action = self._handle_grid_selection(state)
             if grid_action is not None:
+                self._set_decision("heuristic")
                 return grid_action
 
         # 强制拦截：COMBAT_REWARD 直接由本地固定规则处理
@@ -65,6 +78,7 @@ class ActionMixin:
         # Auto-handle CHEST: just open it, no LLM needed
         if state.screen_type == "CHEST":
             print(Fore.MAGENTA + "自动打开宝箱..." + Style.RESET_ALL)
+            self._set_decision("auto")
             unified_choices = self._build_unified_choices(state)
             if unified_choices:
                 return unified_choices[0][1]
@@ -74,8 +88,8 @@ class ActionMixin:
 
         # === COMBAT MODULE DISABLED - outsourced to masterspire BattleAiMod.jar ===
         if state.screen_type == "NONE" and state.room_phase == "COMBAT":
-            sys.stdout.write(f"\r{Fore.YELLOW}等待外部战斗AI (BattleAiMod) 决策中...{Style.RESET_ALL}")
-            sys.stdout.flush()
+            # 战斗进度显示由主循环独占 (状态变化/心跳时更新), 此处不再打印
+            self._set_decision("auto")
             return GameAction(type=ActionType.WAIT)
 
         # ====== 插入本地模型拦截 (例如选卡时) ======
@@ -131,6 +145,7 @@ class ActionMixin:
 
             content = response.choices[0].message.content
             print(Fore.GREEN + f"LLM 响应: {content}" + Style.RESET_ALL)
+            self._set_decision("llm", raw=content)
 
             content = self._clean_json_string(content)
             action_dict = json.loads(content)
@@ -156,6 +171,7 @@ class ActionMixin:
                         return mapped_action
 
                 print(Fore.YELLOW + "选择态返回无效动作，回退到 choice_list 的第一个选项。" + Style.RESET_ALL)
+                self._set_decision("fallback", reason="invalid_choice_from_llm")
                 if state.screen_type == "EVENT" and state.event is not None:
                     safe_choice = next(
                         (choice for choice in state.event.choices
@@ -178,15 +194,18 @@ class ActionMixin:
 
                 if state.can_proceed:
                     print(Fore.YELLOW + "按钮态返回无效动作，回退为 proceed。" + Style.RESET_ALL)
+                    self._set_decision("fallback", reason="invalid_button_action_from_llm")
                     return GameAction(type=ActionType.PROCEED)
                 if state.can_cancel:
                     print(Fore.YELLOW + "按钮态返回无效动作，回退为 cancel。" + Style.RESET_ALL)
+                    self._set_decision("fallback", reason="invalid_button_action_from_llm")
                     return GameAction(type=ActionType.CANCEL)
 
             return GameAction(**action_dict)
 
         except Exception as e:
             print(Fore.RED + f"生成行动时出错: {e}" + Style.RESET_ALL)
+            self._set_decision("fallback", reason=str(e))
             return self._build_safe_fallback_action(state)
 
     def _sync_pending_event_state(self, state: GameState) -> None:

@@ -291,6 +291,7 @@ class STSInferenceEngine:
         """
         best_score = -1.0
         best_choice = None
+        all_scores = []  # 插桩: 每个候选的 V(S') 分值, 供运行日志记录
 
         for choice in choices:
             needs_purge_eval = False
@@ -428,7 +429,13 @@ class STSInferenceEngine:
             if score > best_score:
                 best_score = score
                 best_choice = eval_choice
+            all_scores.append({"index": choice.get("index"), "score": score})
 
+        if best_choice is not None:
+            # 深拷贝避免污染调用方的 choices 列表 (eval_choice 可能引用原 dict)
+            best_choice = copy.deepcopy(best_choice)
+            best_choice["_score"] = best_score
+            best_choice["_all_scores"] = all_scores
         return best_choice
 
     def rank_cards_for_purpose(self, current_state, purpose, n, exclude_ids=None):

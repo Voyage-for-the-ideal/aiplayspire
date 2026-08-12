@@ -213,6 +213,13 @@ class DecisionMixin:
 
         best = self.value_engine.recommend_choice(current_state, choices)
         if best:
+            self._set_decision(
+                "value_network",
+                score=best.get("_score"),
+                all_scores=best.get("_all_scores"),
+                chosen={"action": best.get("action"), "target": best.get("target"),
+                        "index": best.get("index")},
+            )
             # Store GRID intent via unified path
             self._store_grid_intent_from_choice(best, state)
             # Keep old flags for backward compatibility
@@ -263,6 +270,13 @@ class DecisionMixin:
 
         best = self.value_engine.recommend_choice(current_state, choices)
         if best:
+            self._set_decision(
+                "value_network",
+                score=best.get("_score"),
+                all_scores=best.get("_all_scores"),
+                chosen={"action": best.get("action"), "target": best.get("target"),
+                        "index": best.get("index")},
+            )
             idx = best.get("index")
             if idx == -1:
                 if getattr(state, "can_proceed", False):
@@ -472,11 +486,13 @@ class DecisionMixin:
             return None
 
         if event.class_name == "GremlinMatchGame" and event.phase == "PLAY":
+            self._set_decision("heuristic", rule="match_game")
             return self._get_match_game_decision(state)
 
         enabled = [choice for choice in event.choices if choice.enabled and choice.action_index is not None]
         if event.decision_kind == "FORCED" and len(enabled) == 1:
             choice = enabled[0]
+            self._set_decision("heuristic", rule="forced")
             self._remember_event_followup(state, choice.action_index)
             return GameAction(type=ActionType.CHOOSE, choice_index=choice.action_index)
 
@@ -508,12 +524,20 @@ class DecisionMixin:
                     exclude_purge_ids=curse_ids,
                 )
                 if best is not None:
+                    self._set_decision(
+                        "value_network",
+                        score=best.get("_score"),
+                        all_scores=best.get("_all_scores"),
+                        chosen={"action": best.get("action"), "index": best.get("index"),
+                                "raw_text": best.get("raw_text")},
+                    )
                     action_index = best["index"]
                     self._store_grid_intent_from_choice(best, state)
                     self._remember_event_followup(state, action_index, best)
                     return GameAction(type=ActionType.CHOOSE, choice_index=action_index)
 
         if event.decision_kind == "COMPLEX":
+            self._set_decision("heuristic", rule="safe_complex_rule")
             return self._get_safe_complex_event_rule(state)
         return None
 
@@ -611,6 +635,13 @@ class DecisionMixin:
             best_idx = best.get("index")
             if best_idx in transform_indices:
                 best["_is_transform"] = True
+            self._set_decision(
+                "value_network",
+                score=best.get("_score"),
+                all_scores=best.get("_all_scores"),
+                chosen={"action": best.get("action"), "target": best.get("target"),
+                        "index": best_idx},
+            )
             self._store_grid_intent_from_choice(best, state)
             return self._map_unified_choice_to_action(state, best_idx)
 
@@ -696,6 +727,13 @@ class DecisionMixin:
 
         best = self.value_engine.recommend_choice(current_state, choices)
         if best:
+            self._set_decision(
+                "value_network",
+                score=best.get("_score"),
+                all_scores=best.get("_all_scores"),
+                chosen={"action": best.get("action"), "target": best.get("target"),
+                        "index": best.get("index")},
+            )
             idx = best.get("index")
             if idx == -1:
                 return GameAction(type=ActionType.CANCEL)

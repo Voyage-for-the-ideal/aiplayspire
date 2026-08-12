@@ -21,3 +21,7 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 DEBUG_PROMPT_FILE = os.getenv("DEBUG_PROMPT_FILE", "debug/latest_prompt.txt")
 RUN_LOG_DIR = os.getenv("RUN_LOG_DIR", "debug")  # 运行日志目录(每次运行生成 run_YYYYMMDD_HHMMSS.log)
 
+# Run-event tracking: pending action confirmation deadline and combat heartbeat interval
+RUN_DEADLINE_SECONDS = float(os.getenv("RUN_DEADLINE_SECONDS", "20"))  # pending 动作确认截止(应 >= 3x --interval)
+COMBAT_HEARTBEAT_SECONDS = float(os.getenv("COMBAT_HEARTBEAT_SECONDS", "30"))  # 战斗无状态变化的低频心跳
+

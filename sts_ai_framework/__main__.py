@@ -8,73 +8,53 @@ from colorama import init, Fore, Style
 
 # Try importing from package, otherwise fall back to local (if user runs script directly inside folder, though discouraged)
 try:
-    from .config import STS_API_BASE_URL, LLM_MODEL, DEBUG_PROMPT_FILE, RUN_LOG_DIR
+    from .config import (STS_API_BASE_URL, LLM_MODEL, DEBUG_PROMPT_FILE, RUN_LOG_DIR,
+                         RUN_DEADLINE_SECONDS, COMBAT_HEARTBEAT_SECONDS)
     from .game_client import GameClient
     from .llm_agent import LLMAgent
     from .models import ActionType
-    from .run_log import setup_run_log, log_event, install_stdout_tee
+    from .run_log import setup_run_log, install_stdout_tee
+    from .run_events import RunEvents, RunSession, classify_run_end
 except ImportError:
     # Hack to allow running python sts_ai_framework/__main__.py
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from sts_ai_framework.config import STS_API_BASE_URL, LLM_MODEL, DEBUG_PROMPT_FILE, RUN_LOG_DIR
+    from sts_ai_framework.config import (STS_API_BASE_URL, LLM_MODEL, DEBUG_PROMPT_FILE, RUN_LOG_DIR,
+                                         RUN_DEADLINE_SECONDS, COMBAT_HEARTBEAT_SECONDS)
     from sts_ai_framework.game_client import GameClient
     from sts_ai_framework.llm_agent import LLMAgent
     from sts_ai_framework.models import ActionType
-    from sts_ai_framework.run_log import setup_run_log, log_event, install_stdout_tee
+    from sts_ai_framework.run_log import setup_run_log, install_stdout_tee
+    from sts_ai_framework.run_events import RunEvents, RunSession, classify_run_end
 
 # Initialize colorama
 init()
 
 
-def _is_action_effective(prev_state, next_state, action) -> bool:
-    if next_state is None:
-        return False
-
-    # WAIT 不要求状态变化
-    if action.type == ActionType.WAIT:
-        return True
-
-    if action.type in (ActionType.PLAY, ActionType.POTION):
-        if len(next_state.hand) != len(prev_state.hand):
-            return True
-        if next_state.player.energy != prev_state.player.energy:
-            return True
-        if len(next_state.potions) != len(prev_state.potions):
-            return True
-        if [m.current_hp for m in next_state.monsters] != [m.current_hp for m in prev_state.monsters]:
-            return True
-        return False
-
-    if action.type == ActionType.END_TURN:
-        if prev_state.is_end_turn_button_enabled and not next_state.is_end_turn_button_enabled:
-            return True
-        if next_state.room_phase != prev_state.room_phase or next_state.screen_type != prev_state.screen_type:
-            return True
-        return False
-
-    # 选择类动作，观察界面/可选项是否变化
-    if next_state.screen_type != prev_state.screen_type:
-        return True
-    if next_state.choice_list != prev_state.choice_list:
-        return True
-    prev_event = getattr(prev_state, "event", None)
-    next_event = getattr(next_state, "event", None)
-    if prev_event != next_event:
-        return True
-    if next_state.can_proceed != prev_state.can_proceed or next_state.can_cancel != prev_state.can_cancel:
-        return True
-    if next_state.floor != prev_state.floor or next_state.room_phase != prev_state.room_phase:
-        return True
-    return False
-
-
 def _fetch_post_action_state(client, retries: int = 2, delay: float = 0.15):
+    """提交后立即读取状态用于快速确认 (0.15s x 2, 未读到则交由 pending 后续轮询)。"""
     for _ in range(retries):
         s = client.get_state()
         if s is not None:
             return s
         time.sleep(delay)
     return None
+
+
+def _action_label(state, action) -> str:
+    """动作的人类可读简述, 用于单行摘要 (不参与结构化事件)。"""
+    if action.type == ActionType.PLAY and action.card_index is not None:
+        if action.card_index < len(state.hand):
+            return f"打牌 {state.hand[action.card_index].name}"
+        return f"打牌[{action.card_index}]"
+    if action.type == ActionType.POTION:
+        return f"药水[{action.potion_index}]"
+    if action.type == ActionType.CHOOSE and action.choice_index is not None:
+        choices = state.choice_list or []
+        if action.choice_index < len(choices):
+            return f"选择[{action.choice_index}] {choices[action.choice_index]}"
+        return f"选择[{action.choice_index}]"
+    return action.type.value
+
 
 def main():
     parser = argparse.ArgumentParser(description="运行杀戮尖塔 AI Agent")
@@ -86,136 +66,162 @@ def main():
     # 安装运行日志:此后所有终端输出同时写入 debug/run_YYYYMMDD_HHMMSS.log
     run_log_path = setup_run_log(RUN_LOG_DIR)
     tee = install_stdout_tee()
+    run_id = os.path.basename(run_log_path)[:-4]  # 去掉 .log 后缀, .jsonl 与之同名
 
     print(Fore.YELLOW + "正在启动杀戮尖塔 AI 框架..." + Style.RESET_ALL)
     print(f"模型: {args.model}")
     print(f"连接到 Mod 地址: {STS_API_BASE_URL}")
     if args.debug_prompt_file:
         print(f"Prompt 调试文件: {args.debug_prompt_file}")
-    print(f"运行日志: {run_log_path}")
+    print(f"运行日志: {run_log_path} (结构化事件: {os.path.join(RUN_LOG_DIR, run_id + '.jsonl')})")
 
+    events = RunEvents(
+        RUN_LOG_DIR, run_id,
+        pid=os.getpid(),
+        cli={"model": args.model, "interval": args.interval},
+        base_url=STS_API_BASE_URL,
+    )
     client = GameClient(base_url=STS_API_BASE_URL)
-    
-    # Check connection
-    print("正在检查与 Mod 的连接...")
-    state = client.get_state()
-    if not state:
-        print(Fore.RED + "无法连接到游戏。请确保《杀戮尖塔》已启动并加载了 CommunicationMod。" + Style.RESET_ALL)
-        # return # Allow retry or just fail
-        # Let's fail gracefully but maybe user hasn't started game yet.
-        print(Fore.YELLOW + "5秒后重试..." + Style.RESET_ALL)
-        time.sleep(5)
-        state = client.get_state()
-        if not state:
-            print(Fore.RED + "仍然无法连接。退出程序。" + Style.RESET_ALL)
-            return
+    session = RunSession(events, RUN_DEADLINE_SECONDS, COMBAT_HEARTBEAT_SECONDS)
 
-    print(Fore.GREEN + "连接成功!" + Style.RESET_ALL)
-
-    agent = LLMAgent(model_name=args.model, game_client=client, debug_prompt_file=args.debug_prompt_file or None)
-    
-    # 重试计数器
-    retry_count = 0
-    max_retries = 10 # 增加重试次数，因为动画可能很长
+    # 终局状态 (finally 中统一收尾)
+    status, confidence, reason = "unknown", "low", "未知"
+    started_ok = False
 
     try:
+        # Check connection
+        print("正在检查与 Mod 的连接...")
+        state, kind, msg = client.get_state_detailed()
+        if not state:
+            print(Fore.RED + "无法连接到游戏。请确保《杀戮尖塔》已启动并加载了 CommunicationMod。" + Style.RESET_ALL)
+            print(Fore.YELLOW + "5秒后重试..." + Style.RESET_ALL)
+            time.sleep(5)
+            state, kind, msg = client.get_state_detailed()
+            if not state:
+                status, confidence, reason = "startup_failed", "high", f"启动连接失败 ({kind}: {msg})"
+                print(Fore.RED + "仍然无法连接。退出程序。" + Style.RESET_ALL)
+                return
+
+        print(Fore.GREEN + "连接成功!" + Style.RESET_ALL)
+        started_ok = True
+
+        agent = LLMAgent(model_name=args.model, game_client=client, debug_prompt_file=args.debug_prompt_file or None)
+
+        # 重试计数器
+        retry_count = 0
+        max_retries = 10  # 动画可能很长
+        last_fail_kind = None
+        last_idle = {"phase": None, "screen": None, "ts": 0.0}
+
         while True:
-            state = client.get_state()
+            state, kind, msg = client.get_state_detailed()
             if not state:
                 retry_count += 1
+                session.on_fetch_fail(kind, msg, time.time())
                 if retry_count > max_retries:
-                    print(Fore.RED + "\n连接丢失或游戏结束 (连续多次获取状态失败)。" + Style.RESET_ALL)
+                    status, confidence, reason = classify_run_end(
+                        session.last_state, session.err_counts,
+                        session.battles.last_battle_result, killed=False,
+                    )
+                    print(Fore.RED + f"\n连接丢失或游戏结束 ({reason})。" + Style.RESET_ALL)
                     break
-                
-                # 在同一行显示重试状态，避免刷屏
-                sys.stdout.write(f"\r{Fore.YELLOW}无法获取状态 (Mod忙碌或动画中)，正在重试 ({retry_count}/{max_retries})...{Style.RESET_ALL}")
-                sys.stdout.flush()
+
+                # 重试进度行: 错误类型变化或每 3 次才输出, 避免日志刷屏
+                if kind != last_fail_kind or retry_count % 3 == 0:
+                    sys.stdout.write(f"\r{Fore.YELLOW}无法获取状态 ({kind}), 正在重试 ({retry_count}/{max_retries})...{Style.RESET_ALL}")
+                    sys.stdout.flush()
+                    last_fail_kind = kind
                 time.sleep(1)
                 continue
-            
+
             # 如果成功获取状态，重置计数器并清除之前的重试消息
             if retry_count > 0:
-                sys.stdout.write("\n") # 换行
+                sys.stdout.write("\n")  # 换行
                 retry_count = 0
+                last_fail_kind = None
 
-            # COMBAT: compact single-line output, submit WAIT silently
+            ts = time.time()
+            battle_signal = session.on_state_ok(state, ts)
+
+            # COMBAT: 状态变化/心跳时才重绘进度行, 不轮询刷屏; 静默提交 WAIT
             if state.screen_type == "NONE" and state.room_phase == "COMBAT":
                 action = agent.choose_action(state)
                 if action:
                     client.submit_action(action)
-                sys.stdout.write(f"\r战斗进行中... (第 {state.floor} 层 | HP: {state.player.current_hp}/{state.player.max_hp} | 能量: {state.player.energy})   ")
-                sys.stdout.flush()
+                if battle_signal:
+                    sys.stdout.write(f"\r战斗进行中... (第 {state.floor} 层 | HP: {state.player.current_hp}/{state.player.max_hp} | 能量: {state.player.energy})   ")
+                    sys.stdout.flush()
                 time.sleep(args.interval)
                 continue
 
-            # Non-combat playable states: verbose output
+            # Non-combat playable states: single-line summary per decision
             if state.screen_type != "NONE" and (state.choice_list or state.can_proceed):
                 print(Fore.BLUE + f"\n--- 第 {state.floor} 层 (HP: {state.player.current_hp}/{state.player.max_hp} | 能量: {state.player.energy} | 屏幕: {state.screen_type}) ---" + Style.RESET_ALL)
 
                 # Ask agent for action
                 action = agent.choose_action(state)
+                meta = getattr(agent, "last_decision", None) or {}
+                source = meta.get("source", "unknown") if isinstance(meta, dict) else "unknown"
 
                 if action:
-                    pre_action_state = state
-                    # 决策事件(提交前):记录意图与前置状态
-                    log_event(action=action.type.value, card=action.card_index, target=action.target_index,
-                              potion=action.potion_index, choice=action.choice_index,
-                              ts=time.strftime("%H:%M:%S"), floor=state.floor, act=state.act,
-                              phase=state.room_phase, screen=state.screen_type,
-                              hp=f"{state.player.current_hp}/{state.player.max_hp}",
-                              energy=state.player.energy, hand=len(state.hand))
-                    msg = f"行动: {action.type}"
-                    if action.type == ActionType.PLAY:
-                         msg += f" 卡牌索引: {action.card_index} 目标索引: {action.target_index}"
-                    elif action.type == ActionType.POTION:
-                        msg += f" 药水索引: {action.potion_index} 目标索引: {action.target_index}"
-                    elif action.type == ActionType.CHOOSE:
-                         msg += f" 选择索引: {action.choice_index}"
-                    print(msg)
-
+                    label = _action_label(state, action)
+                    t0 = time.time()
+                    decision_id = session.record_decision(state, action, source, t0, meta)
                     submitted, server_resp, error_msg = client.submit_action(action)
-                    post_state = None
+                    latency_ms = (time.time() - t0) * 1000.0
+                    session.tracker.on_submit(decision_id, submitted, server_resp, error_msg, latency_ms, time.time())
+
                     if submitted:
-                        print(Fore.GREEN + "行动已提交到 Mod 队列。" + Style.RESET_ALL)
-                        if server_resp is not None:
-                            print(f"Mod 响应: {server_resp}")
-
                         post_state = _fetch_post_action_state(client)
-                        if _is_action_effective(pre_action_state, post_state, action):
-                            print(Fore.GREEN + "检测到动作已生效。" + Style.RESET_ALL)
+                        eff = session.tracker.confirm_immediate(decision_id, post_state, latency_ms, time.time())
+                        if eff == "confirmed":
+                            print(Fore.GREEN + f"✓ [{state.floor} {state.screen_type}] {label} → 已生效 ({latency_ms / 1000:.2f}s)" + Style.RESET_ALL)
                         else:
-                            print(Fore.YELLOW + "动作已提交，但暂未观察到明显状态变化（可能仍在动画或队列处理中）。" + Style.RESET_ALL)
+                            print(Fore.YELLOW + f"⏳ [{state.floor} {state.screen_type}] {label} → 已提交, 待后续确认" + Style.RESET_ALL)
                     else:
-                        print(Fore.RED + f"行动提交失败: {error_msg}" + Style.RESET_ALL)
-
-                    # 结果事件(提交后):提交状态、是否生效、失败原因与后置状态
-                    effective = _is_action_effective(pre_action_state, post_state, action) if submitted else None
-                    log_event(result=action.type.value, submitted=submitted, effective=effective,
-                              error=error_msg if not submitted else None,
-                              ts=time.strftime("%H:%M:%S"), floor=state.floor,
-                              post_hp=f"{post_state.player.current_hp}/{post_state.player.max_hp}" if post_state else None,
-                              post_energy=post_state.player.energy if post_state else None,
-                              post_hand=len(post_state.hand) if post_state else None,
-                              post_screen=post_state.screen_type if post_state else None,
-                              post_phase=post_state.room_phase if post_state else None)
+                        print(Fore.RED + f"✗ [{state.floor} {state.screen_type}] {label} 提交失败: {error_msg}" + Style.RESET_ALL)
                 else:
                     print(Fore.YELLOW + "Agent 未选择任何行动。" + Style.RESET_ALL)
 
             else:
-                # print(f"Waiting for combat... (Current phase: {state.room_phase})")
-                # Don't spam logs
-                sys.stdout.write(f"\r等待可操作状态... (当前阶段: {state.room_phase}, 屏幕: {state.screen_type})   ")
-                sys.stdout.flush()
-                pass
+                # idle: 屏幕/阶段变化或 30s 才重绘, 不轮询刷屏
+                if (state.room_phase != last_idle["phase"] or state.screen_type != last_idle["screen"]
+                        or time.time() - last_idle["ts"] > 30.0):
+                    sys.stdout.write(f"\r等待可操作状态... (当前阶段: {state.room_phase}, 屏幕: {state.screen_type})   ")
+                    sys.stdout.flush()
+                    last_idle = {"phase": state.room_phase, "screen": state.screen_type, "ts": time.time()}
 
             time.sleep(args.interval)
 
     except KeyboardInterrupt:
+        status, confidence, reason = "killed", "high", "手动停止 (KeyboardInterrupt)"
         print("\n正在停止 AI...")
+    except Exception as e:
+        status, confidence, reason = "error", "high", str(e)
+        import traceback
+        traceback.print_exc()
     finally:
-        # 写入残留行缓冲、恢复 sys.stdout,并关闭日志 handler 确保全部落盘
+        ts = time.time()
+        try:
+            if started_ok:
+                summary = session.finish(status, confidence, reason, ts)
+                print(Fore.CYAN + "\n" + summary + Style.RESET_ALL)
+            else:
+                events.run_end_once(
+                    status=status, confidence=confidence, reason=reason,
+                    last_state=None, last_state_hash=None,
+                    error={"kind": "CONNECTION_ERROR", "consecutive_failures": 2,
+                           "counts": {"CONNECTION_ERROR": 2}},
+                    duration_s=round(ts - session.started, 1),
+                    ts=time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(ts)), t=round(ts, 3),
+                )
+        except Exception as e:
+            print(Fore.RED + f"收尾处理异常: {e}" + Style.RESET_ALL)
+        # 顺序: 摘要已经 tee 进 .log -> 恢复 stdout -> 关闭 JSONL 句柄 -> 关闭 logging
         tee.close()
+        events.close()
         logging.shutdown()
+
 
 if __name__ == "__main__":
     main()
