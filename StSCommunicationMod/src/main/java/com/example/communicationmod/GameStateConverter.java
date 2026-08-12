@@ -116,6 +116,14 @@ public class GameStateConverter {
         if (currentChoiceType == ChoiceScreenUtils.ChoiceType.GRID) {
             GridCardSelectScreen grid = AbstractDungeon.gridSelectScreen;
 
+            List<Map<String, Object>> gridCards = new ArrayList<>();
+            int gridChoiceOffset = ChoiceScreenUtils.isConfirmButtonAvailable() ? 1 : 0;
+            for (int i = 0; i < grid.targetGroup.group.size(); i++) {
+                gridCards.add(convertChoiceCardToJson(
+                    grid.targetGroup.group.get(i), i + gridChoiceOffset));
+            }
+            state.put("grid_cards", gridCards);
+
             int numCards = (int) ReflectionHacks.getPrivate(
                 grid, GridCardSelectScreen.class, "numCards");
             state.put("grid_num_cards", numCards);
@@ -164,10 +172,14 @@ public class GameStateConverter {
 
         if (currentChoiceType == ChoiceScreenUtils.ChoiceType.CARD_REWARD && AbstractDungeon.cardRewardScreen != null) {
             List<String> rewardIds = new ArrayList<>();
+            List<Map<String, Object>> rewardCards = new ArrayList<>();
+            int rewardIndex = 0;
             for (com.megacrit.cardcrawl.cards.AbstractCard c : AbstractDungeon.cardRewardScreen.rewardGroup) {
                 rewardIds.add(c.cardID);
+                rewardCards.add(convertChoiceCardToJson(c, rewardIndex++));
             }
             state.put("reward_card_ids", rewardIds);
+            state.put("reward_cards", rewardCards);
         }
 
         // Map Facts (AI-agnostic): full map graph + current node + current legal map targets
@@ -255,6 +267,24 @@ public class GameStateConverter {
             }
         }
         
+        return jsonCard;
+    }
+
+    static Map<String, Object> convertChoiceCardToJson(AbstractCard card, int choiceIndex) {
+        return choiceCardMetadata(choiceIndex, card.uuid.toString(), card.cardID, card.name,
+            card.timesUpgraded, card.canUpgrade());
+    }
+
+    static Map<String, Object> choiceCardMetadata(int choiceIndex, String uuid, String id,
+                                                   String name, int upgrades,
+                                                   boolean canUpgrade) {
+        Map<String, Object> jsonCard = new HashMap<>();
+        jsonCard.put("choice_index", choiceIndex);
+        jsonCard.put("uuid", uuid);
+        jsonCard.put("id", id);
+        jsonCard.put("name", name);
+        jsonCard.put("upgrades", upgrades);
+        jsonCard.put("can_upgrade", canUpgrade);
         return jsonCard;
     }
 

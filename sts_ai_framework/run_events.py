@@ -5,8 +5,8 @@
 - 本模块负责 debug/run_*.jsonl (每行一个结构化事件, 机器解析), 通过独立裸文件句柄
   写入, 绕开 logging/TeeWriter, 避免两个通道互相污染。
 
-事件 schema: "sts-ai-run/v1"。战斗内部决策 (搜索预算/重规划/回放偏离) 由外部
-BattleAiMod 执行, 本模块只记录 Python 轮询可观测的战斗状态变化。
+事件 schema: "sts-ai-run/v2"。战斗内部决策由外部 BattleAiMod 执行，本模块仅记录
+战斗始末；非战斗动作在生命周期结束时写成一条 decision。
 """
 
 import hashlib
@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .models import ActionType, GameAction, GameState
 from .run_log import _strip_ansi
 
-SCHEMA = "sts-ai-run/v1"
+SCHEMA = "sts-ai-run/v2"
 
 # 地图节点符号 -> 房间类型 (Slay the Spire 地图图例)
 ROOM_TYPES = {
@@ -112,11 +112,13 @@ def state_fingerprint(state: GameState) -> Optional[str]:
         "screen_type": state.screen_type,
         "choice_list": [_norm_str(x) for x in (state.choice_list or [])] or None,
         "reward_card_ids": state.reward_card_ids or None,
+        "reward_cards": [c.model_dump() for c in state.reward_cards] or None,
         "can_proceed": state.can_proceed,
         "can_cancel": state.can_cancel,
         "grid_selected_count": state.grid_selected_count,
         "grid_num_cards": state.grid_num_cards,
         "grid_purpose": _norm_str(state.grid_purpose),
+        "grid_cards": [c.model_dump() for c in state.grid_cards] or None,
         "is_end_turn_button_enabled": state.is_end_turn_button_enabled,
         "event": (
             {
@@ -262,7 +264,28 @@ def extract_candidates(state: GameState) -> Tuple[str, List[dict], dict]:
                 },
             )
 
-    # CARD_REWARD: reward_card_ids 为稳定 id, name 从牌库查
+    # CARD_REWARD: structured candidates preserve UUID and upgrade level.
+    if screen == "CARD_REWARD" and state.reward_cards:
+        for card in state.reward_cards:
+            candidates.append(
+                {
+                    "index": card.choice_index,
+                    "stable_id": card.uuid,
+                    "name": card.name,
+                    "kind": "card",
+                    "enabled": True,
+                    "score": None,
+                    "semantics": {"id": card.id, "upgrades": card.upgrades},
+                }
+            )
+        for i in range(len(state.reward_cards), len(state.choice_list or [])):
+            candidates.append(
+                {"index": i, "stable_id": i, "name": _norm_str(state.choice_list[i]),
+                 "kind": None, "enabled": True, "score": None, "semantics": None}
+            )
+        return "card_reward", candidates, {}
+
+    # Legacy CARD_REWARD payload.
     if screen == "CARD_REWARD" and state.reward_card_ids:
         names = {}
         for c in state.deck:
@@ -296,16 +319,19 @@ def extract_candidates(state: GameState) -> Tuple[str, List[dict], dict]:
 
     # GRID: 通用卡牌选择
     if screen == "GRID":
+        by_index = {card.choice_index: card for card in state.grid_cards}
         for i, text in enumerate(state.choice_list or []):
+            card = by_index.get(i)
             candidates.append(
                 {
                     "index": i,
-                    "stable_id": i,
-                    "name": _norm_str(text),
-                    "kind": None,
+                    "stable_id": card.uuid if card else i,
+                    "name": card.name if card else _norm_str(text),
+                    "kind": "card" if card else "confirm",
                     "enabled": True,
                     "score": None,
-                    "semantics": None,
+                    "semantics": ({"id": card.id, "upgrades": card.upgrades,
+                                   "can_upgrade": card.can_upgrade} if card else None),
                 }
             )
         return (
@@ -359,9 +385,7 @@ def _chosen_from_action(action: GameAction, candidates: List[dict]) -> dict:
 
 
 class PendingTracker:
-    """动作确认三态: 提交后先即时快确认, 未变则挂 pending,
-    后续轮询指纹变化 -> confirmed(poll); 超过截止时间 -> rejected_timeout;
-    run 结束未决 -> interrupted。"""
+    """Serial non-combat action lifecycle writer for the v2 decision event."""
 
     def __init__(self, events: RunEvents, deadline_s: float = 20.0,
                  on_confirmed=None) -> None:
@@ -369,7 +393,10 @@ class PendingTracker:
         self.deadline_s = deadline_s
         self._seq = 0
         self._pending: Dict[str, dict] = {}
-        self._on_confirmed = on_confirmed  # 回调(decision_id, delta), 供楼层奖励聚合
+        self._on_confirmed = on_confirmed
+
+    def can_register(self) -> bool:
+        return not self._pending
 
     def register(
         self,
@@ -379,62 +406,47 @@ class PendingTracker:
         ts: float,
         meta: Optional[dict] = None,
     ) -> Tuple[str, str, dict]:
-        """记录一个决策意图, 返回 (decision_id, screen_kind, chosen)。WAIT 立即确认。"""
+        """Create one in-memory lifecycle. Only final decisions are written."""
+        if self._pending:
+            existing_id, existing = next(iter(self._pending.items()))
+            return existing_id, existing["screen_kind"], existing["chosen"]
         self._seq += 1
         screen = _norm_str(state.screen_type) or "none"
         decision_id = f"f{state.floor}-{screen.lower()}-{self._seq}"
         screen_kind, candidates, screen_semantics = extract_candidates(state)
         chosen = _chosen_from_action(action, candidates)
         pre_fp = state_fingerprint(state)
-        self.events.emit(
-            "decision",
-            decision_id=decision_id,
-            floor=state.floor,
-            act=state.act,
-            screen=screen,
-            screen_kind=screen_kind,
-            phase=state.room_phase,
-            source=source,
-            meta=meta,
-            action={"type": action.type.value, "card_index": action.card_index,
-                    "potion_index": action.potion_index, "target_index": action.target_index,
-                    "choice_index": action.choice_index},
-            chosen=chosen,
-            candidates=candidates,
-            screen_semantics=screen_semantics,
-            pre={"fingerprint": pre_fp, **_player_summary(state)},
-            ts=_ts_iso(ts),
-            t=round(ts, 3),
-        )
-        if action.type == ActionType.WAIT:
-            self._emit_outcome(decision_id, "confirmed", "immediate", state, state, 0.0, ts)
-            return decision_id, screen_kind, chosen
         self._pending[decision_id] = {
             "pre_state": state,
             "pre_fp": pre_fp,
             "submit_ts": ts,
+            "screen_kind": screen_kind,
+            "chosen": chosen,
+            "record": {
+                "decision_id": decision_id, "floor": state.floor, "act": state.act,
+                "screen": screen, "screen_kind": screen_kind, "phase": state.room_phase,
+                "source": source, "meta": meta,
+                "action": {"type": action.type.value, "card_index": action.card_index,
+                           "potion_index": action.potion_index, "target_index": action.target_index,
+                           "choice_index": action.choice_index},
+                "chosen": chosen, "candidates": candidates,
+                "screen_semantics": screen_semantics,
+                "pre": {"fingerprint": pre_fp, **_player_summary(state)},
+                "started_ts": _ts_iso(ts), "started_t": round(ts, 3),
+            },
         }
         return decision_id, screen_kind, chosen
 
     def on_submit(self, decision_id: str, submitted: bool, resp: Optional[dict],
                   err: Optional[str], latency_ms: float, ts: float) -> None:
-        self.events.emit(
-            "submit",
-            decision_id=decision_id,
-            ok=submitted,
-            status_code=resp.get("status") if resp else None,
-            err=err,
-            latency_ms=round(latency_ms, 1),
-            ts=_ts_iso(ts),
-            t=round(ts, 3),
-        )
-        if not submitted and decision_id in self._pending:
-            # 提交失败: 立即终结该决策
-            entry = self._pending.pop(decision_id)
-            self._emit_outcome(
-                decision_id, "submit_failed", "immediate",
-                entry["pre_state"], entry["pre_state"], latency_ms, ts,
-            )
+        entry = self._pending.get(decision_id)
+        if entry is None:
+            return
+        entry["submit"] = {"ok": submitted, "status_code": resp.get("status") if resp else None,
+                           "err": err, "latency_ms": round(latency_ms, 1)}
+        if not submitted:
+            self._finish(decision_id, "submit_failed", "immediate",
+                         entry["pre_state"], latency_ms, ts)
 
     def confirm_immediate(self, decision_id: str, post_state: Optional[GameState],
                           latency_ms: float, ts: float) -> str:
@@ -445,12 +457,8 @@ class PendingTracker:
         entry = self._pending.get(decision_id)
         if entry is None or post_state is None:
             return "pending"
-        if state_fingerprint(post_state) != entry["pre_fp"]:
-            self._pending.pop(decision_id)
-            self._emit_outcome(
-                decision_id, "confirmed", "immediate",
-                entry["pre_state"], post_state, latency_ms, ts,
-            )
+        if self._is_effective(entry, post_state):
+            self._finish(decision_id, "confirmed", "immediate", post_state, latency_ms, ts)
             return "confirmed"
         return "pending"
 
@@ -458,47 +466,60 @@ class PendingTracker:
         """主循环每轮对 pending 动作做确认/超时检查。"""
         for decision_id in list(self._pending):
             entry = self._pending[decision_id]
-            if state_fingerprint(state) != entry["pre_fp"]:
-                self._pending.pop(decision_id)
-                self._emit_outcome(
-                    decision_id, "confirmed", "poll",
-                    entry["pre_state"], state, 0.0, ts,
-                )
+            if self._is_effective(entry, state):
+                self._finish(decision_id, "confirmed", "poll", state, 0.0, ts)
             elif ts - entry["submit_ts"] > self.deadline_s:
-                self._pending.pop(decision_id)
-                self._emit_outcome(
-                    decision_id, "rejected_timeout", "poll",
-                    entry["pre_state"], entry["pre_state"], 0.0, ts,
-                )
+                self._finish(decision_id, "rejected_timeout", "poll",
+                             entry["pre_state"], 0.0, ts)
 
     def flush(self, status: str, ts: float) -> None:
         """run 收尾: 未决动作统一标记 (默认 interrupted, 避免误标超时)。"""
         for decision_id in list(self._pending):
-            entry = self._pending.pop(decision_id)
-            self._emit_outcome(
-                decision_id, status, "poll",
-                entry["pre_state"], entry["pre_state"], 0.0, ts,
-            )
+            entry = self._pending[decision_id]
+            self._finish(decision_id, status, "poll", entry["pre_state"], 0.0, ts)
 
     def pending_count(self) -> int:
         return len(self._pending)
 
-    def _emit_outcome(self, decision_id: str, status: str, method: str,
-                      pre: GameState, post: GameState, latency_ms: float, ts: float) -> None:
-        delta = state_diff(pre, post)
+    def _is_effective(self, entry: dict, post: GameState) -> bool:
+        pre = entry["pre_state"]
+        chosen = entry["chosen"]
+        action = entry["record"]["action"]
+        if pre.floor != post.floor:
+            return True
+        if pre.screen_type == "GRID":
+            if chosen.get("kind") == "confirm" or chosen.get("name") == "confirm":
+                return post.screen_type != "GRID"
+            return (post.screen_type != "GRID" or
+                    post.grid_selected_count > pre.grid_selected_count)
+        if pre.screen_type == "CARD_REWARD":
+            target_uuid = chosen.get("stable_id") if chosen.get("kind") == "card" else None
+            return (post.screen_type != "CARD_REWARD" or
+                    (target_uuid is not None and any(c.uuid == target_uuid for c in post.deck)))
+        if pre.screen_type == "EVENT":
+            pre_phase = pre.event.phase if pre.event else None
+            post_phase = post.event.phase if post.event else None
+            return (post.screen_type != "EVENT" or pre_phase != post_phase or
+                    pre.choice_list != post.choice_list)
+        if pre.screen_type in {"REST", "COMBAT_REWARD"}:
+            return post.screen_type != pre.screen_type or pre.choice_list != post.choice_list
+        if action["type"] in {ActionType.PROCEED.value, ActionType.CANCEL.value}:
+            return post.screen_type != pre.screen_type or pre.choice_list != post.choice_list
+        return state_fingerprint(post) != entry["pre_fp"]
+
+    def _finish(self, decision_id: str, status: str, method: str,
+                post: GameState, latency_ms: float, ts: float) -> None:
+        entry = self._pending.pop(decision_id)
+        pre = entry["pre_state"]
+        delta = state_diff(pre, post) if status == "confirmed" else state_diff(pre, pre)
         self.events.emit(
-            "outcome",
-            decision_id=decision_id,
-            status=status,
-            confirm_method=method,
-            latency_ms=round(latency_ms, 1),
-            delta=delta,
+            "decision", **entry["record"], submit=entry.get("submit"), status=status,
+            confirm_method=method, latency_ms=round(latency_ms, 1), delta=delta,
             post={"fingerprint": state_fingerprint(post), **_player_summary(post)},
-            ts=_ts_iso(ts),
-            t=round(ts, 3),
+            ts=_ts_iso(ts), t=round(ts, 3),
         )
         if status == "confirmed" and self._on_confirmed is not None:
-            self._on_confirmed(decision_id, delta)
+            self._on_confirmed(decision_id, entry["screen_kind"], entry["chosen"], delta)
 
 
 class BattleTracker:
@@ -518,16 +539,23 @@ class BattleTracker:
         self._enter_floor = None
         self._last_monsters: List[dict] = []
         self._last_player_hp = None
+        self._enter_player_hp = None
         self.last_battle_result: Optional[str] = None  # 最近一场战斗结果 (victory/unknown)
 
     def update(self, state: GameState, ts: float) -> Optional[str]:
-        """返回 "changed"/"heartbeat"/None, 供主循环决定是否重绘进度行。"""
+        """Track only battle entry and exit; combat internals belong to BattleAiMod."""
         in_combat_now = state.screen_type == "NONE" and state.room_phase == "COMBAT"
         if in_combat_now:
             if not self.in_combat:
                 self._start(state, ts)
                 return "changed"
-            return self._poll(state, ts)
+            self._last_monsters = [
+                {"index": m.index, "name": m.name, "id": m.id, "hp": m.current_hp,
+                 "max_hp": m.max_hp, "block": m.block, "intent": _norm_str(m.intent)}
+                for m in state.monsters
+            ]
+            self._last_player_hp = state.player.current_hp
+            return None
         if self.in_combat:
             self._end(state, ts, reason="screen_changed")
             return "changed"
@@ -547,6 +575,7 @@ class BattleTracker:
             for m in state.monsters
         ]
         self._last_player_hp = state.player.current_hp
+        self._enter_player_hp = state.player.current_hp
         self.events.emit(
             "battle_start",
             battle_id=self.battle_id,
@@ -563,66 +592,10 @@ class BattleTracker:
         names = [m["name"] for m in self._last_monsters if m["hp"] > 0]
         print(f"[战斗 {self.battle_id} 第{state.floor}层] 开始 | 敌人: {'、'.join(names) or '无'} | HP {state.player.current_hp}/{state.player.max_hp}")
 
-    def _poll(self, state: GameState, ts: float) -> Optional[str]:
-        fp = state_fingerprint(state)
-        if fp == self._last_fp:
-            if ts - self._last_change_ts > self.heartbeat_s:
-                self._last_change_ts = ts
-                self.events.emit(
-                    "heartbeat",
-                    context="combat",
-                    battle_id=self.battle_id,
-                    floor=state.floor,
-                    hp=state.player.current_hp,
-                    last_change_s=round(ts - self._last_change_ts + self.heartbeat_s, 1),
-                    elapsed_s=round(ts - self._enter_ts, 1),
-                    ts=_ts_iso(ts),
-                    t=round(ts, 3),
-                )
-                print(f"[战斗 {self.battle_id}] 无变化 {self.heartbeat_s:.0f}s (HP {state.player.current_hp}/{state.player.max_hp})")
-                return "heartbeat"
-            return None
-        self._last_fp = fp
-        self._last_change_ts = ts
-        prev_hp_by_index = {m["index"]: m["hp"] for m in self._last_monsters}
-        monsters = []
-        for m in state.monsters:
-            prev_hp = prev_hp_by_index.get(m.index, m.current_hp)
-            monsters.append(
-                {"index": m.index, "name": m.name, "hp": m.current_hp,
-                 "hp_delta": m.current_hp - prev_hp, "block": m.block,
-                 "intent": _norm_str(m.intent), "dead": m.current_hp <= 0}
-            )
-        hp_delta = state.player.current_hp - (self._last_player_hp or state.player.current_hp)
-        self._last_player_hp = state.player.current_hp
-        self._last_monsters = monsters
-        self.events.emit(
-            "battle_state_change",
-            battle_id=self.battle_id,
-            floor=state.floor,
-            monsters=monsters,
-            player={"hp": state.player.current_hp, "max_hp": state.player.max_hp,
-                    "hp_delta": hp_delta, "block": state.player.block,
-                    "energy": state.player.energy},
-            hand_size=len(state.hand),
-            elapsed_s=round(ts - self._enter_ts, 1),
-            ts=_ts_iso(ts),
-            t=round(ts, 3),
-        )
-        return "changed"
-        # .log 只打实质变化, 合并为一行
-        died = [m["name"] for m in monsters if m["dead"]]
-        parts = [f"HP {state.player.current_hp}/{state.player.max_hp}" + (f" ({hp_delta:+d})" if hp_delta else "")]
-        if died:
-            parts.append(f"{'、'.join(died)} 死亡")
-        alive = [f"{m['name']}({m['hp']})" for m in monsters if not m["dead"]]
-        if alive:
-            parts.append("敌人: " + ", ".join(alive))
-        print(f"[战斗 {self.battle_id}] " + " | ".join(parts))
-
     def _end(self, state: GameState, ts: float, reason: str) -> None:
-        alive = [m for m in self._last_monsters if m["hp"] > 0]
-        result = "victory" if not alive and self._last_monsters else "unknown"
+        reached_reward = state.screen_type in {"COMBAT_REWARD", "CARD_REWARD", "BOSS_REWARD"}
+        alive = [] if reached_reward else [m for m in self._last_monsters if m["hp"] > 0]
+        result = "victory" if reached_reward or (not alive and self._last_monsters) else "unknown"
         self.last_battle_result = result
         self.in_combat = False
         ended_id = self.battle_id
@@ -632,8 +605,11 @@ class BattleTracker:
             floor=self._enter_floor,
             result=result,
             monsters_alive=[m["name"] for m in alive],
+            monsters=self._last_monsters,
+            player={"hp": state.player.current_hp, "max_hp": state.player.max_hp,
+                    "block": state.player.block},
             duration_s=round(ts - self._enter_ts, 1),
-            player_hp_delta=state.player.current_hp - self._last_player_hp,
+            player_hp_delta=state.player.current_hp - self._enter_player_hp,
             reason=reason,
             ts=_ts_iso(ts),
             t=round(ts, 3),
@@ -800,7 +776,9 @@ class FloorTracker:
         for cid in delta.get("deck_removed", []):
             self._rewards.append(f"-{cid}")
         for uid in delta.get("upgraded", []):
-            self._rewards.append("升级卡")
+            reward = f"升级卡:{uid}"
+            if reward not in self._rewards:
+                self._rewards.append(reward)
         for rid in delta.get("relics_added", []):
             self._rewards.append(f"遗物:{rid}")
         gold = delta.get("gold", 0)
@@ -898,7 +876,9 @@ class RunSession:
         self.last_state: Optional[GameState] = None
         self.started = time.time()
 
-    def _on_decision_confirmed(self, decision_id: str, delta: dict) -> None:
+    def _on_decision_confirmed(self, decision_id: str, screen_kind: str,
+                               chosen: dict, delta: dict) -> None:
+        self.floors.observe_decision(screen_kind, chosen)
         self.floors.observe_delta(delta)
 
     def _on_battle_ended(self, battle_id: Optional[str], result: str,
@@ -909,9 +889,10 @@ class RunSession:
         """处理一次成功读取的状态。返回战斗进度信号 ("changed"/"heartbeat"/None)。"""
         self.last_state = state
         self.consecutive_failures = 0
+        battle_signal = self.battles.update(state, ts)
         self.floors.update(state, ts)
         self.tracker.check(state, ts)
-        return self.battles.update(state, ts)
+        return battle_signal
 
     def on_fetch_fail(self, err_kind: str, err_msg: str, ts: float) -> None:
         self.err_counts[err_kind] += 1
@@ -923,10 +904,9 @@ class RunSession:
 
     def record_decision(self, state: GameState, action: GameAction, source: str,
                         ts: float, meta: Optional[dict] = None) -> str:
-        decision_id, screen_kind, chosen = self.tracker.register(
+        decision_id, _, _ = self.tracker.register(
             state, action, source, ts, meta,
         )
-        self.floors.observe_decision(screen_kind, chosen)
         return decision_id
 
     def finish(self, status: str, confidence: str, reason: str, ts: float) -> str:

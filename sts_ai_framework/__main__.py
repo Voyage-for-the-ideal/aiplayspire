@@ -141,27 +141,31 @@ def main():
                 last_fail_kind = None
 
             ts = time.time()
-            battle_signal = session.on_state_ok(state, ts)
+            session.on_state_ok(state, ts)
 
-            # COMBAT: 状态变化/心跳时才重绘进度行, 不轮询刷屏; 静默提交 WAIT
+            # COMBAT is a black box here. Battle start/end are recorded by RunSession.
             if state.screen_type == "NONE" and state.room_phase == "COMBAT":
                 action = agent.choose_action(state)
                 if action:
                     client.submit_action(action)
-                if battle_signal:
-                    sys.stdout.write(f"\r战斗进行中... (第 {state.floor} 层 | HP: {state.player.current_hp}/{state.player.max_hp} | 能量: {state.player.energy})   ")
-                    sys.stdout.flush()
                 time.sleep(args.interval)
                 continue
 
             # Non-combat playable states: single-line summary per decision
             if state.screen_type != "NONE" and (state.choice_list or state.can_proceed):
+                if not session.tracker.can_register():
+                    time.sleep(args.interval)
+                    continue
                 print(Fore.BLUE + f"\n--- 第 {state.floor} 层 (HP: {state.player.current_hp}/{state.player.max_hp} | 能量: {state.player.energy} | 屏幕: {state.screen_type}) ---" + Style.RESET_ALL)
 
                 # Ask agent for action
                 action = agent.choose_action(state)
                 meta = getattr(agent, "last_decision", None) or {}
                 source = meta.get("source", "unknown") if isinstance(meta, dict) else "unknown"
+
+                if action and action.type == ActionType.WAIT:
+                    time.sleep(args.interval)
+                    continue
 
                 if action:
                     label = _action_label(state, action)

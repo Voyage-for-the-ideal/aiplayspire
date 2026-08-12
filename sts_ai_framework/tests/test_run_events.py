@@ -57,7 +57,7 @@ class RunEventsTest(unittest.TestCase):
             self.assertEqual(len(lines), 2)  # run_start + decision
             for line in lines:
                 rec = json.loads(line)
-                self.assertEqual(rec["schema"], "sts-ai-run/v1")
+                self.assertEqual(rec["schema"], "sts-ai-run/v2")
                 self.assertEqual(rec["run_id"], "run_test")
             self.assertEqual(json.loads(lines[0])["event"], "run_start")
             self.assertEqual(json.loads(lines[1])["event"], "decision")
@@ -216,11 +216,11 @@ class PendingTrackerTest(unittest.TestCase):
         changed = make_state(screen="GRID", choice_list=["confirm"])
         status = self.tracker.confirm_immediate(did, changed, 200.0, 101.0)
         self.assertEqual(status, "confirmed")
-        outcomes = [r for r in read_events(self.events.path) if r["event"] == "outcome"]
-        self.assertEqual(len(outcomes), 1)
-        self.assertEqual(outcomes[0]["status"], "confirmed")
-        self.assertEqual(outcomes[0]["confirm_method"], "immediate")
-        self.assertEqual(outcomes[0]["decision_id"], did)
+        decisions = [r for r in read_events(self.events.path) if r["event"] == "decision"]
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(decisions[0]["status"], "confirmed")
+        self.assertEqual(decisions[0]["confirm_method"], "immediate")
+        self.assertEqual(decisions[0]["decision_id"], did)
 
     def test_pending_then_poll_confirm(self):
         state = make_state(screen="REST", choice_list=["a", "b"])
@@ -229,25 +229,44 @@ class PendingTrackerTest(unittest.TestCase):
         self.assertEqual(self.tracker.confirm_immediate(did, state, 200.0, 101.0), "pending")
         # 同态轮询: 无新 outcome
         self.tracker.check(state, 110.0)
-        outcomes = [r for r in read_events(self.events.path) if r["event"] == "outcome"]
-        self.assertEqual(len(outcomes), 0)
+        decisions = [r for r in read_events(self.events.path) if r["event"] == "decision"]
+        self.assertEqual(len(decisions), 0)
         # 状态变化 -> confirmed/poll
         changed = make_state(screen="GRID", choice_list=["confirm"], hp=70)
         self.tracker.check(changed, 112.0)
-        outcomes = [r for r in read_events(self.events.path) if r["event"] == "outcome"]
-        self.assertEqual(len(outcomes), 1)
-        self.assertEqual(outcomes[0]["status"], "confirmed")
-        self.assertEqual(outcomes[0]["confirm_method"], "poll")
+        decisions = [r for r in read_events(self.events.path) if r["event"] == "decision"]
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(decisions[0]["status"], "confirmed")
+        self.assertEqual(decisions[0]["confirm_method"], "poll")
         self.assertEqual(self.tracker.pending_count(), 0)
+
+    def test_unrelated_hp_change_does_not_confirm_rest(self):
+        state = make_state(screen="REST", choice_list=["RestOption", "SmithOption"])
+        did = self._submit_and_pending(state, GameAction(type=ActionType.CHOOSE, choice_index=1))
+        changed_hp = make_state(screen="REST", hp=60,
+                                choice_list=["RestOption", "SmithOption"])
+        self.tracker.check(changed_hp, 110.0)
+        self.assertEqual(1, self.tracker.pending_count())
+        self.assertFalse(any(r["event"] == "decision" for r in read_events(self.events.path)))
+
+    def test_duplicate_register_reuses_pending_decision(self):
+        state = make_state(screen="GRID", choice_list=["confirm"],
+                           grid_selected_count=1, grid_num_cards=1)
+        action = GameAction(type=ActionType.CHOOSE, choice_index=0)
+        first, _, _ = self.tracker.register(state, action, "heuristic", 100.0)
+        second, _, _ = self.tracker.register(state, action, "heuristic", 101.0)
+        self.assertEqual(first, second)
+        self.assertEqual(1, self.tracker._seq)
+        self.assertEqual(1, self.tracker.pending_count())
 
     def test_deadline_timeout(self):
         state = make_state(screen="REST", choice_list=["a"])
         did = self._submit_and_pending(state, GameAction(type=ActionType.CHOOSE, choice_index=0))
         self.tracker.check(state, 121.0)  # 超过 20s deadline
-        outcomes = [r for r in read_events(self.events.path) if r["event"] == "outcome"]
-        self.assertEqual(len(outcomes), 1)
-        self.assertEqual(outcomes[0]["status"], "rejected_timeout")
-        self.assertEqual(outcomes[0]["decision_id"], did)
+        decisions = [r for r in read_events(self.events.path) if r["event"] == "decision"]
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(decisions[0]["status"], "rejected_timeout")
+        self.assertEqual(decisions[0]["decision_id"], did)
 
     def test_flush_interrupted(self):
         state = make_state(screen="REST", choice_list=["a"])
@@ -255,18 +274,18 @@ class PendingTrackerTest(unittest.TestCase):
                                           "heuristic", 100.0)
         self.tracker.on_submit(did, True, {"status": "queued"}, None, 5.0, 100.2)
         self.tracker.flush("interrupted", 130.0)
-        outcomes = [r for r in read_events(self.events.path) if r["event"] == "outcome"]
-        self.assertEqual(len(outcomes), 1)
-        self.assertEqual(outcomes[0]["status"], "interrupted")
+        decisions = [r for r in read_events(self.events.path) if r["event"] == "decision"]
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(decisions[0]["status"], "interrupted")
 
     def test_submit_failed(self):
         state = make_state(screen="REST", choice_list=["a"])
         did, _, _ = self.tracker.register(state, GameAction(type=ActionType.CHOOSE, choice_index=0),
                                           "llm", 100.0)
         self.tracker.on_submit(did, False, None, "http_500: boom", 5.0, 100.2)
-        outcomes = [r for r in read_events(self.events.path) if r["event"] == "outcome"]
-        self.assertEqual(len(outcomes), 1)
-        self.assertEqual(outcomes[0]["status"], "submit_failed")
+        decisions = [r for r in read_events(self.events.path) if r["event"] == "decision"]
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(decisions[0]["status"], "submit_failed")
         self.assertEqual(self.tracker.pending_count(), 0)
 
     def test_decision_event_fields(self):
@@ -280,6 +299,7 @@ class PendingTrackerTest(unittest.TestCase):
         self.assertEqual(kind, "rest")
         self.assertEqual(chosen["index"], 1)
         self.assertEqual(chosen["name"], "SmithOption")
+        self.tracker.on_submit(did, False, None, "test", 1.0, 101.0)
         dec = [r for r in read_events(self.events.path) if r["event"] == "decision"][0]
         self.assertEqual(dec["source"], "value_network")
         self.assertEqual(dec["meta"]["score"], 0.81)
@@ -422,13 +442,11 @@ class RunSessionIntegrationTest(unittest.TestCase):
         # 事件类型齐全且顺序合理
         self.assertIn("run_start", kinds)
         self.assertIn("decision", kinds)
-        self.assertIn("submit", kinds)
-        self.assertIn("outcome", kinds)  # 战斗状态变化 -> confirmed/poll
         self.assertIn("battle_start", kinds)
-        self.assertIn("battle_state_change", kinds)
         self.assertIn("battle_end", kinds)  # finish 兜底 end_forced
         self.assertEqual(kinds.count("decision"), 1)  # 每动作恰 1 条 decision
-        self.assertNotIn("heartbeat", kinds)  # 战斗 ~6s 无 30s 心跳
+        self.assertNotIn("heartbeat", kinds)
+        self.assertNotIn("battle_state_change", kinds)
         self.assertEqual(kinds[-2], "run_end")
         self.assertEqual(kinds[-1], "run_summary")
         # 终局分类: 战斗中静默 -> died

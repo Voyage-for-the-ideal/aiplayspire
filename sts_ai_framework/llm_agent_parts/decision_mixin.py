@@ -191,7 +191,7 @@ class DecisionMixin:
             "gold": state.player.gold,
             "floor": state.floor,
             "ascension": 20,
-            "deck": [card.id for card in state.deck] if hasattr(state, "deck") else [],
+            "deck": [self._card_model_id(card) for card in state.deck] if hasattr(state, "deck") else [],
             "relics": [relic.id for relic in state.relics] if hasattr(state, "relics") else [],
         }
 
@@ -242,27 +242,25 @@ class DecisionMixin:
             "gold": state.player.gold,
             "floor": state.floor,
             "ascension": 20,
-            "deck": [card.id for card in state.deck] if hasattr(state, "deck") else [],
+            "deck": [self._card_model_id(card) for card in state.deck] if hasattr(state, "deck") else [],
             "relics": [relic.id for relic in state.relics] if hasattr(state, "relics") else [],
             "relic_states": self._build_relic_state_payload(state),
         }
 
         choices = []
         unified_choices = self._build_unified_choices(state)
+        rewards_by_index = {card.choice_index: card for card in state.reward_cards}
+        skip_labels = {"skip", "leave", "cancel", "bowl", "singing bowl"}
         for i, (choice_text, _) in enumerate(unified_choices):
-            if "skip" in choice_text.lower() or "cancel" in choice_text.lower() or "leave" in choice_text.lower():
-                choices.append({"action": "skip", "target": None, "index": i})
-            elif "bowl" in choice_text.lower() or "singing bowl" in choice_text.lower():
+            normalized = choice_text.strip().lower()
+            reward = rewards_by_index.get(i)
+            if reward is not None:
+                card_id = f"{reward.id}+{reward.upgrades}" if reward.upgrades else reward.id
+                choices.append({"action": "pick_card", "target": card_id, "index": i})
+            elif normalized in skip_labels:
                 choices.append({"action": "skip", "target": None, "index": i})
             else:
-                card_id = choice_text
-                if hasattr(state, "reward_card_ids") and state.reward_card_ids and i < len(state.reward_card_ids):
-                    card_id = state.reward_card_ids[i]
-                else:
-                    matched_card = self._find_card_for_choice(state, choice_text)
-                    if matched_card:
-                        card_id = matched_card.id
-
+                card_id = state.reward_card_ids[i] if i < len(state.reward_card_ids or []) else choice_text
                 choices.append({"action": "pick_card", "target": card_id, "index": i})
 
         if getattr(state, "screen_type", "") == "CARD_REWARD" or getattr(state, "can_cancel", False) or getattr(state, "can_proceed", False):
@@ -293,7 +291,7 @@ class DecisionMixin:
             "gold": state.player.gold,
             "floor": state.floor,
             "ascension": 20,
-            "deck": [card.id for card in state.deck],
+            "deck": [self._card_model_id(card) for card in state.deck],
             "relics": [relic.id for relic in state.relics],
             "relic_states": self._build_relic_state_payload(state),
         }
@@ -599,7 +597,7 @@ class DecisionMixin:
             "gold": state.player.gold,
             "floor": state.floor,
             "ascension": 20,
-            "deck": [card.id for card in state.deck] if hasattr(state, "deck") else [],
+            "deck": [self._card_model_id(card) for card in state.deck] if hasattr(state, "deck") else [],
             "relics": [relic.id for relic in state.relics] if hasattr(state, "relics") else [],
         }
 
@@ -709,7 +707,7 @@ class DecisionMixin:
             "gold": state.player.gold,
             "floor": state.floor,
             "ascension": 20,
-            "deck": [card.id for card in state.deck] if hasattr(state, "deck") else [],
+            "deck": [self._card_model_id(card) for card in state.deck] if hasattr(state, "deck") else [],
             "relics": [relic.id for relic in state.relics] if hasattr(state, "relics") else [],
         }
 

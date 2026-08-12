@@ -240,12 +240,14 @@ class ActionMixin:
             return None
 
         # Step 1: Determine grid purpose and num_to_select
-        purpose, target_ids, num_to_select, selected_count = self._prepare_grid_targets(state)
-        if not purpose or not target_ids:
+        purpose, target_uuids, num_to_select, selected_count = self._prepare_grid_targets(state)
+        if not purpose or not target_uuids:
+            if purpose and state.grid_selected_count < num_to_select:
+                return GameAction(type=ActionType.WAIT)
             return None
 
         confirm_available = str(choice_list[0]).lower() == "confirm"
-        all_selected = selected_count >= num_to_select
+        all_selected = state.grid_selected_count >= num_to_select
 
         # Step 2: State machine for card selection
         if confirm_available and all_selected:
@@ -259,38 +261,30 @@ class ActionMixin:
             return GameAction(type=ActionType.CHOOSE, choice_index=0)
 
         # Still need to select more cards
-        if selected_count < num_to_select and selected_count < len(target_ids):
-            card_to_select = target_ids[selected_count]
-            target_name = None
-            for card in state.deck:
-                if card.id == card_to_select:
-                    target_name = card.name.lower()
-                    break
+        if selected_count < num_to_select and target_uuids:
+            target_offset = selected_count if len(target_uuids) >= num_to_select else 0
+            target_uuid = target_uuids[target_offset]
+            target = next((card for card in state.grid_cards if card.uuid == target_uuid), None)
+            if target is not None:
+                print(Fore.MAGENTA +
+                    f"GRID选择 [{selected_count + 1}/{num_to_select}] ({purpose}): {target.name}" +
+                    Style.RESET_ALL)
+                return GameAction(type=ActionType.CHOOSE, choice_index=target.choice_index)
 
-            if target_name:
-                for i, choice_text in enumerate(choice_list):
-                    if target_name in str(choice_text).lower():
-                        if hasattr(self, "_pending_grid") and self._pending_grid:
-                            self._pending_grid["selected_count"] = selected_count + 1
-                        print(Fore.MAGENTA +
-                            f"GRID选择 [{selected_count + 1}/{num_to_select}] ({purpose}): {target_name}" +
-                            Style.RESET_ALL)
-                        return GameAction(type=ActionType.CHOOSE, choice_index=i)
-
-            # Card not found in choice_list - may already be selected (duplicate names)
-            print(Fore.YELLOW +
-                f"GRID: 找不到目标卡牌 {card_to_select} 在可选列表中 (可能已选或牌名重复)" +
-                Style.RESET_ALL)
-
-        # Edge case: confirm available but lost track of count (game resume etc.)
-        if confirm_available:
-            print(Fore.MAGENTA +
-                f"GRID操作完成 ({purpose}), 点击确认..." +
-                Style.RESET_ALL)
+            # GRID may have changed after the intent was computed. Re-rank current legal cards.
             self._pending_grid = None
-            self.intended_purge_card = None
-            self.intended_smith_card = None
-            return GameAction(type=ActionType.CHOOSE, choice_index=0)
+            reranked_purpose, reranked_uuids, reranked_num, selected_count = self._prepare_grid_targets(state)
+            if reranked_uuids:
+                purpose, target_uuids, num_to_select = reranked_purpose, reranked_uuids, reranked_num
+                target = next((card for card in state.grid_cards if card.uuid == target_uuids[0]), None)
+                if target is not None:
+                    return GameAction(type=ActionType.CHOOSE, choice_index=target.choice_index)
+            if state.grid_selected_count < num_to_select:
+                return GameAction(type=ActionType.WAIT)
+
+        # Never confirm until the game reports that the requested number was selected.
+        if confirm_available and state.grid_selected_count < num_to_select:
+            return GameAction(type=ActionType.WAIT)
 
         return None
 
@@ -321,46 +315,63 @@ class ActionMixin:
 
         num_to_select = getattr(state, "grid_num_cards", None) or 1
 
-        # Get or compute target_ids
-        target_ids = None
-        selected_count = 0
+        # Get or compute target UUIDs
+        target_uuids = None
+        selected_count = getattr(state, "grid_selected_count", 0)
 
         pending = getattr(self, "_pending_grid", None)
         if pending and pending.get("purpose") == purpose:
-            target_ids = pending.get("target_ids", [])
-            selected_count = pending.get("selected_count", 0)
+            target_uuids = pending.get("target_uuids", [])
+            if not target_uuids and pending.get("target_ids"):
+                remaining = list(state.grid_cards)
+                target_uuids = []
+                for target_id in pending["target_ids"]:
+                    match = next((c for c in remaining if
+                                  (f"{c.id}+{c.upgrades}" if c.upgrades else c.id) == target_id and
+                                  (purpose != "upgrade" or c.can_upgrade)), None)
+                    if match is not None:
+                        target_uuids.append(match.uuid)
+                        remaining.remove(match)
+                pending["target_uuids"] = target_uuids
             # num_to_select from pending takes priority if set
             if pending.get("num_to_select"):
                 num_to_select = pending["num_to_select"]
 
         # Backward compat: old single-card flags
-        if not target_ids:
+        if not target_uuids:
             if purpose == "upgrade" and getattr(self, "intended_smith_card", None):
-                target_ids = [self.intended_smith_card]
+                direct = next((c for c in state.grid_cards
+                               if c.uuid == self.intended_smith_card and c.can_upgrade), None)
+                if direct is None:
+                    direct = next((c for c in state.grid_cards
+                                   if c.id == self.intended_smith_card and c.can_upgrade), None)
+                target_uuids = [direct.uuid] if direct else []
                 self._pending_grid = {
                     "purpose": purpose,
-                    "target_ids": target_ids,
+                    "target_uuids": target_uuids,
                     "num_to_select": num_to_select,
                     "selected_count": 0,
                 }
             elif purpose == "purge" and getattr(self, "intended_purge_card", None):
-                target_ids = [self.intended_purge_card]
+                matching = [c.uuid for c in state.grid_cards if c.id == self.intended_purge_card]
+                target_uuids = matching[:num_to_select]
                 self._pending_grid = {
                     "purpose": purpose,
-                    "target_ids": target_ids,
+                    "target_uuids": target_uuids,
                     "num_to_select": num_to_select,
                     "selected_count": 0,
                 }
 
         # On-the-fly evaluation via value network (relic-triggered grids etc.)
-        if not target_ids and self.value_engine is not None:
+        if not target_uuids and self.value_engine is not None and state.grid_cards:
+            legal_cards = [c for c in state.grid_cards if purpose != "upgrade" or c.can_upgrade]
             current_state = {
                 "hp": state.player.current_hp,
                 "max_hp": state.player.max_hp,
                 "gold": state.player.gold,
                 "floor": state.floor,
                 "ascension": 20,
-                "deck": [card.id for card in state.deck] if hasattr(state, "deck") else [],
+                "deck": [self._card_model_id(card) for card in state.deck] if hasattr(state, "deck") else [],
                 "relics": [relic.id for relic in state.relics] if hasattr(state, "relics") else [],
                 "relic_states": self._build_relic_state_payload(state) if hasattr(self, "_build_relic_state_payload") else [],
             }
@@ -370,25 +381,34 @@ class ActionMixin:
             if purpose == "transform":
                 exclude_ids = {card.id for card in state.deck if card.type == "CURSE"}
 
-            target_ids = self.value_engine.rank_cards_for_purpose(
-                current_state, purpose, num_to_select, exclude_ids=exclude_ids
+            remaining_count = max(1, num_to_select - selected_count)
+            ranked_ids = self.value_engine.rank_cards_for_purpose(
+                current_state, purpose, remaining_count, exclude_ids=exclude_ids
             )
+            remaining = list(legal_cards)
+            target_uuids = []
+            for ranked_id in ranked_ids:
+                match = next((c for c in remaining if
+                              (f"{c.id}+{c.upgrades}" if c.upgrades else c.id) == ranked_id), None)
+                if match is not None:
+                    target_uuids.append(match.uuid)
+                    remaining.remove(match)
 
-            if target_ids:
+            if target_uuids:
                 self._pending_grid = {
                     "purpose": purpose,
-                    "target_ids": target_ids,
+                    "target_uuids": target_uuids,
                     "num_to_select": num_to_select,
                     "selected_count": 0,
                 }
                 print(Fore.MAGENTA +
-                    f"GRID自动评估 ({purpose}): 选定目标={target_ids}" +
+                    f"GRID自动评估 ({purpose}): 选定目标={target_uuids}" +
                     Style.RESET_ALL)
 
-        if not target_ids:
+        if not target_uuids:
             return None, None, 0, 0
 
-        return purpose, target_ids, num_to_select, selected_count
+        return purpose, target_uuids, num_to_select, selected_count
 
     def _clean_json_string(self, content: str) -> str:
         """清理 LLM 返回的字符串，尝试提取 JSON"""

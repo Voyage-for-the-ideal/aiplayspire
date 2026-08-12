@@ -6,6 +6,10 @@ from ..models import ActionType, GameAction, GameState
 
 
 class ChoiceMixin:
+    @staticmethod
+    def _card_model_id(card) -> str:
+        return f"{card.id}+{card.upgrades}" if card.upgrades else card.id
+
     def _build_unified_choices(self, state: GameState) -> List[Tuple[str, GameAction]]:
         """构建统一选择列表：仅基于 choice_list，严格使用 choose/index。"""
         choices: List[Tuple[str, GameAction]] = []
@@ -44,7 +48,7 @@ class ChoiceMixin:
             "gold": state.player.gold,
             "floor": state.floor,
             "ascension": 20,
-            "deck": [card.id for card in state.deck] if hasattr(state, "deck") else [],
+            "deck": [self._card_model_id(card) for card in state.deck] if hasattr(state, "deck") else [],
             "relics": [relic.id for relic in state.relics] if hasattr(state, "relics") else [],
         }
 
@@ -56,22 +60,24 @@ class ChoiceMixin:
             elif "smithoption" in text_lower:
                 best_upgrade_score = -9999.0
                 best_upgrade_card = None
-                unique_cards = set([c.id for c in state.deck])
-                for card_id in unique_cards:
-                    if "+1" not in card_id:
-                        hypo_state = self.value_engine._apply_choice(current_state, {"action": "upgrade_card", "target": card_id})
-                        score = self.value_engine.evaluate_state(hypo_state)
-                        if score > best_upgrade_score:
-                            best_upgrade_score = score
-                            best_upgrade_card = card_id
+                for card in state.deck:
+                    if not card.can_upgrade:
+                        continue
+                    card_id = self._card_model_id(card)
+                    hypo_state = self.value_engine._apply_choice(
+                        current_state, {"action": "upgrade_card", "target": card_id})
+                    score = self.value_engine.evaluate_state(hypo_state)
+                    if score > best_upgrade_score:
+                        best_upgrade_score = score
+                        best_upgrade_card = card
 
                 if best_upgrade_card:
                     choices.append(
                         {
                             "action": "upgrade_card",
-                            "target": best_upgrade_card,
+                            "target": self._card_model_id(best_upgrade_card),
                             "index": i,
-                            "_smith_intent_id": best_upgrade_card,
+                            "_smith_intent_uuid": best_upgrade_card.uuid,
                         }
                     )
             elif "toshoption" in text_lower:
@@ -114,11 +120,11 @@ class ChoiceMixin:
                         "index": best.get("index")},
             )
             action_type = best.get("action")
-            if action_type == "upgrade_card" and "_smith_intent_id" in best:
-                self.intended_smith_card = best["_smith_intent_id"]
+            if action_type == "upgrade_card" and "_smith_intent_uuid" in best:
+                self.intended_smith_card = best["_smith_intent_uuid"]
                 self._pending_grid = {
                     "purpose": "upgrade",
-                    "target_ids": [best["_smith_intent_id"]],
+                    "target_uuids": [best["_smith_intent_uuid"]],
                     "num_to_select": 1,
                     "selected_count": 0,
                 }

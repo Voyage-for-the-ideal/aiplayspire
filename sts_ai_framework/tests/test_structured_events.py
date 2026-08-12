@@ -6,7 +6,7 @@ import unittest
 from sts_ai_framework.llm_agent_parts.action_mixin import ActionMixin
 from sts_ai_framework.llm_agent_parts.decision_mixin import DecisionMixin
 from sts_ai_framework.models import ActionType, GameState
-from sts_ai_framework.__main__ import _is_action_effective
+from sts_ai_framework.run_events import PendingTracker, RunEvents
 
 
 def make_state(event=None, hp=50, choice_list=None):
@@ -142,9 +142,16 @@ class StructuredEventTests(unittest.TestCase):
         before = make_state(event("FORCED", [choice(0)]), choice_list=["continue"])
         after = before.model_copy(deep=True)
         after.event.phase = "RESULT"
-        self.assertTrue(_is_action_effective(
-            before, after, type("Action", (), {"type": ActionType.CHOOSE})()
-        ))
+        with __import__("tempfile").TemporaryDirectory() as tmp:
+            events = RunEvents(tmp, "phase")
+            tracker = PendingTracker(events)
+            did, _, _ = tracker.register(
+                before, type("Action", (), {"type": ActionType.CHOOSE,
+                "card_index": None, "potion_index": None, "target_index": None,
+                "choice_index": 0})(), "test", 1.0)
+            tracker.on_submit(did, True, {"status": "queued"}, None, 1.0, 1.1)
+            self.assertEqual("confirmed", tracker.confirm_immediate(did, after, 1.0, 1.2))
+            events.close()
 
     def test_structured_effects_apply_without_text_parsing(self):
         try:

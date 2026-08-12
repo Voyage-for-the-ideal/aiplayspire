@@ -96,6 +96,15 @@ class MapPositionState(BaseModel):
     human_label: str = ""
 
 
+class ChoiceCardState(BaseModel):
+    choice_index: int
+    uuid: str
+    id: str
+    name: str
+    upgrades: int = 0
+    can_upgrade: bool = True
+
+
 class EventEffect(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -175,11 +184,13 @@ class GameState(BaseModel):
     screen_type: Optional[str] = "NONE"
     choice_list: Optional[List[str]] = []
     reward_card_ids: Optional[List[str]] = []
+    reward_cards: List[ChoiceCardState] = Field(default_factory=list)
     can_proceed: bool = False
     can_cancel: bool = False
     grid_selected_count: int = 0
     grid_num_cards: int = 1
     grid_purpose: str = ""
+    grid_cards: List[ChoiceCardState] = Field(default_factory=list)
     is_end_turn_button_enabled: bool = False
     event: Optional[EventState] = None
 
