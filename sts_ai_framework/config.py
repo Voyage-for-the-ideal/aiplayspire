@@ -19,4 +19,5 @@ LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-v4-flash")
 # Logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 DEBUG_PROMPT_FILE = os.getenv("DEBUG_PROMPT_FILE", "debug/latest_prompt.txt")
+RUN_LOG_DIR = os.getenv("RUN_LOG_DIR", "debug")  # 运行日志目录(每次运行生成 run_YYYYMMDD_HHMMSS.log)
 
