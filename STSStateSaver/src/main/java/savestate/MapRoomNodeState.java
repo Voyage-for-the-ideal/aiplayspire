@@ -10,12 +10,14 @@ import com.megacrit.cardcrawl.monsters.MonsterGroup;
 import com.megacrit.cardcrawl.monsters.beyond.Reptomancer;
 import com.megacrit.cardcrawl.monsters.city.TheCollector;
 import com.megacrit.cardcrawl.monsters.city.TorchHead;
+import com.megacrit.cardcrawl.monsters.city.GremlinLeader;
 import com.megacrit.cardcrawl.rooms.AbstractRoom;
 import com.megacrit.cardcrawl.rooms.MonsterRoom;
 import com.megacrit.cardcrawl.rooms.MonsterRoomBoss;
 import com.megacrit.cardcrawl.rooms.MonsterRoomElite;
 import savestate.monsters.MonsterState;
 import savestate.monsters.beyond.ReptomancerState;
+import savestate.monsters.city.GremlinLeaderState;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -201,6 +203,9 @@ public class MapRoomNodeState {
 
                 ReflectionHacks
                         .setPrivate(monster, TheCollector.class, "enemySlots", collectorMinions);
+
+            } else if (monster instanceof GremlinLeader) {
+                GremlinLeaderState.restoreGremlinSlots((GremlinLeader) monster, room.monsters.monsters);
 
             } else if (monster instanceof Reptomancer) {
                 for (MonsterState monsterState : monsterData) {

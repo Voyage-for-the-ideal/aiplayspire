@@ -10,7 +10,6 @@ import com.megacrit.cardcrawl.actions.animations.AnimateSlowAttackAction;
 import com.megacrit.cardcrawl.actions.animations.SetAnimationAction;
 import com.megacrit.cardcrawl.actions.common.EscapeAction;
 import com.megacrit.cardcrawl.actions.common.MonsterStartTurnAction;
-import com.megacrit.cardcrawl.actions.common.SpawnMonsterAction;
 import com.megacrit.cardcrawl.core.AbstractCreature;
 import com.megacrit.cardcrawl.dungeons.AbstractDungeon;
 import com.megacrit.cardcrawl.monsters.AbstractMonster;
@@ -144,21 +143,6 @@ public class MonsterPatch {
     public static class SlowAttackAnimationPatch {
         public static void Prefix(AnimateSlowAttackAction _instance) {
             if (LudicrousSpeedMod.plaidMode) {
-                _instance.isDone = true;
-            }
-        }
-    }
-
-    @SpirePatch(
-            clz = SpawnMonsterAction.class,
-            paramtypez = {},
-            method = "update"
-    )
-    public static class SpawnMonsterAnimationPatch {
-        public static void Prefix(SpawnMonsterAction _instance) {
-            if (LudicrousSpeedMod.plaidMode) {
-                // Preserve the action's vanilla smart-positioning so the simulator and
-                // the live replay keep summoned monsters in the same list order.
                 _instance.isDone = true;
             }
         }

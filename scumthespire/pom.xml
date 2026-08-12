@@ -5,10 +5,10 @@
 
     <groupId>autoplay</groupId>
     <artifactId>BattleAiMod</artifactId>
-    <version>1.2.5</version>
+    <version>1.2.6</version>
     <packaging>jar</packaging>
     <name>Battle Ai Mod</name>
-    <description>Server/client integration for AI-controlled combat, including immutable per-path replay snapshots, restart-safe replay cancellation, hand-selection and summoned-monster replay consistency, replay decoding, and automatic battle startup.</description>
+    <description>Server/client integration for AI-controlled combat, including immutable per-path replay snapshots, restart-safe replay cancellation, restored summon-slot consistency, replay decoding, and automatic battle startup.</description>
 
     <properties>
         <maven.compiler.source>1.8</maven.compiler.source>
