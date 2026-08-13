@@ -49,6 +49,46 @@ public class StateJsonHelperTest {
         assertNotEquals(base, missingCard);
     }
 
+    @Test
+    public void normalizesPowerAdjustedDisplayFieldsToBaseValues() {
+        // The server records the Necronomicon duplicate with applyPowers()
+        // display values (block 0 from Calipers-style floor); the live game
+        // reset it to base (block -1) before snapshotting. Both normalize to
+        // the base value, so the diff no longer treats this as a mismatch.
+        JsonElement server = StateJsonHelper.normalizeCardUuids(json("[{\"card_id\":\"Twin Strike\","
+                + "\"uuid\":\"server\",\"base_damage\":5,\"base_block\":-1,\"block\":0,"
+                + "\"damage\":5,\"cost\":2,\"cost_for_turn\":2}]"));
+        JsonElement client = StateJsonHelper.normalizeCardUuids(json("[{\"card_id\":\"Twin Strike\","
+                + "\"uuid\":\"client\",\"base_damage\":5,\"base_block\":-1,\"block\":-1,"
+                + "\"damage\":5,\"cost\":2,\"cost_for_turn\":2}]"));
+
+        assertEquals(server, client);
+    }
+
+    @Test
+    public void normalizesDamageModifiedByMonsterPowers() {
+        // Bash duplicate with damage 12 (vulnerable) and block 1 (dexterity)
+        // recorded by the server, vs. base values in the live game.
+        JsonElement server = StateJsonHelper.normalizeCardUuids(json("[{\"card_id\":\"Bash\","
+                + "\"uuid\":\"server\",\"base_damage\":8,\"base_block\":-1,\"block\":1,"
+                + "\"damage\":12,\"base_magic_number\":2,\"magic_number\":2}]"));
+        JsonElement client = StateJsonHelper.normalizeCardUuids(json("[{\"card_id\":\"Bash\","
+                + "\"uuid\":\"client\",\"base_damage\":8,\"base_block\":-1,\"block\":-1,"
+                + "\"damage\":8,\"base_magic_number\":2,\"magic_number\":2}]"));
+
+        assertEquals(server, client);
+    }
+
+    @Test
+    public void keepsRealBaseValueDifferences() {
+        JsonElement server = StateJsonHelper.normalizeCardUuids(json("[{\"card_id\":\"Bash\","
+                + "\"uuid\":\"server\",\"base_damage\":8,\"damage\":12}]"));
+        JsonElement client = StateJsonHelper.normalizeCardUuids(json("[{\"card_id\":\"Bash\","
+                + "\"uuid\":\"client\",\"base_damage\":10,\"damage\":12}]"));
+
+        assertNotEquals(server, client);
+    }
+
     private static JsonElement json(String value) {
         return new JsonParser().parse(value);
     }

@@ -99,8 +99,22 @@ public class StateJsonHelper {
             }
             Collections.sort(keys);
 
+            // Card states serialize power-adjusted display fields (block, damage,
+            // magic_number, cost_for_turn). These are recomputed by applyPowers()
+            // and reset by resetAttributes() at effect-timing-dependent points,
+            // so transient skew (e.g. a Necronomicon duplicate card that only the
+            // live game reset before snapshotting) can produce false mismatches.
+            // Compare display fields at their stable base values instead.
+            boolean isCardState = source.has("card_id") && source.get("card_id").isJsonPrimitive();
+
             for (String key : keys) {
                 JsonElement value = source.get(key);
+                if (isCardState) {
+                    String baseKey = displayFieldBaseKey(key);
+                    if (baseKey != null && source.has(baseKey)) {
+                        value = source.get(baseKey);
+                    }
+                }
                 if ("uuid".equals(key) && value != null && value.isJsonPrimitive()
                         && value.getAsJsonPrimitive().isString()) {
                     String uuid = value.getAsString();
@@ -119,6 +133,26 @@ public class StateJsonHelper {
 
         // JsonPrimitive is immutable, so sharing it does not compromise the copied tree.
         return json;
+    }
+
+    /**
+     * Maps a power-adjusted card display field to the stable base field it is
+     * reset to by {@code AbstractCard.resetAttributes()}, or null when the
+     * field is not power-adjusted.
+     */
+    private static String displayFieldBaseKey(String key) {
+        switch (key) {
+            case "block":
+                return "base_block";
+            case "damage":
+                return "base_damage";
+            case "magic_number":
+                return "base_magic_number";
+            case "cost_for_turn":
+                return "cost";
+            default:
+                return null;
+        }
     }
 
     private static JsonObject typedStateToJson(Object state) {
