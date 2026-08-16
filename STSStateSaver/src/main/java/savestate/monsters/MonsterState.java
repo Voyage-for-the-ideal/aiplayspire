@@ -180,6 +180,26 @@ public abstract class MonsterState extends CreatureState {
         offsetY = tempY;
     }
 
+    public AbstractMonster.Intent getIntent() {
+        return intent;
+    }
+
+    public AbstractMonster.Intent getTipIntent() {
+        return tipIntent;
+    }
+
+    public EnemyMoveInfoState getMoveInfo() {
+        return moveInfo;
+    }
+
+    public ArrayList<Byte> getMoveHistory() {
+        return moveHistory;
+    }
+
+    public byte getNextMove() {
+        return nextMove;
+    }
+
     public abstract AbstractMonster loadMonster();
 
     public void populateSharedFields(AbstractMonster monster) {

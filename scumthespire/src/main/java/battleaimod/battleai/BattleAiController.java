@@ -6,6 +6,7 @@ import FightPredictor.patches.com.megacrit.cardcrawl.combat.CombatPredictionPatc
 import FightPredictor.util.BaseGameConstants;
 import basemod.BaseMod;
 import battleaimod.ValueFunctions;
+import battleaimod.evaluation.TacticalEvaluator;
 import battleaimod.search.SearchBudget;
 import battleaimod.search.SearchMetrics;
 import battleaimod.search.SearchProfile;
@@ -310,6 +311,10 @@ public class BattleAiController implements Controller {
     }
 
     public void printRuntimeStats() {
+        // Merge evaluator counters so the search metrics include evaluation cost
+        searchMetrics.evaluationCount = TacticalEvaluator.evaluationCount;
+        searchMetrics.evaluationNanos = TacticalEvaluator.evaluationNanos;
+
         System.err.println("-------------------------------------------------------------------");
         System.err.println("total time: " + (System.currentTimeMillis() - startTime));
         System.err.println(SaveStateMod.runTimes.entrySet()

@@ -16,6 +16,8 @@ public final class SearchMetrics {
     public long snapshotCount;
     public int maxQueueSize;
     public int deepestTurn;
+    public long evaluationCount;
+    public long evaluationNanos;
 
     public JsonObject jsonEncode(long elapsedMillis, String stopReason) {
         JsonObject json = new JsonObject();
@@ -32,6 +34,8 @@ public final class SearchMetrics {
         json.addProperty("snapshot_count", snapshotCount);
         json.addProperty("max_queue_size", maxQueueSize);
         json.addProperty("deepest_turn", deepestTurn);
+        json.addProperty("evaluation_count", evaluationCount);
+        json.addProperty("evaluation_ms", evaluationNanos / 1_000_000L);
         json.addProperty("elapsed_ms", elapsedMillis);
         json.addProperty("stop_reason", stopReason);
         return json;

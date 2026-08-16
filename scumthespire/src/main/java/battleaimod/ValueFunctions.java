@@ -2,6 +2,7 @@ package battleaimod;
 
 import battleaimod.battleai.StateNode;
 import battleaimod.battleai.TurnNode;
+import battleaimod.evaluation.TacticalEvaluator;
 import com.megacrit.cardcrawl.cards.colorless.RitualDagger;
 import com.megacrit.cardcrawl.cards.green.Catalyst;
 import com.megacrit.cardcrawl.cards.purple.ConjureBlade;
@@ -71,20 +72,43 @@ public class ValueFunctions {
                                                     .get();
     }
 
+    /**
+     * Turn score used to order the search queue.  Delegates to the tactical
+     * evaluator (threat / survival / lethal aware); the legacy linear formula is
+     * preserved in {@link #calculateLegacyTurnScore} for A/B benchmarking.
+     */
     public static int caclculateTurnScore(TurnNode turnNode) {
-        int playerDamage = getPlayerDamage(turnNode);
-        int monsterDamage = ValueFunctions
-                .getTotalMonsterHealth(turnNode.controller.startingState) - ValueFunctions
-                .getTotalMonsterHealth(turnNode.startingState.saveState);
+        return TacticalEvaluator.evaluate(turnNode).totalScore;
+    }
 
-        int powerScore = turnNode.startingState.saveState.playerState.powers.stream()
+    /**
+     * The legacy linear turn score, kept verbatim for A/B comparison against the
+     * tactical evaluator.
+     */
+    public static int calculateLegacyTurnScore(TurnNode turnNode) {
+        return calculateLegacyTurnScore(turnNode.controller.startingState,
+                turnNode.startingState.saveState, turnNode.controller.startingHealth);
+    }
+
+    /**
+     * SaveState-level legacy score, so benchmark harnesses can run old vs new
+     * evaluation on the same states without constructing a search.
+     */
+    public static int calculateLegacyTurnScore(SaveState combatStartState, SaveState currentState,
+                                               int startingPlayerHealth) {
+        int playerDamage = startingPlayerHealth - currentState.getPlayerHealth();
+        int monsterDamage = ValueFunctions
+                .getTotalMonsterHealth(combatStartState) - ValueFunctions
+                .getTotalMonsterHealth(currentState);
+
+        int powerScore = currentState.playerState.powers.stream()
                                                                             .map(powerState -> POWER_VALUES
                                                                                     .getOrDefault(powerState.powerId, 0) * powerState.amount)
                                                                             .reduce(Integer::sum)
                                                                             .orElse(0);
 
 
-        boolean shouldBrawl = turnNode.startingState.saveState.curMapNodeState.monsterData.stream()
+        boolean shouldBrawl = currentState.curMapNodeState.monsterData.stream()
                                                                                           .filter(monsterState -> BRAWLY_MONSTER_IDS
                                                                                                   .contains(monsterState.id))
                                                                                           .findAny()
@@ -101,7 +125,7 @@ public class ValueFunctions {
         int numConjures = 0;
         int conjureDamage = 0;
 
-        for (CardState card : turnNode.startingState.saveState.playerState.hand) {
+        for (CardState card : currentState.playerState.hand) {
             switch (StateFactories.cardIds[card.cardIdIndex]) {
                 case RitualDagger.ID:
                     numRitualDaggers++;
@@ -130,7 +154,7 @@ public class ValueFunctions {
             }
         }
 
-        for (CardState card : turnNode.startingState.saveState.playerState.drawPile) {
+        for (CardState card : currentState.playerState.drawPile) {
             switch (StateFactories.cardIds[card.cardIdIndex]) {
                 case RitualDagger.ID:
                     numRitualDaggers++;
@@ -156,7 +180,7 @@ public class ValueFunctions {
             }
         }
 
-        for (CardState card : turnNode.startingState.saveState.playerState.discardPile) {
+        for (CardState card : currentState.playerState.discardPile) {
             switch (StateFactories.cardIds[card.cardIdIndex]) {
                 case RitualDagger.ID:
                     numRitualDaggers++;
@@ -182,7 +206,7 @@ public class ValueFunctions {
             }
         }
 
-        for (CardState card : turnNode.startingState.saveState.playerState.exhaustPile) {
+        for (CardState card : currentState.playerState.exhaustPile) {
             switch (StateFactories.cardIds[card.cardIdIndex]) {
                 case RitualDagger.ID:
                     totalRitualDaggerDamage += card.baseDamage;
@@ -194,23 +218,23 @@ public class ValueFunctions {
 
         int miracleScore = numMiracles * 20;
         int ritualDaggerScore = numRitualDaggers * 40 + totalRitualDaggerDamage * 80;
-        int feedScore = numFeeds * 40 + turnNode.startingState.saveState.playerState.maxHealth * 30;
+        int feedScore = numFeeds * 40 + currentState.playerState.maxHealth * 30;
         int conjureBladeScore = numConjures * 25 + (conjureDamage * 15);
-        int lessonLearnedScore = numLessonLearned * 40 + turnNode.startingState.saveState.lessonLearnedCount * 200;
-        int parasiteScore = turnNode.startingState.saveState.parasiteCount * -80;
+        int lessonLearnedScore = numLessonLearned * 40 + currentState.lessonLearnedCount * 200;
+        int parasiteScore = currentState.parasiteCount * -80;
         int catalystScore = numCatalysts * 25;
 
         int healthMultiplier = shouldBrawl ? 2 : 8;
-        int numOrbScore = turnNode.startingState.saveState.playerState.maxOrbs == 0 ? -1000 : 0;
+        int numOrbScore = currentState.playerState.maxOrbs == 0 ? -1000 : 0;
 
         int additonalHeuristicScore =
                 BattleAiMod.additionalValueFunctions.stream()
                                                     .map(function -> function
-                                                            .apply(turnNode.startingState.saveState))
+                                                            .apply(currentState))
                                                     .collect(Collectors
                                                             .summingInt(Integer::intValue));
 
-        return numOrbScore + catalystScore + parasiteScore + lessonLearnedScore + feedScore + conjureBladeScore + turnNode.startingState.saveState.playerState.gold * 2 + ritualDaggerScore + miracleScore + monsterDamage - healthMultiplier * playerDamage + powerScore + getPotionScore(turnNode.startingState.saveState) + getRelicScore(turnNode.startingState.saveState) + additonalHeuristicScore;
+        return numOrbScore + catalystScore + parasiteScore + lessonLearnedScore + feedScore + conjureBladeScore + currentState.playerState.gold * 2 + ritualDaggerScore + miracleScore + monsterDamage - healthMultiplier * playerDamage + powerScore + getPotionScore(currentState) + getRelicScore(currentState) + additonalHeuristicScore;
     }
 
     public static int getPlayerDamage(TurnNode turnNode) {

@@ -27,4 +27,16 @@ public class SearchMetricsTest {
         assertEquals(6L, json.get("snapshot_ms").getAsLong());
         assertEquals(2L, json.get("snapshot_count").getAsLong());
     }
+
+    @Test
+    public void encodesEvaluationCounters() {
+        SearchMetrics metrics = new SearchMetrics();
+        metrics.evaluationCount = 1234L;
+        metrics.evaluationNanos = 7_000_000L;
+
+        JsonObject json = metrics.jsonEncode(20L, "TEST");
+
+        assertEquals(1234L, json.get("evaluation_count").getAsLong());
+        assertEquals(7L, json.get("evaluation_ms").getAsLong());
+    }
 }
