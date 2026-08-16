@@ -13,20 +13,24 @@
 
 ```text
 sts_ai_framework/
-  __main__.py                     # CLI 入口与主循环
+  __main__.py                     # CLI 入口与主循环（动作生效检测、运行日志安装）
   __init__.py
   config.py                       # .env 配置加载
   game_client.py                  # /state /action /card_info HTTP 客户端
   models.py                       # Pydantic 状态与动作模型
   knowledge_base.py               # 怪物/卡牌知识
   agent_base.py                   # Agent 抽象基类
-  llm_agent.py                    # LLMAgent 组装与初始化（轻量入口）
+  llm_agent.py                    # LLMAgent 组装与初始化（DeepSeek 客户端 + 本地价值网络）
+  run_log.py                      # 运行日志：终端输出双写 + EVENT 结构化事件
   llm_agent_parts/
     __init__.py
-    action_mixin.py               # choose_action 主流程、LLM 调用与回退
-    choice_mixin.py               # 统一选项、营火/奖励处理、战斗 fallback
-    decision_mixin.py             # 本地 value model 决策（商店/选卡/事件）
+    action_mixin.py               # choose_action 主流程、状态流转与回退
+    choice_mixin.py               # 统一选项、按钮处理、战斗 fallback
+    decision_mixin.py             # 本地 value model 决策（商店/选卡/事件/Boss遗物）
     info_prompt_mixin.py          # 卡牌解析、地图摘要、Prompt 构建
+  tests/
+    test_run_log.py               # 运行日志 Tee/ANSI/事件格式测试
+    test_structured_events.py     # 结构化事件与动作生效检测测试
   requirements.txt
   README.md
   .env
@@ -119,5 +123,5 @@ Mod 接口：
 
 ## 后续建议
 
-1. 在 tests 目录新增回归测试，覆盖 choice/button/combat 三类关键状态。
-2. 为 llm_agent_parts 增加类型注解协议（Protocol）约束，降低 mixin 耦合风险。
+1. 为 llm_agent_parts 增加类型注解协议（Protocol）约束，降低 mixin 耦合风险。
+2. 增加回归测试覆盖 choice/button/combat 三类关键状态的组合场景。

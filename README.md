@@ -49,6 +49,8 @@ javac Build.java && java Build
 ### 2. 安装 Python 依赖
 
 ```bash
+# 推荐使用 conda 的 spire 环境 (Python 3.10+)
+conda activate spire
 pip install -r sts_ai_framework/requirements.txt
 ```
 
@@ -58,8 +60,12 @@ pip install -r sts_ai_framework/requirements.txt
 
 ```env
 STS_API_BASE_URL=http://localhost:5000
-LLM_MODEL=deepseek-chat
+LLM_MODEL=deepseek-v4-flash
 DEEPSEEK_API_KEY=your_api_key_here
+
+# 可选:Prompt 调试文件与运行日志目录(默认值已指向 debug/)
+DEBUG_PROMPT_FILE=debug/latest_prompt.txt
+RUN_LOG_DIR=debug
 ```
 
 ### 4. 构建 Battle AI Mod (可选)
@@ -101,8 +107,16 @@ cd scumthespire && mvn package       # → ../_ModTheSpire/mods/BattleAiMod.jar
 
 ```bash
 # 先启动游戏并进入一局
-python -m sts_ai_framework --model deepseek/deepseek-chat --interval 2.0
+python -m sts_ai_framework --model deepseek-v4-flash --interval 2.0
 ```
+
+可用参数:
+
+- `--model`: 覆盖 `.env` 的 `LLM_MODEL` (默认 `deepseek-v4-flash`)
+- `--interval`: 轮询与行动间隔(秒)
+- `--debug-prompt-file`: 将最新 Prompt 持续写入指定文件,便于调试
+
+每次运行会自动生成 `debug/run_YYYYMMDD_HHMMSS.log`,包含终端输出与结构化决策事件(见下文"主要特性"的"运行日志")。
 
 ## 决策架构
 
@@ -125,9 +139,11 @@ AI 根据 `screen_type` 选择不同的决策路径:
 
 ## 主要特性
 
-- **多模型支持**: 通过 litellm 支持 DeepSeek / OpenAI / Anthropic 等 LLM
+- **DeepSeek 直连**: 通过 OpenAI 兼容 SDK 直连 DeepSeek API(默认模型 `deepseek-v4-flash`),无需 litellm
+- **本地价值网络**: 自动加载 `selectcard/checkpoints/` 中的 v2 模型,覆盖商店/选卡/事件/营火/Boss 遗物等场景;Boss 战后奖励按下一幕楼层估值,模型返回非法选择时自动回退
 - **动作生效检测**: 提交动作后轮询状态变化,自动重试或回退
 - **安全回退链**: LLM 失败时依次尝试选项映射 → 前进/取消 → 战斗合法出牌 → 等待
+- **运行日志**: 每次运行自动保存 `debug/run_YYYYMMDD_HHMMSS.log` — 终端输出双写(去 ANSI、进度刷新转完整行),决策事件以 `EVENT key=value` 结构化行记录(含提交前后状态、是否生效)
 - **地图分析**: BFS 从当前节点计算到最近营火/商店/精英的距离,辅助 LLM 决策
 - **Omamori 感知**: 事件决策时自动检测是否持有驱魔护符,避免错估诅咒
 - **Set Transformer 价值网络**: 排列不变性的牌组编码,无需位置信息
@@ -165,26 +181,36 @@ aiplayspire/
 │   ├── Build.java                     ← 无 Maven 构建脚本
 │   └── build.ps1                      ← PowerShell 构建
 ├── sts_ai_framework/                  ← AI 客户端
-│   ├── __main__.py                    ← 入口,主循环
+│   ├── __main__.py                    ← CLI 入口与主循环(动作生效检测、运行日志安装)
 │   ├── models.py                      ← Pydantic 状态/动作模型
 │   ├── game_client.py                 ← HTTP 通信
 │   ├── knowledge_base.py              ← 怪物 AI 模式 / 卡牌知识
-│   ├── llm_agent.py                   ← Agent 组装入口
-│   ├── llm_agent_parts/               ← Mixin 决策组件
+│   ├── agent_base.py                  ← Agent 抽象基类
+│   ├── llm_agent.py                   ← LLMAgent 组装(DeepSeek 客户端 + 本地价值网络)
+│   ├── llm_agent_parts/               ← Mixin 决策组件(按职责拆分)
+│   │   ├── action_mixin.py            ← choose_action 主流程与状态流转
+│   │   ├── choice_mixin.py            ← 统一选项列表 / 按钮处理 / 战斗回退
+│   │   ├── decision_mixin.py          ← 本地价值网络决策(商店/选卡/事件/Boss遗物)
+│   │   └── info_prompt_mixin.py       ← 卡牌解析、地图摘要、Prompt 构建
+│   ├── run_log.py                     ← 运行日志(终端双写 + EVENT 结构化事件)
 │   ├── config.py                      ← 配置加载
+│   ├── tests/                         ← 单元测试(test_run_log / test_structured_events)
 │   ├── requirements.txt
 │   └── .env                           ← API Key 等敏感配置
 ├── selectcard/                        ← 深度学习项目
 │   ├── src/
-│   │   ├── data_pipeline.py           ← 数据流水线
+│   │   ├── data_pipeline.py           ← 数据流水线(→ processed_data_v2/)
 │   │   ├── reconstructor.py           ← 状态重建器
 │   │   ├── model.py                   ← Set Transformer 模型
+│   │   ├── config.py                  ← 模型配置(架构消融开关 GLOBAL_CONDITIONING / NORM_POSITION)
 │   │   ├── dataset.py                 ← 数据集 / 分词器
+│   │   ├── checkpointing.py           ← 检查点保存(v2 检查点内嵌配置与词汇表)
+│   │   ├── data_contract.py           ← 训练数据契约
 │   │   ├── train.py                   ← 训练脚本
-│   │   ├── inference.py               ← 推理引擎
+│   │   ├── inference.py               ← 推理引擎(STSInferenceEngine)
 │   │   └── api.py                     ← FastAPI 推理服务
-│   ├── checkpoints/                   ← 模型权重
-│   └── processed_data_v2/             ← Parquet 训练数据
+│   ├── checkpoints/                   ← 模型权重(v2 检查点内嵌配置,与旧版不兼容)
+│   └── processed_data_v2/             ← Parquet 训练数据(生成物,不提交)
 ├── STSStateSaver/                     ← 战斗状态序列化 Mod
 │   └── src/main/java/savestate/
 │       ├── SaveState.java             ← 根状态对象,完整战斗状态序列化
