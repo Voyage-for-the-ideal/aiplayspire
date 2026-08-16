@@ -65,6 +65,11 @@ public class LagavulinState extends MonsterState {
         monsterTypeNumber = Monster.LAGAVULIN.ordinal();
     }
 
+    /** Whether Lagavulin is still in its sleeping phase (free setup window). */
+    public boolean isAsleep() {
+        return asleep;
+    }
+
     @Override
     public AbstractMonster loadMonster() {
         Lagavulin monster = new Lagavulin(asleep);
