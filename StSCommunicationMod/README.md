@@ -79,7 +79,7 @@ java Build
 - `draw_pile_size`, `discard_pile_size`, `exhaust_pile_size`
 - `monsters`（仅战斗阶段，且只包含存活怪）
 - `floor`, `act`, `room_phase`
-- `screen_type`, `choice_list`, `can_proceed`, `can_cancel`
+- `screen_type`, `post_boss_card_reward`, `choice_list`, `can_proceed`, `can_cancel`
 - `is_end_turn_button_enabled`
 - 地图事实字段（AI 无关的原始状态）：
   - `first_room_chosen`

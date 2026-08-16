@@ -16,6 +16,7 @@ import com.megacrit.cardcrawl.potions.PotionSlot;
 import com.megacrit.cardcrawl.powers.AbstractPower;
 import com.megacrit.cardcrawl.relics.AbstractRelic;
 import com.megacrit.cardcrawl.rooms.AbstractRoom;
+import com.megacrit.cardcrawl.rooms.MonsterRoomBoss;
 import com.megacrit.cardcrawl.screens.select.GridCardSelectScreen;
 import com.megacrit.cardcrawl.ui.buttons.GridSelectConfirmButton;
 import com.megacrit.cardcrawl.ui.buttons.EndTurnButton;
@@ -102,6 +103,9 @@ public class GameStateConverter {
         // Screen Info
         ChoiceScreenUtils.ChoiceType currentChoiceType = ChoiceScreenUtils.getCurrentChoiceType();
         state.put("screen_type", currentChoiceType.name());
+        state.put("post_boss_card_reward",
+                currentChoiceType == ChoiceScreenUtils.ChoiceType.CARD_REWARD
+                        && AbstractDungeon.getCurrRoom() instanceof MonsterRoomBoss);
         state.put("choice_list", ChoiceScreenUtils.getCurrentChoiceList());
         state.put("can_proceed", ChoiceScreenUtils.isConfirmButtonAvailable());
         state.put("can_cancel", ChoiceScreenUtils.isCancelButtonAvailable());

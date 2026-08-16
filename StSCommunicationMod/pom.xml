@@ -6,9 +6,9 @@
 
     <groupId>com.example</groupId>
     <artifactId>CommunicationMod</artifactId>
-    <version>1.0.0</version>
+    <version>1.1.0</version>
     <name>Communication Mod</name>
-    <description>Exposes state via JSON and accepts commands.</description>
+    <description>Exposes structured game state, including post-boss card reward context, and accepts commands.</description>
 
     <properties>
         <maven.compiler.source>1.8</maven.compiler.source>
