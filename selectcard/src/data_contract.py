@@ -1,8 +1,14 @@
 import math
 
 
-PREPROCESSING_VERSION = "set-transformer-v3"
+PREPROCESSING_VERSION = "set-transformer-v4-multi-horizon"
 FILTER_VERSION = "standard-vanilla-v1"
+
+VALUE_COMPONENT_NAMES = ("reach17", "reach34", "reach50", "win")
+HORIZON_BOUNDARIES = (17, 34, 50)
+TARGET_COLUMNS = tuple(f"target_{name}" for name in VALUE_COMPONENT_NAMES)
+MASK_COLUMNS = tuple(f"valid_{name}" for name in VALUE_COMPONENT_NAMES)
+VALUE_OUTPUT_DIM = len(VALUE_COMPONENT_NAMES)
 
 ASCENSION_BAND_NAMES = (
     "A0",

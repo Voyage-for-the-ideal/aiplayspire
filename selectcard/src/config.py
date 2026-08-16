@@ -38,6 +38,13 @@ class Config:
     GLOBAL_CONDITIONING = "token"  # "token" or "late_concat"
     NORM_POSITION = "pre"           # "pre" or "post"
     RANDOM_SEED = 42
+    VALUE_WEIGHTS = {
+        "reach17": 0.10,
+        "reach34": 0.20,
+        "reach50": 0.25,
+        "win": 0.45,
+    }
+    VALUE_DEBUG = os.environ.get("STS_VALUE_DEBUG", "").lower() in {"1", "true", "yes"}
 
     # ==========================
     # 输出与保存

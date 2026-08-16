@@ -8,8 +8,8 @@ import torch
 from torch.utils.data import DataLoader
 
 from checkpointing import load_checkpoint, save_checkpoint
-from data_contract import FILTER_VERSION
-from data_pipeline import act_target, assign_split
+from data_contract import FILTER_VERSION, MASK_COLUMNS, TARGET_COLUMNS
+from data_pipeline import assign_split, horizon_targets
 from dataset import (
     TRAINING_ARTIFACT_CACHE_NAME,
     GlobalFeatureEncoder,
@@ -23,6 +23,15 @@ from encoding import (
     parse_item_name,
 )
 from model import STSValueNetwork
+from inference import STSInferenceEngine, compose_scalar_value
+from train import weighted_bce_loss
+
+
+def supervision_fields(valid=True, label=0.0):
+    return {
+        **{column: label for column in TARGET_COLUMNS},
+        **{column: valid for column in MASK_COLUMNS},
+    }
 
 
 class EncodingTests(unittest.TestCase):
@@ -70,10 +79,23 @@ class DataContractTests(unittest.TestCase):
         self.assertEqual(assign_split("same-run"), assign_split("same-run"))
         self.assertIn(assign_split("same-run"), {"train", "val", "test"})
 
-    def test_censored_target_preserves_completed_acts(self):
-        self.assertEqual(act_target(10, 20, False), (1, True))
-        self.assertEqual(act_target(18, 20, False), (0, False))
-        self.assertEqual(act_target(18, 20, True), (0, True))
+    def test_act_target_is_continuous_across_boundary(self):
+        before = horizon_targets(16, 40, False, False)
+        after = horizon_targets(17, 40, False, False)
+        self.assertEqual(before, after)
+        self.assertEqual(before, ([1, 1, 0, 0], [True, True, False, False]))
+
+    def test_terminal_death_labels_all_horizons(self):
+        self.assertEqual(
+            horizon_targets(20, 25, True, False),
+            ([1, 0, 0, 0], [True, True, True, True]),
+        )
+
+    def test_abandoned_run_masks_unknown_future(self):
+        self.assertEqual(
+            horizon_targets(20, 25, False, False),
+            ([1, 0, 0, 0], [True, False, False, False]),
+        )
 
 
 class GlobalFeatureEncoderTests(unittest.TestCase):
@@ -169,7 +191,7 @@ class GlobalFeatureEncoderTests(unittest.TestCase):
                 {
                     "run_id": f"run-{index}",
                     "split": split,
-                    "target_valid": target_valid,
+                    **supervision_fields(target_valid),
                     "preprocessing_version": PREPROCESSING_VERSION,
                     "filter_version": FILTER_VERSION,
                     "ascension_band": 5,
@@ -197,7 +219,7 @@ class GlobalFeatureEncoderTests(unittest.TestCase):
                 {
                     "run_id": "run-1",
                     "split": "train",
-                    "target_valid": True,
+                    **supervision_fields(),
                     "preprocessing_version": PREPROCESSING_VERSION,
                     "filter_version": FILTER_VERSION,
                     "ascension_band": 0,
@@ -234,7 +256,7 @@ class GlobalFeatureEncoderTests(unittest.TestCase):
                 {
                     "run_id": f"run-{index}",
                     "split": "train",
-                    "target_valid": True,
+                    **supervision_fields(label=float(index % 2)),
                     "preprocessing_version": PREPROCESSING_VERSION,
                     "filter_version": FILTER_VERSION,
                     "ascension_band": 0,
@@ -245,7 +267,6 @@ class GlobalFeatureEncoderTests(unittest.TestCase):
                     "ascension": 0,
                     "deck": "Bash",
                     "relics": "Burning Blood",
-                    "label": float(index % 2),
                 }
                 for index in range(4)
             ]
@@ -306,9 +327,75 @@ class ModelTests(unittest.TestCase):
         )
         for conditioning in ("token", "late_concat"):
             for norm in ("pre", "post"):
-                self.assertEqual(self._model(conditioning, norm)(*inputs).shape, (1, 1))
+                self.assertEqual(self._model(conditioning, norm)(*inputs).shape, (1, 4))
 
-    def test_v4_checkpoint_round_trip(self):
+    def test_masked_loss_ignores_invalid_horizon_gradient(self):
+        logits = torch.zeros((1, 4), requires_grad=True)
+        targets = torch.ones((1, 4))
+        masks = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+        globals_ = torch.zeros((1, 9))
+        loss = weighted_bce_loss(logits, targets, masks, globals_, torch.ones(6))
+        loss.backward()
+        self.assertNotEqual(logits.grad[0, 0].item(), 0.0)
+        torch.testing.assert_close(logits.grad[0, 1:], torch.zeros(3))
+
+    def test_scalar_value_clamps_completed_horizon(self):
+        components = {"reach17": 0.3, "reach34": 0.4, "reach50": 0.2, "win": 0.1}
+        self.assertAlmostEqual(compose_scalar_value(components, 20), 0.275)
+
+    def test_boss_relic_hypothetical_replaces_starter_relic(self):
+        engine = STSInferenceEngine.__new__(STSInferenceEngine)
+        state = {"deck": ["Strike_R"], "relics": ["Burning Blood"]}
+        result = engine._apply_choice(state, {
+            "action": "composite_event",
+            "effects": [{"type": "obtain_relic", "relic_id": "Black Blood"}],
+        })
+        self.assertEqual(result["relics"], ["Black Blood"])
+
+    def test_calling_bell_adds_known_curse_without_fake_random_relics(self):
+        engine = STSInferenceEngine.__new__(STSInferenceEngine)
+        state = {"deck": ["Strike_R"], "relics": [], "relic_states": []}
+        result = engine._apply_choice(state, {
+            "action": "composite_event",
+            "effects": [{"type": "obtain_relic", "relic_id": "Calling Bell"}],
+        })
+        self.assertIn("CurseOfTheBell", result["deck"])
+        self.assertEqual(result["relics"], ["Calling Bell"])
+
+    def test_empty_cage_removes_two_model_ranked_cards(self):
+        engine = STSInferenceEngine.__new__(STSInferenceEngine)
+        engine.rank_cards_for_purpose = lambda state, purpose, n, exclude_ids=None: [
+            next(card for card in ("Strike_R", "Defend_R") if card in state["deck"])
+        ]
+        state = {"deck": ["Strike_R", "Defend_R", "Bash"], "relics": []}
+        result = engine._apply_choice(state, {
+            "action": "composite_event",
+            "effects": [{"type": "obtain_relic", "relic_id": "Empty Cage"}],
+        })
+        self.assertEqual(result["deck"], ["Bash"])
+
+    def test_astrolabe_removes_three_transform_targets_without_random_cards(self):
+        engine = STSInferenceEngine.__new__(STSInferenceEngine)
+        engine.rank_cards_for_purpose = lambda state, purpose, n, exclude_ids=None: [
+            "Strike_R", "Defend_R", "Bash"
+        ]
+        state = {"deck": ["Strike_R", "Defend_R", "Bash", "Inflame"], "relics": []}
+        result = engine._apply_choice(state, {
+            "action": "composite_event",
+            "effects": [{"type": "obtain_relic", "relic_id": "Astrolabe"}],
+        })
+        self.assertEqual(result["deck"], ["Inflame"])
+
+    def test_pandoras_box_removes_all_starter_strikes_and_defends(self):
+        engine = STSInferenceEngine.__new__(STSInferenceEngine)
+        state = {"deck": ["Strike_R", "Defend_R", "Bash", "Inflame"], "relics": []}
+        result = engine._apply_choice(state, {
+            "action": "composite_event",
+            "effects": [{"type": "obtain_relic", "relic_id": "Pandora's Box"}],
+        })
+        self.assertEqual(result["deck"], ["Bash", "Inflame"])
+
+    def test_v5_checkpoint_round_trip(self):
         model = self._model()
         config = {
             "vocab_size": 12,
@@ -334,7 +421,7 @@ class ModelTests(unittest.TestCase):
             path = os.path.join(directory, "model.pth")
             save_checkpoint(path, model, config, vocabulary, feature_encoder)
             checkpoint, loaded_vocab, loaded_encoder = load_checkpoint(path)
-        self.assertEqual(checkpoint["format_version"], 4)
+        self.assertEqual(checkpoint["format_version"], 5)
         self.assertEqual(loaded_vocab.to_dict(), vocabulary.to_dict())
         self.assertEqual(loaded_encoder.to_dict(), feature_encoder.to_dict())
 
@@ -342,7 +429,7 @@ class ModelTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "model.pth")
             torch.save({"format_version": 3}, path)
-            with self.assertRaisesRegex(ValueError, "expected version 4"):
+            with self.assertRaisesRegex(ValueError, "legacy single-act value target"):
                 load_checkpoint(path)
 
     def test_incompatible_feature_order_is_rejected(self):

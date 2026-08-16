@@ -461,13 +461,31 @@ class RunReconstructor:
                         self.gold = self.raw_data['gold_per_floor'][prev_idx]
             
             if floor == 17 and len(self.raw_data.get('boss_relics', [])) > 0:
-                boss_relic = self.raw_data['boss_relics'][0].get('picked')
+                boss_choice = self.raw_data['boss_relics'][0]
+                boss_relic = boss_choice.get('picked')
                 if boss_relic:
                     self._add_relic(boss_relic)
+                    if not getattr(self, '_is_dry_run', False):
+                        candidates = (boss_choice.get('not_picked', []) or []) + [boss_relic]
+                        yield {
+                            'floor': 17, 'deck': list(self.deck), 'relics': list(self.relics),
+                            'hp': self.hp, 'max_hp': self.max_hp, 'gold': self.gold,
+                            'ascension': self.ascension, 'candidates': candidates,
+                            'picked': boss_relic, 'decision_type': 'boss_relic',
+                        }
             if floor == 34 and len(self.raw_data.get('boss_relics', [])) > 1:
-                boss_relic = self.raw_data['boss_relics'][1].get('picked')
+                boss_choice = self.raw_data['boss_relics'][1]
+                boss_relic = boss_choice.get('picked')
                 if boss_relic:
                     self._add_relic(boss_relic)
+                    if not getattr(self, '_is_dry_run', False):
+                        candidates = (boss_choice.get('not_picked', []) or []) + [boss_relic]
+                        yield {
+                            'floor': 34, 'deck': list(self.deck), 'relics': list(self.relics),
+                            'hp': self.hp, 'max_hp': self.max_hp, 'gold': self.gold,
+                            'ascension': self.ascension, 'candidates': candidates,
+                            'picked': boss_relic, 'decision_type': 'boss_relic',
+                        }
 
             if floor in relics_obtained:
                 for r in relics_obtained[floor]:
@@ -574,7 +592,8 @@ class RunReconstructor:
                             'gold': y_gold,
                             'ascension': self.ascension,
                             'candidates': (choice.get('not_picked', []) or []) + [choice.get('picked')],
-                            'picked': choice.get('picked')
+                            'picked': choice.get('picked'),
+                            'decision_type': 'card_reward',
                         }
                     picked = choice.get('picked')
                     if picked and picked not in {'SKIP', 'Singing Bowl'}:

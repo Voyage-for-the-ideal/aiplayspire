@@ -11,17 +11,18 @@ import torch
 from torch.utils.data import Dataset, Sampler
 
 try:
-    from .data_contract import FILTER_VERSION, PREPROCESSING_VERSION
+    from .data_contract import FILTER_VERSION, MASK_COLUMNS, PREPROCESSING_VERSION, TARGET_COLUMNS
     from .encoding import ItemVocabulary, encode_items, split_items
 except ImportError:
-    from data_contract import FILTER_VERSION, PREPROCESSING_VERSION
+    from data_contract import FILTER_VERSION, MASK_COLUMNS, PREPROCESSING_VERSION, TARGET_COLUMNS
     from encoding import ItemVocabulary, encode_items, split_items
 
 
 REQUIRED_COLUMNS = {
     "run_id",
     "split",
-    "target_valid",
+    *TARGET_COLUMNS,
+    *MASK_COLUMNS,
     "preprocessing_version",
     "filter_version",
     "ascension_band",
@@ -279,7 +280,8 @@ def build_training_artifacts(parquet_dir, progress=None, use_cache=True):
     for file_index, path in enumerate(files, start=1):
         frame = _read_frame(path)
         train_frame = frame[
-            (frame["split"] == "train") & frame["target_valid"].astype(bool)
+            (frame["split"] == "train")
+            & frame[list(MASK_COLUMNS)].astype(bool).any(axis=1)
         ]
         feature_frames.append(train_frame[list(GlobalFeatureEncoder.source_feature_names)])
         for column in ("deck", "relics"):
@@ -345,7 +347,8 @@ class STSDataset(Dataset):
                 columns=[
                     "run_id",
                     "split",
-                    "target_valid",
+                    *TARGET_COLUMNS,
+                    *MASK_COLUMNS,
                     "preprocessing_version",
                     "filter_version",
                     "ascension_band",
@@ -353,7 +356,7 @@ class STSDataset(Dataset):
             )
             if set(metadata["split"].unique()) != {split}:
                 raise ValueError(f"Dataset shard has unexpected split: {path}")
-            if not metadata["target_valid"].astype(bool).all():
+            if not metadata[list(MASK_COLUMNS)].astype(bool).any(axis=1).all():
                 raise ValueError(f"Dataset shard contains censored samples: {path}")
             total += len(metadata)
             self.cumulative_lengths.append(total)
@@ -394,13 +397,15 @@ class STSDataset(Dataset):
             self.max_count,
         )
         global_features = self.feature_encoder.transform_row(row)
-        label = float(row["label"])
+        targets = [float(row[column]) for column in TARGET_COLUMNS]
+        masks = [float(bool(row[column])) for column in MASK_COLUMNS]
         return (
             torch.tensor(tokens, dtype=torch.long),
             torch.tensor(upgrades, dtype=torch.long),
             torch.tensor(counts, dtype=torch.long),
             torch.tensor(global_features, dtype=torch.float32),
-            torch.tensor([label], dtype=torch.float32),
+            torch.tensor(targets, dtype=torch.float32),
+            torch.tensor(masks, dtype=torch.float32),
         )
 
 

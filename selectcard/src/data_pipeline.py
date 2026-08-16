@@ -17,12 +17,26 @@ import pandas as pd
 try:
     from .config import Config
     from .content_catalog import VanillaContentCatalog, canonical_card_id
-    from .data_contract import FILTER_VERSION, PREPROCESSING_VERSION, ascension_band
+    from .data_contract import (
+        FILTER_VERSION,
+        HORIZON_BOUNDARIES,
+        MASK_COLUMNS,
+        PREPROCESSING_VERSION,
+        TARGET_COLUMNS,
+        ascension_band,
+    )
     from .reconstructor import RunReconstructor
 except ImportError:
     from config import Config
     from content_catalog import VanillaContentCatalog, canonical_card_id
-    from data_contract import FILTER_VERSION, PREPROCESSING_VERSION, ascension_band
+    from data_contract import (
+        FILTER_VERSION,
+        HORIZON_BOUNDARIES,
+        MASK_COLUMNS,
+        PREPROCESSING_VERSION,
+        TARGET_COLUMNS,
+        ascension_band,
+    )
     from reconstructor import RunReconstructor
 
 
@@ -65,11 +79,19 @@ def assign_split(run_id):
     return "test"
 
 
-def act_target(floor, floor_reached, terminal_known):
-    boundary = 17 if floor <= 16 else 34 if floor <= 33 else 50
-    if floor_reached >= boundary:
-        return 1, True
-    return 0, terminal_known
+def horizon_targets(floor, floor_reached, terminal_known, victory):
+    """Return fixed reach17/reach34/reach50/win labels and validity masks."""
+    if floor < 0 or floor_reached < 0:
+        raise ValueError("floors must be non-negative")
+    targets = []
+    masks = []
+    for boundary in HORIZON_BOUNDARIES:
+        reached = floor_reached >= boundary
+        targets.append(int(reached))
+        masks.append(bool(reached or terminal_known))
+    targets.append(int(bool(victory)))
+    masks.append(bool(terminal_known))
+    return targets, masks
 
 
 def _reject(reason):
@@ -368,14 +390,19 @@ def process_run(event_data, catalog):
     rows = []
     for snapshot in snapshots:
         floor = _validate_snapshot(snapshot, validated["ascension"])
-        label, target_valid = act_target(
-            floor, validated["floor_reached"], terminal_known
+        targets, masks = horizon_targets(
+            floor,
+            validated["floor_reached"],
+            terminal_known,
+            bool(event_data.get("victory")),
         )
+        target_fields = dict(zip(TARGET_COLUMNS, targets))
+        mask_fields = dict(zip(MASK_COLUMNS, masks))
         rows.append(
             {
                 **snapshot,
-                "label": label,
-                "target_valid": target_valid,
+                **target_fields,
+                **mask_fields,
                 "run_id": run_id,
                 "split": split,
                 "preprocessing_version": PREPROCESSING_VERSION,
@@ -541,7 +568,8 @@ def _validate_staging(staging, expected_samples):
     required = {
         "run_id",
         "split",
-        "target_valid",
+        *TARGET_COLUMNS,
+        *MASK_COLUMNS,
         "preprocessing_version",
         "filter_version",
         "ascension_band",
@@ -587,7 +615,8 @@ def build_dataset(
         "runs_by_ascension_band": Counter(),
         "runs_by_split": Counter(),
         "samples_by_split": Counter(),
-        "samples_by_label": Counter(),
+        "positive_samples_by_target": Counter(),
+        "valid_samples_by_target": Counter(),
         "valid_samples_by_split": Counter(),
         "train_valid_samples_by_ascension_band": Counter(),
     }
@@ -632,15 +661,21 @@ def build_dataset(
                 for row in run["rows"]:
                     sample_count += 1
                     dimensions["samples_by_split"][row["split"]] += 1
-                    dimensions["samples_by_label"][str(row["label"])] += 1
-                    if row["target_valid"]:
+                    for target_column, mask_column in zip(TARGET_COLUMNS, MASK_COLUMNS):
+                        target_name = target_column.removeprefix("target_")
+                        if row[mask_column]:
+                            dimensions["valid_samples_by_target"][target_name] += 1
+                            if row[target_column]:
+                                dimensions["positive_samples_by_target"][target_name] += 1
+                    target_valid = any(row[column] for column in MASK_COLUMNS)
+                    if target_valid:
                         valid_sample_count += 1
                         dimensions["valid_samples_by_split"][row["split"]] += 1
                         if row["split"] == "train":
                             dimensions["train_valid_samples_by_ascension_band"][
                                 str(row["ascension_band"])
                             ] += 1
-                    status = "valid" if row["target_valid"] else "censored"
+                    status = "valid" if target_valid else "censored"
                     partition = f"{row['split']}_{status}"
                     buffers[partition].append(row)
                     if len(buffers[partition]) >= chunk_size:

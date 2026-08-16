@@ -1,6 +1,11 @@
 import torch
 import torch.nn as nn
 
+try:
+    from .data_contract import VALUE_OUTPUT_DIM
+except ImportError:
+    from data_contract import VALUE_OUTPUT_DIM
+
 
 class SetAttention(nn.Module):
     def __init__(self, d_model, n_heads, dropout=0.1, norm_position="pre"):
@@ -79,7 +84,7 @@ class STSValueNetwork(nn.Module):
         self.value_head = nn.Sequential(
             nn.Linear(head_input, d_model // 2),
             nn.ReLU(),
-            nn.Linear(d_model // 2, 1),
+            nn.Linear(d_model // 2, VALUE_OUTPUT_DIM),
         )
 
     def forward(self, seq_tokens, upgrades, counts, global_features):
