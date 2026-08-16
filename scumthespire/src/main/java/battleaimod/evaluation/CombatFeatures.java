@@ -15,7 +15,8 @@ public final class CombatFeatures {
     public int playerCurrentHp;
     public int playerMaxHp;
     public int playerBlock;
-    public int hpLostFromCombatStart;
+    /** Player HP lost since the search root (NOT combat start - replans reset it). */
+    public int hpLostFromSearchRoot;
     public int playerStrength;
     public int playerDexterity;
     public int playerFocus;
@@ -42,8 +43,11 @@ public final class CombatFeatures {
     public int highestSingleEnemyThreat;
     public int nearLethalAttackingCount;
 
-    // Progress (roster-independent enemy burden reduction since the search root)
-    public int enemyBurdenProgress;
+    /**
+     * Enemy burden delta since the search root: rootBurden - currentBurden
+     * (roster-independent, may be negative when summons/splits add burden).
+     */
+    public int enemyBurdenDelta;
 
     // Resources / misc
     public int potionValueRemaining;
@@ -77,7 +81,7 @@ public final class CombatFeatures {
         features.playerCurrentHp = currentState.playerState.getCurrentHealth();
         features.playerMaxHp = currentState.playerState.maxHealth;
         features.playerBlock = Math.max(0, currentState.playerState.currentBlock);
-        features.hpLostFromCombatStart = Math.max(0, startingPlayerHealth - features.playerCurrentHp);
+        features.hpLostFromSearchRoot = Math.max(0, startingPlayerHealth - features.playerCurrentHp);
         features.playerStrength = CreaturePowerUtils.playerStrength(currentState.playerState);
         features.playerDexterity = CreaturePowerUtils.playerDexterity(currentState.playerState);
         features.playerFocus = CreaturePowerUtils.playerFocus(currentState.playerState);
@@ -145,24 +149,25 @@ public final class CombatFeatures {
         features.nearLethalAttackingCount = nearLethalAttacking;
         features.allEnemiesDead = features.aliveEnemyCount == 0;
 
-        features.enemyBurdenProgress = burdenProgress(currentState, searchRootState);
+        features.enemyBurdenDelta = burdenDelta(currentState, searchRootState);
 
         return features;
     }
 
     /**
-     * Roster-independent enemy burden progress since the search root:
+     * Roster-independent enemy burden delta since the search root:
      * <pre>
      *   rootBurden    = sum(alive enemy HP + block in the search root)
      *   currentBurden = sum(alive enemy HP + block now)
-     *   progress      = clamp(rootBurden - currentBurden, 0, rootBurden)
+     *   delta         = clamp(rootBurden - currentBurden, -rootBurden, +rootBurden)
      * </pre>
-     * No index, no monster id, no fixed-roster assumption: summons raise the
-     * current burden (progress can even drop across a Slime Boss split, which
-     * is the correct signal that crossing the split line costs tempo), kills
-     * remove burden, and overkill on a dead enemy adds nothing.
+     * No index, no monster id, no fixed-roster assumption.  A negative delta is
+     * NOT clamped away: it means the enemy burden actually grew (e.g. 30 damage
+     * dealt but a 40 HP summon appeared, or a shallow Slime Boss split keeps
+     * almost all its burden as children).  Kills remove burden, overkill on a
+     * dead enemy adds nothing.
      */
-    private static int burdenProgress(SaveState currentState, SaveState searchRootState) {
+    private static int burdenDelta(SaveState currentState, SaveState searchRootState) {
         if (searchRootState == null || searchRootState.curMapNodeState == null
                 || searchRootState.curMapNodeState.monsterData == null
                 || currentState.curMapNodeState == null
@@ -171,7 +176,7 @@ public final class CombatFeatures {
         }
         int rootBurden = burden(searchRootState);
         int currentBurden = burden(currentState);
-        return Math.max(0, Math.min(rootBurden - currentBurden, rootBurden));
+        return Math.max(-rootBurden, Math.min(rootBurden - currentBurden, rootBurden));
     }
 
     /** Sum of alive enemy HP + block (enemy burden on the player). */
@@ -203,10 +208,10 @@ public final class CombatFeatures {
     @Override
     public String toString() {
         return String.format(
-                "hp:%d/%d(%d lost) block:%d str:%d dex:%d focus:%d | enemies:%d hp:%d block:%d effhp:%d incoming:%d(%d hits) threat:%d | progress:%d potions:%d turn:%d",
-                playerCurrentHp, playerMaxHp, hpLostFromCombatStart, playerBlock, playerStrength,
+                "hp:%d/%d(%d lost) block:%d str:%d dex:%d focus:%d | enemies:%d hp:%d block:%d effhp:%d incoming:%d(%d hits) threat:%d | burdenDelta:%d potions:%d turn:%d",
+                playerCurrentHp, playerMaxHp, hpLostFromSearchRoot, playerBlock, playerStrength,
                 playerDexterity, playerFocus, aliveEnemyCount, totalEnemyHp, totalEnemyBlock,
                 totalEnemyEffectiveHp, currentIncomingDamage, currentIncomingHitCount, aliveThreat,
-                enemyBurdenProgress, potionValueRemaining, turnNumber);
+                enemyBurdenDelta, potionValueRemaining, turnNumber);
     }
 }

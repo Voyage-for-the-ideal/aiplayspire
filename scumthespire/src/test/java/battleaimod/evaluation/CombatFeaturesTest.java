@@ -19,7 +19,7 @@ public class CombatFeaturesTest {
 
         assertEquals(64, features.playerCurrentHp);
         assertEquals(70, features.playerMaxHp);
-        assertEquals(6, features.hpLostFromCombatStart);
+        assertEquals(6, features.hpLostFromSearchRoot);
         assertEquals(2, features.aliveEnemyCount);
         assertEquals(0, features.deadEnemyCount);
         assertEquals(48, features.totalEnemyHp);
@@ -49,20 +49,31 @@ public class CombatFeaturesTest {
     }
 
     @Test
-    public void burdenProgressTracksEnemyHpAndBlock() {
+    public void burdenDeltaTracksEnemyHpAndBlock() {
         TestStateBuilder.Monster enemy = TestStateBuilder.attacking(8, 6);
         enemy.block = 4;
         SaveState root = TestStateBuilder.state(70, 70, enemy);
 
-        // root burden = 8 HP + 4 block = 12; enemy dropped to 3 HP, block gone -> 9 progress
+        // root burden = 8 HP + 4 block = 12; enemy dropped to 3 HP, block gone -> 9 delta
         CombatFeatures partial = CombatFeatures.extract(
                 TestStateBuilder.state(70, 70, TestStateBuilder.attacking(3, 6)), root, 70);
-        assertEquals(9, partial.enemyBurdenProgress);
+        assertEquals(9, partial.enemyBurdenDelta);
 
-        // enemy dead -> full 12 progress, capped even when overkilled to -10
+        // enemy dead -> full 12 delta, capped even when overkilled to -10
         CombatFeatures dead = CombatFeatures.extract(
                 TestStateBuilder.state(70, 70, TestStateBuilder.monster(-10)), root, 70);
-        assertEquals(12, dead.enemyBurdenProgress);
+        assertEquals(12, dead.enemyBurdenDelta);
+    }
+
+    @Test
+    public void hpLossIsMeasuredFromSearchRootNotCombatStart() {
+        // The feature name must not mislead: it is the loss since the search
+        // root (replans reset the root), never the whole combat.
+        TestStateBuilder.Monster enemy = TestStateBuilder.monster(40);
+        SaveState root = TestStateBuilder.state(70, 70, enemy);
+        CombatFeatures features = CombatFeatures.extract(
+                TestStateBuilder.state(60, 70, enemy), root, 70);
+        assertEquals(10, features.hpLostFromSearchRoot);
     }
 
     @Test

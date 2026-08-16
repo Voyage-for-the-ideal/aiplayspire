@@ -50,12 +50,14 @@ public final class ThreatEvaluator {
     /**
      * Total threat of a single alive monster.
      * <p>
-     * Components (Phase 1):
+     * Strict threat semantics - danger the monster poses:
      * <ul>
      *   <li>immediateThreat - the damage about to hit the player</li>
      *   <li>scalingThreat - Strength that will keep adding damage in later turns</li>
-     *   <li>blockThreat - block that must be cleared before the monster dies</li>
      * </ul>
+     * Block is deliberately NOT threat: a 20-block enemy that is not attacking
+     * is not "20 points of incoming danger".  Block is killability / enemy
+     * burden and is counted exactly once, in CombatFeatures.enemyBurdenDelta.
      */
     public static int threatOf(MonsterState monster) {
         if (monster.currentHealth <= 0) {
@@ -64,8 +66,7 @@ public final class ThreatEvaluator {
         int immediate = immediateDamageOf(monster);
         int strength = CreaturePowerUtils.strengthOf(monster);
         int scaling = Math.max(0, strength) * TacticalEvaluator.SCALING_THREAT_WEIGHT;
-        int block = Math.max(0, monster.currentBlock) * TacticalEvaluator.BLOCK_THREAT_WEIGHT;
-        return immediate * TacticalEvaluator.IMMEDIATE_THREAT_WEIGHT + scaling + block;
+        return immediate * TacticalEvaluator.IMMEDIATE_THREAT_WEIGHT + scaling;
     }
 
     /** Sum of threat over all alive monsters. */

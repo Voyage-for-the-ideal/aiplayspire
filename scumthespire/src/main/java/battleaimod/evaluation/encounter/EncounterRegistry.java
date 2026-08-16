@@ -21,6 +21,7 @@ public final class EncounterRegistry {
     static {
         PROFILES.put("GremlinNob", GremlinNobProfile.INSTANCE);
         PROFILES.put("Lagavulin", LagavulinProfile.INSTANCE);
+        PROFILES.put("Hexaghost", HexaghostProfile.INSTANCE);
     }
 
     private EncounterRegistry() {

@@ -28,9 +28,14 @@ public final class TestStateBuilder {
         public int baseDamage;
         public int multiplier = 1;
         public boolean isMultiDamage;
+        public byte nextMove;
         public int strength;
         // Lagavulin-specific (only set for id "Lagavulin")
         public boolean lagavulinAsleep;
+        // Hexaghost-specific (only set for id "Hexaghost")
+        public boolean hexActivated;
+        public boolean hexBurnUpgraded;
+        public int hexOrbActiveCount;
     }
 
     private TestStateBuilder() {
@@ -56,6 +61,23 @@ public final class TestStateBuilder {
         m.id = "Lagavulin";
         m.intent = "SLEEP";
         m.lagavulinAsleep = asleep;
+        return m;
+    }
+
+    /**
+     * A Hexaghost monster with the given orb counter / next move (the real
+     * cycle state machine; see HexaghostProfile for the move constants).
+     */
+    public static Monster hexaghost(int hp, int orbActiveCount, byte nextMove,
+                                    boolean burnUpgraded) {
+        Monster m = monster(hp);
+        m.id = "Hexaghost";
+        m.intent = "ATTACK_DEBUFF";
+        m.baseDamage = 6;
+        m.hexActivated = true;
+        m.hexOrbActiveCount = orbActiveCount;
+        m.nextMove = nextMove;
+        m.hexBurnUpgraded = burnUpgraded;
         return m;
     }
 
@@ -266,7 +288,7 @@ public final class TestStateBuilder {
         state.add("move_name", JsonNull.INSTANCE);
 
         JsonObject moveInfo = new JsonObject();
-        moveInfo.addProperty("next_move", 0);
+        moveInfo.addProperty("next_move", monster.nextMove);
         moveInfo.addProperty("intent_name", monster.intent);
         moveInfo.addProperty("base_damage", monster.baseDamage);
         moveInfo.addProperty("multiplier", monster.multiplier);
@@ -290,6 +312,15 @@ public final class TestStateBuilder {
             state.addProperty("first_turn", false);
         } else if (monster.id.equals("SpikeSlime_L") || monster.id.equals("AcidSlime_L")) {
             state.addProperty("split_triggered", false);
+        } else if (monster.id.equals("Hexaghost")) {
+            state.addProperty("activated", monster.hexActivated);
+            state.addProperty("burn_upgraded", monster.hexBurnUpgraded);
+            state.addProperty("orb_active_count", monster.hexOrbActiveCount);
+            JsonArray orbs = new JsonArray();
+            for (int i = 0; i < 6; i++) {
+                orbs.add(i < monster.hexOrbActiveCount);
+            }
+            state.add("active_orbs", orbs);
         }
 
         return state;
@@ -332,8 +363,12 @@ public final class TestStateBuilder {
             copy.baseDamage = monster.baseDamage;
             copy.multiplier = monster.multiplier;
             copy.isMultiDamage = monster.isMultiDamage;
+            copy.nextMove = monster.nextMove;
             copy.strength = monster.strength;
             copy.lagavulinAsleep = monster.lagavulinAsleep;
+            copy.hexActivated = monster.hexActivated;
+            copy.hexBurnUpgraded = monster.hexBurnUpgraded;
+            copy.hexOrbActiveCount = monster.hexOrbActiveCount;
             result.add(copy);
         }
         return result;

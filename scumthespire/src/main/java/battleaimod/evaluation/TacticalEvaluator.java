@@ -60,8 +60,8 @@ public final class TacticalEvaluator {
     public static final int IMMEDIATE_THREAT_WEIGHT = 40;
     /** Score per enemy Strength point (future damage in later turns). */
     public static final int SCALING_THREAT_WEIGHT = 15;
-    /** Score per enemy block point (must be cleared before the enemy dies). */
-    public static final int BLOCK_THREAT_WEIGHT = 10;
+    // NOTE: enemy block is intentionally not part of threat.  Block is enemy
+    // burden / killability and is counted exactly once via enemyBurdenDelta.
 
     /** Bonus for finishing the whole battle. */
     public static final int BATTLE_COMPLETE_BONUS = 1_000_000;
@@ -114,9 +114,10 @@ public final class TacticalEvaluator {
         result.survivalScore = SurvivalEvaluator.survivalScore(features.playerCurrentHp,
                 features.playerMaxHp, features.currentIncomingDamage);
 
-        // 2. Enemy burden progress since the search root (roster-independent,
-        //    capped so overkill earns nothing)
-        result.damageProgressScore = features.enemyBurdenProgress * DAMAGE_PROGRESS_WEIGHT;
+        // 2. Enemy burden delta since the search root (roster-independent;
+        //    negative when summons/splits add burden, which correctly taxes
+        //    crossing the Slime Boss split line)
+        result.damageProgressScore = features.enemyBurdenDelta * DAMAGE_PROGRESS_WEIGHT;
 
         // 3. Threat remaining: killing a dangerous attacker removes its threat,
         //    which is what makes "kill = block" fall out naturally.

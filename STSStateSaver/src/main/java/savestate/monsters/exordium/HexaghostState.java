@@ -82,6 +82,21 @@ public class HexaghostState extends MonsterState {
         monsterTypeNumber = Monster.HEXAGHOST.ordinal();
     }
 
+    /** Whether the opening Activate has already happened. */
+    public boolean isActivated() {
+        return activated;
+    }
+
+    /** Whether the first Inferno has upgraded all Burns (post-Inferno cycle). */
+    public boolean isBurnUpgraded() {
+        return burnUpgraded;
+    }
+
+    /** Active orb count, the Hexaghost's real cycle timer (0..6). */
+    public int getOrbActiveCount() {
+        return orbActiveCount;
+    }
+
     @Override
     public AbstractMonster loadMonster() {
         Hexaghost monster = new Hexaghost();

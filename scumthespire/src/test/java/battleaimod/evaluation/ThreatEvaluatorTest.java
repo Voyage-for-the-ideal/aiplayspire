@@ -49,13 +49,20 @@ public class ThreatEvaluatorTest {
     }
 
     @Test
-    public void blockAddsThreatBecauseEnemySurvivesLonger() {
+    public void blockIsNotThreat() {
+        // Block is killability / burden, not incoming danger: a blocked enemy
+        // that is not attacking contributes no threat at all.
+        TestStateBuilder.Monster defender = TestStateBuilder.monster(20);
+        defender.block = 20;
+        SaveState state = TestStateBuilder.state(70, 70, defender);
+        assertEquals(0, ThreatEvaluator.threatOf(state.curMapNodeState.monsterData.get(0)));
+
+        // And an attacking enemy's threat is unchanged by its block
         TestStateBuilder.Monster attacker = TestStateBuilder.attacking(20, 6);
         attacker.block = 10;
-        SaveState state = TestStateBuilder.state(70, 70, attacker);
-        assertEquals(6 * TacticalEvaluator.IMMEDIATE_THREAT_WEIGHT
-                        + 10 * TacticalEvaluator.BLOCK_THREAT_WEIGHT,
-                ThreatEvaluator.threatOf(state.curMapNodeState.monsterData.get(0)));
+        SaveState attackerState = TestStateBuilder.state(70, 70, attacker);
+        assertEquals(6 * TacticalEvaluator.IMMEDIATE_THREAT_WEIGHT,
+                ThreatEvaluator.threatOf(attackerState.curMapNodeState.monsterData.get(0)));
     }
 
     @Test
