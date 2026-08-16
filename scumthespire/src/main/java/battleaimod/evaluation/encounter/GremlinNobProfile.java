@@ -14,10 +14,18 @@ import savestate.monsters.MonsterState;
  * It only adds combat urgency: every turn Nob stays alive costs more, with a
  * slightly escalating curve, so the search prefers tempo lines without ever
  * hard-forbidding Skills.
+ * <p>
+ * Urgency is based on the ABSOLUTE combat turn (GameActionManager.turn starts
+ * at 1 for the player's first turn), never on the search root: replans create
+ * new search roots mid-combat, so root-relative turn counting would reset the
+ * urgency and let replanned searches "forget" how long the fight has run.
  */
 public final class GremlinNobProfile implements EncounterProfile {
 
     public static final GremlinNobProfile INSTANCE = new GremlinNobProfile();
+
+    /** First turn of a combat is turn 1 (AbstractDungeon.resetPlayer). */
+    public static final int FIRST_COMBAT_TURN = 1;
 
     /** Base per-turn penalty while Nob is alive. */
     public static final int NOB_TURN_PENALTY_BASE = 80;
@@ -28,12 +36,14 @@ public final class GremlinNobProfile implements EncounterProfile {
     }
 
     @Override
-    public int evaluate(SaveState combatStartState, SaveState currentState,
+    public int evaluate(SaveState searchRootState, SaveState currentState,
                         CombatFeatures features) {
-        if (combatStartState == null || !nobAlive(currentState)) {
+        // searchRootState is intentionally unused: urgency must not depend on
+        // where the current search segment started (replan invariance).
+        if (!nobAlive(currentState)) {
             return 0;
         }
-        int turnsElapsed = currentState.turn - combatStartState.turn;
+        int turnsElapsed = Math.max(0, currentState.turn - FIRST_COMBAT_TURN);
         if (turnsElapsed <= 0) {
             return 0;
         }

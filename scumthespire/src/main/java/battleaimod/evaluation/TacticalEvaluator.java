@@ -94,14 +94,18 @@ public final class TacticalEvaluator {
     }
 
     /**
-     * Evaluates {@code currentState} given the state at combat start.
+     * Evaluates {@code currentState} against the root state of the current
+     * search segment.
      * <p>
-     * {@code combatStartState} may be null (damage progress will be 0); for real
-     * search it is always {@code controller.startingState}.
+     * {@code searchRootState} is the root of the current search segment
+     * (BattleAiController.startingState), NOT necessarily the combat-start
+     * turn: after a replan the search can begin mid-combat.  It may be null
+     * (burden progress will be 0).  Do not use it to derive "how many combat
+     * turns have passed" - use {@code currentState.turn} directly.
      */
-    public static EvaluationResult evaluate(SaveState combatStartState, SaveState currentState,
+    public static EvaluationResult evaluate(SaveState searchRootState, SaveState currentState,
                                             int startingPlayerHealth) {
-        CombatFeatures features = CombatFeatures.extract(currentState, combatStartState,
+        CombatFeatures features = CombatFeatures.extract(currentState, searchRootState,
                 startingPlayerHealth);
 
         EvaluationResult result = new EvaluationResult();
@@ -110,8 +114,9 @@ public final class TacticalEvaluator {
         result.survivalScore = SurvivalEvaluator.survivalScore(features.playerCurrentHp,
                 features.playerMaxHp, features.currentIncomingDamage);
 
-        // 2. Damage progress: capped per enemy so overkill earns nothing
-        result.damageProgressScore = features.damageDealtThisCombat * DAMAGE_PROGRESS_WEIGHT;
+        // 2. Enemy burden progress since the search root (roster-independent,
+        //    capped so overkill earns nothing)
+        result.damageProgressScore = features.enemyBurdenProgress * DAMAGE_PROGRESS_WEIGHT;
 
         // 3. Threat remaining: killing a dangerous attacker removes its threat,
         //    which is what makes "kill = block" fall out naturally.
@@ -133,7 +138,7 @@ public final class TacticalEvaluator {
         // 7. Encounter-specific adjustment (only for mechanics that break the
         //    generic value relationships; 0 for most encounters)
         result.encounterScore = EncounterRegistry.resolve(currentState)
-                .evaluate(combatStartState, currentState, features);
+                .evaluate(searchRootState, currentState, features);
 
         // External extension hooks keep working exactly as before
         result.resourceScore += BattleAiMod.additionalValueFunctions.stream()

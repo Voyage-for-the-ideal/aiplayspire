@@ -286,6 +286,10 @@ public final class TestStateBuilder {
             state.addProperty("asleep", monster.lagavulinAsleep);
             state.addProperty("is_out", !monster.lagavulinAsleep);
             state.addProperty("is_out_triggered", false);
+        } else if (monster.id.equals("SlimeBoss")) {
+            state.addProperty("first_turn", false);
+        } else if (monster.id.equals("SpikeSlime_L") || monster.id.equals("AcidSlime_L")) {
+            state.addProperty("split_triggered", false);
         }
 
         return state;

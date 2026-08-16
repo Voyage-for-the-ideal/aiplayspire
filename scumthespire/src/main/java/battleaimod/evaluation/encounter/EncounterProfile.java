@@ -19,9 +19,11 @@ public interface EncounterProfile {
     /**
      * Returns the encounter-specific score adjustment for {@code currentState}.
      *
-     * @param combatStartState state at combat start (may be null)
-     * @param currentState     state being evaluated
-     * @param features         extracted combat features (current state)
+     * @param searchRootState root state of the current search segment
+     *                        (BattleAiController.startingState), NOT necessarily
+     *                        the combat-start turn; may be null
+     * @param currentState    state being evaluated
+     * @param features        extracted combat features (current state)
      */
-    int evaluate(SaveState combatStartState, SaveState currentState, CombatFeatures features);
+    int evaluate(SaveState searchRootState, SaveState currentState, CombatFeatures features);
 }

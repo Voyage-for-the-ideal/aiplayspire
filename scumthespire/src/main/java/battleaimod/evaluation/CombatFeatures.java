@@ -42,8 +42,8 @@ public final class CombatFeatures {
     public int highestSingleEnemyThreat;
     public int nearLethalAttackingCount;
 
-    // Progress
-    public int damageDealtThisCombat;
+    // Progress (roster-independent enemy burden reduction since the search root)
+    public int enemyBurdenProgress;
 
     // Resources / misc
     public int potionValueRemaining;
@@ -57,11 +57,15 @@ public final class CombatFeatures {
     }
 
     /**
-     * Extracts features from a combat state.  {@code combatStartState} is the
-     * state at combat start (may be null, in which case damage progress is 0);
-     * {@code startingPlayerHealth} is the player HP at combat start.
+     * Extracts features from a combat state.
+     * <p>
+     * {@code searchRootState} is the root state of the current search segment
+     * (BattleAiController.startingState), NOT necessarily the combat-start
+     * turn: after a replan the search can begin mid-combat.  It may be null,
+     * in which case burden progress is 0.  {@code startingPlayerHealth} is the
+     * player HP at that root.
      */
-    public static CombatFeatures extract(SaveState currentState, SaveState combatStartState,
+    public static CombatFeatures extract(SaveState currentState, SaveState searchRootState,
                                          int startingPlayerHealth) {
         CombatFeatures features = new CombatFeatures();
         if (currentState == null || currentState.playerState == null
@@ -141,37 +145,44 @@ public final class CombatFeatures {
         features.nearLethalAttackingCount = nearLethalAttacking;
         features.allEnemiesDead = features.aliveEnemyCount == 0;
 
-        features.damageDealtThisCombat = damageProgress(currentState, combatStartState);
+        features.enemyBurdenProgress = burdenProgress(currentState, searchRootState);
 
         return features;
     }
 
     /**
-     * Damage dealt to enemies this combat, capped per enemy at its starting
-     * effective HP so overkill on an already-dead enemy adds nothing.
+     * Roster-independent enemy burden progress since the search root:
+     * <pre>
+     *   rootBurden    = sum(alive enemy HP + block in the search root)
+     *   currentBurden = sum(alive enemy HP + block now)
+     *   progress      = clamp(rootBurden - currentBurden, 0, rootBurden)
+     * </pre>
+     * No index, no monster id, no fixed-roster assumption: summons raise the
+     * current burden (progress can even drop across a Slime Boss split, which
+     * is the correct signal that crossing the split line costs tempo), kills
+     * remove burden, and overkill on a dead enemy adds nothing.
      */
-    private static int damageProgress(SaveState currentState, SaveState combatStartState) {
-        if (combatStartState == null || combatStartState.curMapNodeState == null
-                || combatStartState.curMapNodeState.monsterData == null
+    private static int burdenProgress(SaveState currentState, SaveState searchRootState) {
+        if (searchRootState == null || searchRootState.curMapNodeState == null
+                || searchRootState.curMapNodeState.monsterData == null
+                || currentState.curMapNodeState == null
                 || currentState.curMapNodeState.monsterData == null) {
             return 0;
         }
-        int progress = 0;
-        int index = 0;
-        for (MonsterState startMonster : combatStartState.curMapNodeState.monsterData) {
-            if (index >= currentState.curMapNodeState.monsterData.size()) {
-                break;
+        int rootBurden = burden(searchRootState);
+        int currentBurden = burden(currentState);
+        return Math.max(0, Math.min(rootBurden - currentBurden, rootBurden));
+    }
+
+    /** Sum of alive enemy HP + block (enemy burden on the player). */
+    private static int burden(SaveState state) {
+        int burden = 0;
+        for (MonsterState monster : state.curMapNodeState.monsterData) {
+            if (monster.currentHealth > 0) {
+                burden += Math.max(0, monster.currentHealth) + Math.max(0, monster.currentBlock);
             }
-            MonsterState currentMonster = currentState.curMapNodeState.monsterData.get(index++);
-            if (startMonster.currentHealth <= 0) {
-                continue;
-            }
-            int startEffective = startMonster.currentHealth + Math.max(0, startMonster.currentBlock);
-            int currentEffective = currentMonster.currentHealth > 0
-                    ? currentMonster.currentHealth + Math.max(0, currentMonster.currentBlock) : 0;
-            progress += Math.min(Math.max(0, startEffective - currentEffective), startEffective);
         }
-        return progress;
+        return burden;
     }
 
     private static int potionValue(SaveState state) {
@@ -196,6 +207,6 @@ public final class CombatFeatures {
                 playerCurrentHp, playerMaxHp, hpLostFromCombatStart, playerBlock, playerStrength,
                 playerDexterity, playerFocus, aliveEnemyCount, totalEnemyHp, totalEnemyBlock,
                 totalEnemyEffectiveHp, currentIncomingDamage, currentIncomingHitCount, aliveThreat,
-                damageDealtThisCombat, potionValueRemaining, turnNumber);
+                enemyBurdenProgress, potionValueRemaining, turnNumber);
     }
 }

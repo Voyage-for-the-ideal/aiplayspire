@@ -12,7 +12,7 @@ public final class DefaultEncounterProfile implements EncounterProfile {
     }
 
     @Override
-    public int evaluate(SaveState combatStartState, SaveState currentState,
+    public int evaluate(SaveState searchRootState, SaveState currentState,
                         CombatFeatures features) {
         return 0;
     }

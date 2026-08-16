@@ -45,6 +45,32 @@ public class GremlinNobProfileTest {
         assertEquals(540, early.totalScore - delayed.totalScore);
     }
 
+    /**
+     * Replan invariance: the same current state (turn X) must produce the same
+     * urgency regardless of which turn the current search segment started on.
+     * Search roots are created mid-combat after replans.
+     */
+    @Test
+    public void sameCurrentTurnHasSameUrgencyAcrossReplans() {
+        TestStateBuilder.Monster nob = nob(80, 0);
+
+        // Three different search roots (replans at turns 1, 2, 3) ...
+        SaveState rootAtTurn1 = TestStateBuilder.state(70, 70, 0, 1, nob);
+        SaveState rootAtTurn2 = TestStateBuilder.state(70, 70, 0, 2, nob);
+        SaveState rootAtTurn3 = TestStateBuilder.state(70, 70, 0, 3, nob);
+
+        // ... evaluating the same current state at turn 5
+        SaveState current = TestStateBuilder.state(70, 70, 0, 5, nob);
+
+        int fromRoot1 = TacticalEvaluator.evaluate(rootAtTurn1, current, 70).encounterScore;
+        int fromRoot2 = TacticalEvaluator.evaluate(rootAtTurn2, current, 70).encounterScore;
+        int fromRoot3 = TacticalEvaluator.evaluate(rootAtTurn3, current, 70).encounterScore;
+
+        assertEquals(-620, fromRoot1);
+        assertEquals(fromRoot1, fromRoot2);
+        assertEquals(fromRoot1, fromRoot3);
+    }
+
     @Test
     public void firstTurnHasNoDelayPenalty() {
         TestStateBuilder.Monster nob = nob(80, 0);

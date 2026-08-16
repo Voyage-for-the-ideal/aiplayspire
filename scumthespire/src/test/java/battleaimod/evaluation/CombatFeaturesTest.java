@@ -49,19 +49,20 @@ public class CombatFeaturesTest {
     }
 
     @Test
-    public void damageProgressIsCappedPerEnemy() {
+    public void burdenProgressTracksEnemyHpAndBlock() {
         TestStateBuilder.Monster enemy = TestStateBuilder.attacking(8, 6);
-        SaveState start = TestStateBuilder.state(70, 70, enemy);
+        enemy.block = 4;
+        SaveState root = TestStateBuilder.state(70, 70, enemy);
 
-        // enemy dropped to 3 HP -> 5 progress
+        // root burden = 8 HP + 4 block = 12; enemy dropped to 3 HP, block gone -> 9 progress
         CombatFeatures partial = CombatFeatures.extract(
-                TestStateBuilder.state(70, 70, TestStateBuilder.attacking(3, 6)), start, 70);
-        assertEquals(5, partial.damageDealtThisCombat);
+                TestStateBuilder.state(70, 70, TestStateBuilder.attacking(3, 6)), root, 70);
+        assertEquals(9, partial.enemyBurdenProgress);
 
-        // enemy dead -> full 8 progress, capped even when overkilled to -10
+        // enemy dead -> full 12 progress, capped even when overkilled to -10
         CombatFeatures dead = CombatFeatures.extract(
-                TestStateBuilder.state(70, 70, TestStateBuilder.monster(-10)), start, 70);
-        assertEquals(8, dead.damageDealtThisCombat);
+                TestStateBuilder.state(70, 70, TestStateBuilder.monster(-10)), root, 70);
+        assertEquals(12, dead.enemyBurdenProgress);
     }
 
     @Test
