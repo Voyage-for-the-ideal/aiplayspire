@@ -311,10 +311,6 @@ public class BattleAiController implements Controller {
     }
 
     public void printRuntimeStats() {
-        // Merge evaluator counters so the search metrics include evaluation cost
-        searchMetrics.evaluationCount = TacticalEvaluator.evaluationCount;
-        searchMetrics.evaluationNanos = TacticalEvaluator.evaluationNanos;
-
         System.err.println("-------------------------------------------------------------------");
         System.err.println("total time: " + (System.currentTimeMillis() - startTime));
         System.err.println(SaveStateMod.runTimes.entrySet()
@@ -393,6 +389,11 @@ public class BattleAiController implements Controller {
 
     public void updateQueueMetrics() {
         searchMetrics.maxQueueSize = Math.max(searchMetrics.maxQueueSize, turns.size());
+    }
+
+    /** Records one tactical evaluation against this search's own metrics. */
+    public void recordEvaluation(long nanos) {
+        searchMetrics.recordEvaluation(nanos);
     }
 
     public SearchMetrics metrics() {

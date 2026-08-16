@@ -51,21 +51,11 @@ public final class SurvivalEvaluator {
     }
 
     /**
-     * Survival score for a combat's features.  Dead is overwhelmingly worse than
-     * any living state; among living states, the marginal cost of lost HP grows
-     * the closer the player is to the danger line.
+     * Survival score: dead is overwhelmingly worse than any living state;
+     * among living states, the marginal cost of lost HP grows the closer the
+     * player is to the danger line.  Encounter-specific HP tempo belongs to
+     * EncounterProfiles, not here.
      */
-    public static int survivalScore(CombatFeatures features) {
-        int score = survivalScore(features.playerCurrentHp, features.playerMaxHp,
-                features.currentIncomingDamage);
-        if (features.brawly) {
-            // Brawly encounters (Gremlin Nob / Lagavulin) reward tempo over HP
-            // preservation; Phase 2 replaces this with EncounterProfiles.
-            score = (int) (score * TacticalEvaluator.BRAWL_SURVIVAL_MULTIPLIER);
-        }
-        return score;
-    }
-
     public static int survivalScore(int currentHp, int maxHp, int effectiveIncomingDamage) {
         if (currentHp <= 0) {
             return TacticalEvaluator.DEATH_PENALTY;

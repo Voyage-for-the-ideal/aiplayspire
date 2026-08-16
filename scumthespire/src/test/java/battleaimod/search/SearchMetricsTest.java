@@ -39,4 +39,29 @@ public class SearchMetricsTest {
         assertEquals(1234L, json.get("evaluation_count").getAsLong());
         assertEquals(7L, json.get("evaluation_ms").getAsLong());
     }
+
+    @Test
+    public void evaluationMetricsArePerSearchInstance() {
+        // Each BattleAiController search owns its own SearchMetrics; recorded
+        // evaluations must never leak from one search into another.
+        SearchMetrics searchA = new SearchMetrics();
+        SearchMetrics searchB = new SearchMetrics();
+
+        searchA.recordEvaluation(1_000_000L);
+        searchA.recordEvaluation(2_000_000L);
+
+        assertEquals(2L, searchA.evaluationCount);
+        assertEquals(3_000_000L, searchA.evaluationNanos);
+        // search B must not see search A's evaluations
+        assertEquals(0L, searchB.evaluationCount);
+        assertEquals(0L, searchB.evaluationNanos);
+
+        searchB.recordEvaluation(500_000L);
+
+        // search B's evaluation must not leak back into search A
+        assertEquals(2L, searchA.evaluationCount);
+        assertEquals(3_000_000L, searchA.evaluationNanos);
+        assertEquals(1L, searchB.evaluationCount);
+        assertEquals(500_000L, searchB.evaluationNanos);
+    }
 }

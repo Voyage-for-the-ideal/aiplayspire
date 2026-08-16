@@ -4,6 +4,7 @@ import battleaimod.BattleAiMod;
 import battleaimod.ValueFunctions;
 import battleaimod.battleai.BattleAiController;
 import battleaimod.battleai.TurnNode;
+import battleaimod.evaluation.encounter.EncounterRegistry;
 import com.megacrit.cardcrawl.cards.colorless.RitualDagger;
 import com.megacrit.cardcrawl.cards.green.Catalyst;
 import com.megacrit.cardcrawl.cards.purple.ConjureBlade;
@@ -51,8 +52,6 @@ public final class TacticalEvaluator {
 
     /** Per-HP survival value in the safe zone (see SurvivalEvaluator). */
     public static final int SAFE_HP_VALUE = 100;
-    /** Survival multiplier for brawly encounters (Nob/Lagavulin): tempo over HP. */
-    public static final float BRAWL_SURVIVAL_MULTIPLIER = 0.5f;
 
     /** Score per point of damage progress against enemy effective HP. */
     public static final int DAMAGE_PROGRESS_WEIGHT = 10;
@@ -66,10 +65,11 @@ public final class TacticalEvaluator {
 
     /** Bonus for finishing the whole battle. */
     public static final int BATTLE_COMPLETE_BONUS = 1_000_000;
-    /** An enemy at or below this HP, currently attacking, counts as near-lethal. */
+    /**
+     * An enemy at or below this HP, currently attacking, counts as near-lethal
+     * (a CombatFeature for future command ordering; it carries no score).
+     */
     public static final int NEAR_LETHAL_HP_THRESHOLD = 5;
-    /** Bonus per near-lethal attacking enemy (about to die -> finish it). */
-    public static final int NEAR_LETHAL_BONUS = 150;
 
     // ------------------------------------------------------------------
     // Observability
@@ -77,19 +77,20 @@ public final class TacticalEvaluator {
 
     private static final String DEBUG_FLAG = "battleai.debugEvaluation";
 
-    /** Total evaluations performed (merged into SearchMetrics by the controller). */
-    public static long evaluationCount = 0;
-    /** Nanos spent evaluating (merged into SearchMetrics by the controller). */
-    public static long evaluationNanos = 0;
-
     private TacticalEvaluator() {
     }
 
-    /** Evaluates the state at the start of {@code turnNode}'s turn. */
+    /**
+     * Evaluates the state at the start of {@code turnNode}'s turn and records
+     * the evaluation against the owning controller's per-search metrics.
+     */
     public static EvaluationResult evaluate(TurnNode turnNode) {
         BattleAiController controller = turnNode.controller;
-        return evaluate(controller.startingState, turnNode.startingState.saveState,
-                controller.startingHealth);
+        long startedAt = System.nanoTime();
+        EvaluationResult result = evaluate(controller.startingState,
+                turnNode.startingState.saveState, controller.startingHealth);
+        controller.recordEvaluation(System.nanoTime() - startedAt);
+        return result;
     }
 
     /**
@@ -100,14 +101,14 @@ public final class TacticalEvaluator {
      */
     public static EvaluationResult evaluate(SaveState combatStartState, SaveState currentState,
                                             int startingPlayerHealth) {
-        long startedAt = System.nanoTime();
         CombatFeatures features = CombatFeatures.extract(currentState, combatStartState,
                 startingPlayerHealth);
 
         EvaluationResult result = new EvaluationResult();
 
         // 1. Survival: non-linear HP risk (death is overwhelmingly bad)
-        result.survivalScore = SurvivalEvaluator.survivalScore(features);
+        result.survivalScore = SurvivalEvaluator.survivalScore(features.playerCurrentHp,
+                features.playerMaxHp, features.currentIncomingDamage);
 
         // 2. Damage progress: capped per enemy so overkill earns nothing
         result.damageProgressScore = features.damageDealtThisCombat * DAMAGE_PROGRESS_WEIGHT;
@@ -116,11 +117,12 @@ public final class TacticalEvaluator {
         //    which is what makes "kill = block" fall out naturally.
         result.threatScore = -features.aliveThreat;
 
-        // 4. Lethal: battle complete and near-lethal finish bonuses
+        // 4. Lethal: only true discrete states.  A dead enemy's value comes
+        //    from threat removal (threatScore above); near-lethal enemies are
+        //    exposed as a feature but carry no score.
         if (features.allEnemiesDead) {
             result.lethalScore += BATTLE_COMPLETE_BONUS;
         }
-        result.lethalScore += features.nearLethalAttackingCount * NEAR_LETHAL_BONUS;
 
         // 5. Player scaling (powers: strength, dexterity, focus, ...)
         result.scalingScore = powerScore(currentState);
@@ -128,8 +130,10 @@ public final class TacticalEvaluator {
         // 6. Resources retained for the rest of the run
         result.resourceScore = resourceScore(currentState);
 
-        // 7. Encounter-specific adjustment (Phase 2+)
-        result.encounterScore = 0;
+        // 7. Encounter-specific adjustment (only for mechanics that break the
+        //    generic value relationships; 0 for most encounters)
+        result.encounterScore = EncounterRegistry.resolve(currentState)
+                .evaluate(combatStartState, currentState, features);
 
         // External extension hooks keep working exactly as before
         result.resourceScore += BattleAiMod.additionalValueFunctions.stream()
@@ -137,9 +141,6 @@ public final class TacticalEvaluator {
                 .collect(Collectors.summingInt(Integer::intValue));
 
         result.computeTotal();
-
-        evaluationCount++;
-        evaluationNanos += System.nanoTime() - startedAt;
 
         if (System.getProperty(DEBUG_FLAG) != null) {
             System.err.println("evaluation " + result + " | " + features);

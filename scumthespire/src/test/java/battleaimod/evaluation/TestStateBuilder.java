@@ -29,6 +29,8 @@ public final class TestStateBuilder {
         public int multiplier = 1;
         public boolean isMultiDamage;
         public int strength;
+        // Lagavulin-specific (only set for id "Lagavulin")
+        public boolean lagavulinAsleep;
     }
 
     private TestStateBuilder() {
@@ -48,20 +50,34 @@ public final class TestStateBuilder {
         return m;
     }
 
+    /** A Lagavulin monster in the given sleep state (idle, no attack intent). */
+    public static Monster lagavulin(int hp, boolean asleep) {
+        Monster m = monster(hp);
+        m.id = "Lagavulin";
+        m.intent = "SLEEP";
+        m.lagavulinAsleep = asleep;
+        return m;
+    }
+
     public static JsonObject saveState(int playerHp, int playerMaxHp, Monster... monsters) {
-        return saveState(playerHp, playerMaxHp, 0, Arrays.asList(monsters));
+        return saveState(playerHp, playerMaxHp, 0, 1, Arrays.asList(monsters));
     }
 
     public static JsonObject saveState(int playerHp, int playerMaxHp, int playerBlock,
                                        Monster... monsters) {
-        return saveState(playerHp, playerMaxHp, playerBlock, Arrays.asList(monsters));
+        return saveState(playerHp, playerMaxHp, playerBlock, 1, Arrays.asList(monsters));
     }
 
-    public static JsonObject saveState(int playerHp, int playerMaxHp, int playerBlock,
+    public static JsonObject saveState(int playerHp, int playerMaxHp, int playerBlock, int turn,
+                                       Monster... monsters) {
+        return saveState(playerHp, playerMaxHp, playerBlock, turn, Arrays.asList(monsters));
+    }
+
+    public static JsonObject saveState(int playerHp, int playerMaxHp, int playerBlock, int turn,
                                        List<Monster> monsters) {
         JsonObject state = new JsonObject();
         state.addProperty("floor_num", 1);
-        state.addProperty("turn", 1);
+        state.addProperty("turn", turn);
         state.addProperty("mantra_gained", 0);
         state.addProperty("screen_name", "NONE");
         state.add("previous_screen_name", JsonNull.INSTANCE);
@@ -264,6 +280,12 @@ public final class TestStateBuilder {
         if (monster.id.equals("GremlinNob")) {
             state.addProperty("used_bellow", false);
             state.addProperty("can_vuln", true);
+        } else if (monster.id.equals("Lagavulin")) {
+            state.addProperty("debuff_turn_count", 0);
+            state.addProperty("idle_count", 0);
+            state.addProperty("asleep", monster.lagavulinAsleep);
+            state.addProperty("is_out", !monster.lagavulinAsleep);
+            state.addProperty("is_out_triggered", false);
         }
 
         return state;
@@ -271,21 +293,26 @@ public final class TestStateBuilder {
 
     /** Builds a SaveState instance from the JSON (parsed, never loaded). */
     public static SaveState state(int playerHp, int playerMaxHp, Monster... monsters) {
-        return state(playerHp, playerMaxHp, 0, Arrays.asList(monsters));
+        return state(playerHp, playerMaxHp, 0, 1, Arrays.asList(monsters));
     }
 
     public static SaveState state(int playerHp, int playerMaxHp, int playerBlock,
                                   Monster... monsters) {
-        return state(playerHp, playerMaxHp, playerBlock, Arrays.asList(monsters));
+        return state(playerHp, playerMaxHp, playerBlock, 1, Arrays.asList(monsters));
+    }
+
+    public static SaveState state(int playerHp, int playerMaxHp, int playerBlock, int turn,
+                                  Monster... monsters) {
+        return state(playerHp, playerMaxHp, playerBlock, turn, Arrays.asList(monsters));
     }
 
     public static SaveState state(int playerHp, int playerMaxHp, List<Monster> monsters) {
-        return state(playerHp, playerMaxHp, 0, monsters);
+        return state(playerHp, playerMaxHp, 0, 1, monsters);
     }
 
-    public static SaveState state(int playerHp, int playerMaxHp, int playerBlock,
+    public static SaveState state(int playerHp, int playerMaxHp, int playerBlock, int turn,
                                   List<Monster> monsters) {
-        return new SaveState(saveState(playerHp, playerMaxHp, playerBlock, monsters));
+        return new SaveState(saveState(playerHp, playerMaxHp, playerBlock, turn, monsters));
     }
 
     /** Deep-copies a monster list so tests can tweak individual enemies. */
@@ -302,6 +329,7 @@ public final class TestStateBuilder {
             copy.multiplier = monster.multiplier;
             copy.isMultiDamage = monster.isMultiDamage;
             copy.strength = monster.strength;
+            copy.lagavulinAsleep = monster.lagavulinAsleep;
             result.add(copy);
         }
         return result;

@@ -155,19 +155,40 @@ public class TacticalEvaluatorTest {
                 exactlyDead.damageProgressScore);
     }
 
-    /** A near-lethal attacking enemy earns a finish-it bonus. */
+    /**
+     * Invariant: killing an attacking enemy must beat leaving it at 1 HP, and
+     * the difference must come from threat removal, not a fixed kill bonus.
+     * A second (passive) enemy keeps the battle from ending so no
+     * battle-complete bonus contaminates the comparison.
+     */
     @Test
-    public void nearLethalAttackerEarnsBonus() {
-        TestStateBuilder.Monster enemy = TestStateBuilder.attacking(8, 6);
-        SaveState start = TestStateBuilder.state(70, 70, enemy);
+    public void killingAttackerAt1HpBeatsLeavingItAliveViaThreatRemoval() {
+        TestStateBuilder.Monster attacker = TestStateBuilder.attacking(8, 18);
+        TestStateBuilder.Monster passive = TestStateBuilder.monster(40);
+        SaveState start = TestStateBuilder.state(70, 70, attacker, passive);
 
-        EvaluationResult lowHp = TacticalEvaluator.evaluate(start,
-                TestStateBuilder.state(70, 70, TestStateBuilder.attacking(3, 6)), 70);
-        EvaluationResult higherHp = TacticalEvaluator.evaluate(start,
-                TestStateBuilder.state(70, 70, TestStateBuilder.attacking(8, 6)), 70);
+        // State A: the attacker survives at 1 HP and is still attacking
+        EvaluationResult atOneHp = TacticalEvaluator.evaluate(start,
+                TestStateBuilder.state(70, 70,
+                        TestStateBuilder.attacking(1, 18), TestStateBuilder.monster(40)), 70);
+        // State B: the same enemy is dead; everything else identical
+        EvaluationResult dead = TacticalEvaluator.evaluate(start,
+                TestStateBuilder.state(70, 70,
+                        TestStateBuilder.monster(0), TestStateBuilder.monster(40)), 70);
 
-        assertEquals(TacticalEvaluator.NEAR_LETHAL_BONUS,
-                lowHp.lethalScore - higherHp.lethalScore);
+        assertTrue("killing the attacker must score higher: " + dead.totalScore + " vs "
+                + atOneHp.totalScore, dead.totalScore > atOneHp.totalScore);
+        // No fixed kill bonus and no battle-complete bonus in either state:
+        // the whole gain is threat removed + the final point of progress.
+        assertEquals(0, dead.lethalScore);
+        assertEquals(0, atOneHp.lethalScore);
+        assertTrue("threat removal must drive the gain: " + dead.threatScore + " vs "
+                + atOneHp.threatScore, dead.threatScore > atOneHp.threatScore);
+        // The gap is exactly threat removed (18 * IMMEDIATE_THREAT_WEIGHT)
+        // plus the last point of progress (8 HP dealt vs 7).
+        assertEquals(18 * TacticalEvaluator.IMMEDIATE_THREAT_WEIGHT
+                        + TacticalEvaluator.DAMAGE_PROGRESS_WEIGHT,
+                dead.totalScore - atOneHp.totalScore);
     }
 
     // ------------------------------------------------------------------
@@ -190,14 +211,4 @@ public class TacticalEvaluatorTest {
         assertEquals(0, result.encounterScore);
     }
 
-    @Test
-    public void evaluationCountersIncrement() {
-        long beforeCount = TacticalEvaluator.evaluationCount;
-        long beforeNanos = TacticalEvaluator.evaluationNanos;
-        TestStateBuilder.Monster enemy = TestStateBuilder.monster(40);
-        SaveState state = TestStateBuilder.state(70, 70, enemy);
-        TacticalEvaluator.evaluate(state, state, 70);
-        assertEquals(beforeCount + 1, TacticalEvaluator.evaluationCount);
-        assertTrue(TacticalEvaluator.evaluationNanos >= beforeNanos);
-    }
 }

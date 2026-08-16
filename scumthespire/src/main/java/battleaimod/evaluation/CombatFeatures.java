@@ -1,13 +1,8 @@
 package battleaimod.evaluation;
 
-import com.megacrit.cardcrawl.monsters.exordium.GremlinNob;
-import com.megacrit.cardcrawl.monsters.exordium.Lagavulin;
 import savestate.PotionState;
 import savestate.SaveState;
 import savestate.monsters.MonsterState;
-
-import java.util.HashSet;
-import java.util.Set;
 
 /**
  * Cheap, plain-data snapshot of a combat state, extracted directly from
@@ -15,14 +10,6 @@ import java.util.Set;
  * read these features instead of poking at the state model.
  */
 public final class CombatFeatures {
-
-    // Brawly encounters reward tempo over HP preservation.  Phase 2 replaces
-    // this hard-coded set with EncounterProfiles (kept in sync with
-    // ValueFunctions.BRAWLY_MONSTER_IDS).
-    private static final Set<String> BRAWL_ENCOUNTER_IDS = new HashSet<String>() {{
-        add(Lagavulin.ID);
-        add(GremlinNob.ID);
-    }};
 
     // Player
     public int playerCurrentHp;
@@ -65,7 +52,6 @@ public final class CombatFeatures {
     public int drawPileSize;
     public int discardPileSize;
     public boolean allEnemiesDead;
-    public boolean brawly;
 
     private CombatFeatures() {
     }
@@ -141,9 +127,6 @@ public final class CombatFeatures {
                 if (monsterIncoming > 0 && monster.currentHealth <= TacticalEvaluator.NEAR_LETHAL_HP_THRESHOLD) {
                     nearLethalAttacking++;
                 }
-
-                features.brawly = features.brawly
-                        || BRAWL_ENCOUNTER_IDS.contains(monster.id);
             } else {
                 features.deadEnemyCount++;
             }

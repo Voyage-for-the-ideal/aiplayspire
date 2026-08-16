@@ -19,6 +19,16 @@ public final class SearchMetrics {
     public long evaluationCount;
     public long evaluationNanos;
 
+    /**
+     * Records one tactical evaluation for this search.  Metrics are per-search:
+     * each BattleAiController owns its own SearchMetrics instance, so counters
+     * never leak across searches on the same JVM.
+     */
+    public void recordEvaluation(long nanos) {
+        evaluationCount++;
+        evaluationNanos += nanos;
+    }
+
     public JsonObject jsonEncode(long elapsedMillis, String stopReason) {
         JsonObject json = new JsonObject();
         json.addProperty("expanded_nodes", expandedNodes);

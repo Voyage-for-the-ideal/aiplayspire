@@ -30,7 +30,6 @@ public class CombatFeaturesTest {
         assertEquals(18 * TacticalEvaluator.IMMEDIATE_THREAT_WEIGHT,
                 features.highestSingleEnemyThreat);
         assertFalse(features.allEnemiesDead);
-        assertFalse(features.brawly);
     }
 
     @Test
@@ -63,15 +62,6 @@ public class CombatFeaturesTest {
         CombatFeatures dead = CombatFeatures.extract(
                 TestStateBuilder.state(70, 70, TestStateBuilder.monster(-10)), start, 70);
         assertEquals(8, dead.damageDealtThisCombat);
-    }
-
-    @Test
-    public void brawlyDetectedFromEncounter() {
-        TestStateBuilder.Monster nob = TestStateBuilder.attacking(80, 14);
-        nob.id = "GremlinNob";
-        SaveState state = TestStateBuilder.state(70, 70, nob);
-        CombatFeatures features = CombatFeatures.extract(state, state, 70);
-        assertTrue(features.brawly);
     }
 
     @Test
