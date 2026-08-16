@@ -191,6 +191,33 @@ public class TacticalEvaluatorTest {
                 dead.totalScore - atOneHp.totalScore);
     }
 
+    /**
+     * Death and victory must never cancel out: a dead player gets no
+     * battle-complete bonus even when all enemies are dead.
+     */
+    @Test
+    public void simultaneousDeathNeverReceivesVictoryValue() {
+        // Both enemies dead, but the player is at 0 HP
+        EvaluationResult deadButEnemiesDead = TacticalEvaluator.evaluate(
+                TestStateBuilder.state(70, 70,
+                        TestStateBuilder.attacking(8, 6), TestStateBuilder.monster(40)),
+                TestStateBuilder.state(0, 70,
+                        TestStateBuilder.monster(0), TestStateBuilder.monster(0)), 70);
+
+        assertEquals("dead player must not get the victory bonus", 0,
+                deadButEnemiesDead.lethalScore);
+        assertEquals(TacticalEvaluator.DEATH_PENALTY, deadButEnemiesDead.survivalScore);
+
+        // And it must be far below a living state with the same dead enemies
+        EvaluationResult aliveWin = TacticalEvaluator.evaluate(
+                TestStateBuilder.state(70, 70,
+                        TestStateBuilder.attacking(8, 6), TestStateBuilder.monster(40)),
+                TestStateBuilder.state(30, 70,
+                        TestStateBuilder.monster(0), TestStateBuilder.monster(0)), 70);
+        assertEquals(TacticalEvaluator.BATTLE_COMPLETE_BONUS, aliveWin.lethalScore);
+        assertTrue(aliveWin.totalScore - deadButEnemiesDead.totalScore > 500_000);
+    }
+
     // ------------------------------------------------------------------
     // Breakdown integrity
     // ------------------------------------------------------------------

@@ -41,6 +41,14 @@ public abstract class MonsterState extends CreatureState {
     private final AbstractMonster.Intent intent;
     private final AbstractMonster.Intent tipIntent;
 
+    /**
+     * The game-computed per-hit damage of the current intent
+     * (AbstractMonster.intentDmg, already includes Strength etc. via
+     * calculateDamage).  -1 means unknown (legacy save states without the
+     * intent_damage field).
+     */
+    private final int intentDamage;
+
     private final ArrayList<Byte> moveHistory;
     private final ArrayList<DamageInfoState> damage;
 
@@ -62,6 +70,8 @@ public abstract class MonsterState extends CreatureState {
         this.nextMove = monster.nextMove;
         this.intentHb = new HitboxState(monster.intentHb);
         this.intent = monster.intent;
+        this.intentDamage = ReflectionHacks
+                .getPrivate(monster, AbstractMonster.class, "intentDmg");
         this.tipIntent = monster.tipIntent;
         this.intentAlpha = monster.intentAlpha;
         this.intentAlphaTarget = monster.intentAlphaTarget;
@@ -98,6 +108,7 @@ public abstract class MonsterState extends CreatureState {
         this.nextMove = parsed.get("next_move").getAsByte();
         this.intentHb = new HitboxState(parsed.get("intent_hb").getAsString());
         this.intent = AbstractMonster.Intent.valueOf(parsed.get("intent_name").getAsString());
+        this.intentDamage = parsed.has("intent_damage") ? parsed.get("intent_damage").getAsInt() : -1;
         this.tipIntent = AbstractMonster.Intent
                 .valueOf(parsed.get("tip_intent_name").getAsString());
         this.intentAlpha = parsed.get("intent_alpha").getAsFloat();
@@ -142,6 +153,8 @@ public abstract class MonsterState extends CreatureState {
         this.nextMove = monsterJson.get("next_move").getAsByte();
         this.intentHb = new HitboxState(monsterJson.get("intent_hb").getAsJsonObject());
         this.intent = AbstractMonster.Intent.valueOf(monsterJson.get("intent_name").getAsString());
+        this.intentDamage = monsterJson.has("intent_damage")
+                ? monsterJson.get("intent_damage").getAsInt() : -1;
         this.tipIntent = AbstractMonster.Intent
                 .valueOf(monsterJson.get("tip_intent_name").getAsString());
         this.intentAlpha = monsterJson.get("intent_alpha").getAsFloat();
@@ -182,6 +195,14 @@ public abstract class MonsterState extends CreatureState {
 
     public AbstractMonster.Intent getIntent() {
         return intent;
+    }
+
+    /**
+     * Game-computed per-hit damage of the current intent, or -1 when unknown
+     * (legacy save states without the intent_damage field).
+     */
+    public int getIntentDamage() {
+        return intentDamage;
     }
 
     public AbstractMonster.Intent getTipIntent() {
@@ -268,6 +289,7 @@ public abstract class MonsterState extends CreatureState {
         monsterStateJson.addProperty("intent_name", intent.name());
         monsterStateJson.addProperty("type_name", type.name());
         monsterStateJson.addProperty("tip_intent_name", tipIntent.name());
+        monsterStateJson.addProperty("intent_damage", intentDamage);
 
         monsterStateJson
                 .addProperty("move_history", moveHistory.stream().map(b -> String.valueOf(b))
@@ -299,6 +321,7 @@ public abstract class MonsterState extends CreatureState {
         monsterStateJson.addProperty("intent_name", intent.name());
         monsterStateJson.addProperty("type_name", type.name());
         monsterStateJson.addProperty("tip_intent_name", tipIntent.name());
+        monsterStateJson.addProperty("intent_damage", intentDamage);
 
         JsonArray moveHistoryArray = new JsonArray();
         moveHistory.forEach(moveByte -> moveHistoryArray.add(String.valueOf(moveByte)));

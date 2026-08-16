@@ -67,6 +67,11 @@ public class ChampState extends MonsterState {
         monsterTypeNumber = Monster.CHAMP.ordinal();
     }
 
+    /** Whether Champ has crossed the 50% phase threshold (game checks strict <). */
+    public boolean isThresholdReached() {
+        return thresholdReached;
+    }
+
     @Override
     public AbstractMonster loadMonster() {
         Champ monster = new Champ();

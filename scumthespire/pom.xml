@@ -5,10 +5,10 @@
 
     <groupId>autoplay</groupId>
     <artifactId>BattleAiMod</artifactId>
-    <version>1.6.0</version>
+    <version>1.7.0</version>
     <packaging>jar</packaging>
     <name>Battle Ai Mod</name>
-    <description>Server/client integration for AI-controlled combat with a tactical battle evaluator: threat-aware target selection, non-linear survival risk, lethal/kill breakpoints, interpretable per-component turn scoring, replan-safe encounter profiles (Gremlin Nob combat urgency, Lagavulin setup window, Hexaghost cycle pressure), and roster-independent enemy burden delta that handles summons and Slime Boss splits, alongside immutable per-path replay snapshots, restart-safe replay cancellation, and automatic battle startup.</description>
+    <description>Server/client integration for AI-controlled combat with a tactical battle evaluator: exact game-computed intent damage, threat-aware target selection, non-linear survival risk, lethal/kill breakpoints, interpretable per-component turn scoring, replan-safe encounter profiles (Gremlin Nob combat urgency, Lagavulin setup window, Hexaghost cycle pressure, Champ phase-transition debt), and roster-independent enemy burden delta that handles summons and Slime Boss splits, alongside immutable per-path replay snapshots, restart-safe replay cancellation, and automatic battle startup.</description>
 
     <properties>
         <maven.compiler.source>1.8</maven.compiler.source>

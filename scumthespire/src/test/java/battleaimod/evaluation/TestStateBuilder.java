@@ -30,6 +30,10 @@ public final class TestStateBuilder {
         public boolean isMultiDamage;
         public byte nextMove;
         public int strength;
+        /** Game-computed per-hit intent damage; -1 (default) omits the JSON field. */
+        public int intentDamage = -1;
+        // Champ-specific (only set for id "Champ")
+        public boolean champThresholdReached;
         // Lagavulin-specific (only set for id "Lagavulin")
         public boolean lagavulinAsleep;
         // Hexaghost-specific (only set for id "Hexaghost")
@@ -78,6 +82,19 @@ public final class TestStateBuilder {
         m.hexOrbActiveCount = orbActiveCount;
         m.nextMove = nextMove;
         m.hexBurnUpgraded = burnUpgraded;
+        return m;
+    }
+
+    /**
+     * A Champ monster in the given phase state (see ChampProfile for the
+     * phase-transition model; ANGER = 7, EXECUTE = 3).
+     */
+    public static Monster champ(int hp, boolean thresholdReached, byte nextMove) {
+        Monster m = monster(hp);
+        m.id = "Champ";
+        m.intent = "BUFF";
+        m.champThresholdReached = thresholdReached;
+        m.nextMove = nextMove;
         return m;
     }
 
@@ -285,6 +302,11 @@ public final class TestStateBuilder {
         state.addProperty("intent_alpha", 0f);
         state.addProperty("intent_alpha_target", 0f);
         state.addProperty("intent_offset_x", 0f);
+        // intent_damage is only written when known; omitting it simulates a
+        // legacy save state (evaluator falls back to baseDamage + strength)
+        if (monster.intentDamage >= 0) {
+            state.addProperty("intent_damage", monster.intentDamage);
+        }
         state.add("move_name", JsonNull.INSTANCE);
 
         JsonObject moveInfo = new JsonObject();
@@ -321,6 +343,12 @@ public final class TestStateBuilder {
                 orbs.add(i < monster.hexOrbActiveCount);
             }
             state.add("active_orbs", orbs);
+        } else if (monster.id.equals("Champ")) {
+            state.addProperty("num_turns", 0);
+            state.addProperty("forge_times", 0);
+            state.addProperty("forge_threshold", 0);
+            state.addProperty("threshold_reached", monster.champThresholdReached);
+            state.addProperty("first_turn", true);
         }
 
         return state;
@@ -365,6 +393,8 @@ public final class TestStateBuilder {
             copy.isMultiDamage = monster.isMultiDamage;
             copy.nextMove = monster.nextMove;
             copy.strength = monster.strength;
+            copy.intentDamage = monster.intentDamage;
+            copy.champThresholdReached = monster.champThresholdReached;
             copy.lagavulinAsleep = monster.lagavulinAsleep;
             copy.hexActivated = monster.hexActivated;
             copy.hexBurnUpgraded = monster.hexBurnUpgraded;

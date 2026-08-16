@@ -25,16 +25,27 @@ public final class ThreatEvaluator {
     }
 
     /**
-     * Effective incoming damage for the monster's current intent, accounting for
-     * its Strength and multi-hit multiplier. Zero for non-attack intents.
+     * Effective incoming damage for the monster's current intent.
+     * <p>
+     * Prefers the game-computed {@code intentDmg} (already includes Strength,
+     * Weak, Vulnerable-style adjustments made by the game itself); falls back
+     * to baseDamage + Strength for legacy save states without intent_damage.
+     * Multi-hit intents multiply the per-hit value by the hit count.
      */
     public static int immediateDamageOf(MonsterState monster) {
         EnemyMoveInfoState moveInfo = monster.getMoveInfo();
         if (moveInfo == null || !isAttackIntent(moveInfo.intent)) {
             return 0;
         }
-        int strength = CreaturePowerUtils.strengthOf(monster);
-        int perHit = Math.max(0, moveInfo.baseDamage + strength);
+        int perHit;
+        if (monster.getIntentDamage() >= 0) {
+            // Game-computed per-hit intent damage: never add Strength again.
+            perHit = monster.getIntentDamage();
+        } else {
+            // Legacy SaveState fallback: reconstruct from the move info.
+            int strength = CreaturePowerUtils.strengthOf(monster);
+            perHit = Math.max(0, moveInfo.baseDamage + strength);
+        }
         return moveInfo.isMultiDamage ? perHit * Math.max(1, moveInfo.multiplier) : perHit;
     }
 

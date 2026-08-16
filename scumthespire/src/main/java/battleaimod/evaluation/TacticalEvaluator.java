@@ -125,8 +125,11 @@ public final class TacticalEvaluator {
 
         // 4. Lethal: only true discrete states.  A dead enemy's value comes
         //    from threat removal (threatScore above); near-lethal enemies are
-        //    exposed as a feature but carry no score.
-        if (features.allEnemiesDead) {
+        //    exposed as a feature but carry no score.  Victory requires the
+        //    player to be alive: a simultaneous death must never be rewarded
+        //    with the battle-complete bonus (DEATH_PENALTY and the bonus would
+        //    otherwise cancel out).
+        if (features.allEnemiesDead && features.playerCurrentHp > 0) {
             result.lethalScore += BATTLE_COMPLETE_BONUS;
         }
 
