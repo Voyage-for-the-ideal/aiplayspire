@@ -20,6 +20,11 @@ class DecisionMixin:
         "curse of the bell",
     }
 
+    @staticmethod
+    def _value_floor_after_boss(floor: int) -> int:
+        """Return the next-act floor used only for post-boss value evaluation."""
+        return {16: 17, 33: 34}.get(floor, floor)
+
     def _clean_effect_text(self, text: str) -> str:
         # """Clean Mod text and noise"""
         cleaned = str(text)
@@ -229,11 +234,14 @@ class DecisionMixin:
         return None
 
     def _get_model_card_decision(self, state: GameState) -> Optional[GameAction]:
+        value_floor = state.floor
+        if getattr(state, "post_boss_card_reward", False):
+            value_floor = self._value_floor_after_boss(value_floor)
         current_state = {
             "hp": state.player.current_hp,
             "max_hp": state.player.max_hp,
             "gold": state.player.gold,
-            "floor": state.floor,
+            "floor": value_floor,
             "ascension": 20,
             "deck": [card.id for card in state.deck] if hasattr(state, "deck") else [],
             "relics": [relic.id for relic in state.relics] if hasattr(state, "relics") else [],
@@ -676,10 +684,11 @@ class DecisionMixin:
             "hp": state.player.current_hp,
             "max_hp": state.player.max_hp,
             "gold": state.player.gold,
-            "floor": state.floor,
+            "floor": self._value_floor_after_boss(state.floor),
             "ascension": 20,
             "deck": [card.id for card in state.deck] if hasattr(state, "deck") else [],
             "relics": [relic.id for relic in state.relics] if hasattr(state, "relics") else [],
+            "relic_states": self._build_relic_state_payload(state),
         }
 
         choices = []
@@ -692,13 +701,22 @@ class DecisionMixin:
                 "index": i,
             })
 
-        choices.append({"action": "skip", "target": None, "index": -1})
+        if not choices:
+            return None
 
-        best = self.value_engine.recommend_choice(current_state, choices)
-        if best:
-            idx = best.get("index")
-            if idx == -1:
-                return GameAction(type=ActionType.CANCEL)
+        try:
+            best = self.value_engine.recommend_choice(current_state, choices)
+        except Exception as exc:
+            print(
+                Fore.YELLOW
+                + f"Boss遗物模型决策失败，回退到第一个合法遗物: {exc}"
+                + Style.RESET_ALL
+            )
+            best = None
+
+        idx = best.get("index") if isinstance(best, dict) else None
+        if isinstance(idx, int) and not isinstance(idx, bool) and 0 <= idx < len(choices):
             return self._map_unified_choice_to_action(state, idx)
 
-        return None
+        print(Fore.YELLOW + "Boss遗物模型返回非法选择，回退到索引0。" + Style.RESET_ALL)
+        return self._map_unified_choice_to_action(state, 0)

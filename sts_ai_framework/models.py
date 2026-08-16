@@ -173,6 +173,7 @@ class GameState(BaseModel):
     current_map_node: Optional[CurrentMapNodeState] = None
     current_map_choices: List[MapChoiceState] = []
     screen_type: Optional[str] = "NONE"
+    post_boss_card_reward: bool = False
     choice_list: Optional[List[str]] = []
     reward_card_ids: Optional[List[str]] = []
     can_proceed: bool = False

@@ -4,6 +4,7 @@ import sys
 import unittest
 
 from sts_ai_framework.llm_agent_parts.action_mixin import ActionMixin
+from sts_ai_framework.llm_agent_parts.choice_mixin import ChoiceMixin
 from sts_ai_framework.llm_agent_parts.decision_mixin import DecisionMixin
 from sts_ai_framework.models import ActionType, GameState
 from sts_ai_framework.__main__ import _is_action_effective
@@ -62,14 +63,94 @@ class FakeValueEngine:
         return choices[-1]
 
 
-class Harness(DecisionMixin, ActionMixin):
+class Harness(DecisionMixin, ActionMixin, ChoiceMixin):
     def __init__(self, value_engine=None):
         self.value_engine = value_engine
         self._pending_event = None
         self._pending_grid = None
 
 
+class BossRewardValueEngine:
+    def __init__(self, selected_index):
+        self.selected_index = selected_index
+        self.state = None
+        self.choices = None
+
+    def recommend_choice(self, state, choices):
+        self.state = state
+        self.choices = choices
+        return {"index": self.selected_index}
+
+
 class StructuredEventTests(unittest.TestCase):
+    def test_boss_reward_uses_only_real_choices(self):
+        engine = BossRewardValueEngine(2)
+        state = make_state(choice_list=["Relic A", "Relic B", "Relic C"])
+        state.screen_type = "BOSS_REWARD"
+
+        action = Harness(engine)._get_model_boss_reward_decision(state)
+
+        self.assertEqual(ActionType.CHOOSE, action.type)
+        self.assertEqual(2, action.choice_index)
+        self.assertEqual([0, 1, 2], [item["index"] for item in engine.choices])
+        self.assertTrue(all(item["action"] == "composite_event" for item in engine.choices))
+
+    def test_boss_reward_invalid_model_index_falls_back_to_first_relic(self):
+        engine = BossRewardValueEngine(-1)
+        state = make_state(choice_list=["Relic A", "Relic B", "Relic C"])
+        state.screen_type = "BOSS_REWARD"
+
+        action = Harness(engine)._get_model_boss_reward_decision(state)
+
+        self.assertEqual(ActionType.CHOOSE, action.type)
+        self.assertEqual(0, action.choice_index)
+
+    def test_act_one_boss_reward_uses_next_act_floor(self):
+        engine = BossRewardValueEngine(0)
+        state = make_state(choice_list=["Relic A"])
+        state.screen_type = "BOSS_REWARD"
+        state.floor = 16
+
+        Harness(engine)._get_model_boss_reward_decision(state)
+
+        self.assertEqual(17, engine.state["floor"])
+        self.assertEqual(16, state.floor)
+
+    def test_act_two_boss_reward_uses_next_act_floor(self):
+        engine = BossRewardValueEngine(0)
+        state = make_state(choice_list=["Relic A"])
+        state.screen_type = "BOSS_REWARD"
+        state.floor = 33
+
+        Harness(engine)._get_model_boss_reward_decision(state)
+
+        self.assertEqual(34, engine.state["floor"])
+        self.assertEqual(33, state.floor)
+
+    def test_post_boss_card_reward_uses_next_act_floor(self):
+        engine = BossRewardValueEngine(0)
+        state = make_state(choice_list=["Inflame"])
+        state.screen_type = "CARD_REWARD"
+        state.floor = 16
+        state.post_boss_card_reward = True
+        state.reward_card_ids = ["Inflame"]
+
+        Harness(engine)._get_model_card_decision(state)
+
+        self.assertEqual(17, engine.state["floor"])
+        self.assertEqual(16, state.floor)
+
+    def test_normal_card_reward_keeps_current_floor(self):
+        engine = BossRewardValueEngine(0)
+        state = make_state(choice_list=["Inflame"])
+        state.screen_type = "CARD_REWARD"
+        state.floor = 16
+        state.reward_card_ids = ["Inflame"]
+
+        Harness(engine)._get_model_card_decision(state)
+
+        self.assertEqual(16, engine.state["floor"])
+
     def test_old_server_payload_remains_valid(self):
         state = make_state(choice_list=["leave"])
         self.assertIsNone(state.event)
