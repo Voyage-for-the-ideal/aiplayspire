@@ -8,9 +8,12 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.megacrit.cardcrawl.actions.AbstractGameAction;
 import com.megacrit.cardcrawl.actions.GameActionManager;
 import com.megacrit.cardcrawl.actions.common.DrawCardAction;
 import com.megacrit.cardcrawl.actions.unique.AddCardToDeckAction;
+import com.megacrit.cardcrawl.actions.unique.ArmamentsAction;
+import com.megacrit.cardcrawl.actions.unique.DualWieldAction;
 import com.megacrit.cardcrawl.actions.watcher.LessonLearnedAction;
 import com.megacrit.cardcrawl.cards.AbstractCard;
 import com.megacrit.cardcrawl.characters.AbstractPlayer;
@@ -666,20 +669,51 @@ public class SaveState {
         allCards.addAll(player.limbo.group);
 
         // Selection screens can leave the played card reachable only through cardInUse.
-        if (player.cardInUse != null) {
-            boolean alreadyTracked = false;
-            for (AbstractCard card : allCards) {
-                if (card == player.cardInUse) {
-                    alreadyTracked = true;
-                    break;
-                }
-            }
-            if (!alreadyTracked) {
-                allCards.add(player.cardInUse);
-            }
+        addCardByIdentityIfMissing(allCards, player.cardInUse);
+
+        // Cards selected by HAND_SELECT are temporarily absent from player.hand.
+        if (AbstractDungeon.isScreenUp && AbstractDungeon.screen == AbstractDungeon.CurrentScreen.HAND_SELECT) {
+            addCardsByIdentityIfMissing(allCards, AbstractDungeon.handCardSelectScreen.selectedCards.group);
+        }
+
+        // Some actions temporarily remove cards from every player CardGroup.
+        AbstractGameAction currentAction = AbstractDungeon.actionManager.currentAction;
+        if (currentAction instanceof DualWieldAction) {
+            ArrayList<AbstractCard> cannotDuplicate = ReflectionHacks
+                    .getPrivate(currentAction, DualWieldAction.class, "cannotDuplicate");
+            addCardsByIdentityIfMissing(allCards, cannotDuplicate);
+        }
+        if (currentAction instanceof ArmamentsAction) {
+            ArrayList<AbstractCard> cannotUpgrade = ReflectionHacks
+                    .getPrivate(currentAction, ArmamentsAction.class, "cannotUpgrade");
+            addCardsByIdentityIfMissing(allCards, cannotUpgrade);
         }
 
         return allCards;
+    }
+
+    static <T> void addCardByIdentityIfMissing(ArrayList<T> allCards, T candidate) {
+        if (candidate == null) {
+            return;
+        }
+
+        for (T existing : allCards) {
+            if (existing == candidate) {
+                return;
+            }
+        }
+
+        allCards.add(candidate);
+    }
+
+    static <T> void addCardsByIdentityIfMissing(ArrayList<T> allCards, Iterable<? extends T> candidates) {
+        if (candidates == null) {
+            return;
+        }
+
+        for (T candidate : candidates) {
+            addCardByIdentityIfMissing(allCards, candidate);
+        }
     }
 
     static <T> IdentityHashMap<T, Integer> identityIndexMap(List<T> values) {
