@@ -10,7 +10,7 @@ import pandas as pd
 import torch
 
 from content_catalog import VanillaContentCatalog, canonical_card_id
-from data_contract import FILTER_VERSION, PREPROCESSING_VERSION, ascension_band
+from data_contract import FILTER_VERSION, MASK_COLUMNS, PREPROCESSING_VERSION, TARGET_COLUMNS, ascension_band
 from data_pipeline import (
     RunRejected,
     assign_split,
@@ -135,6 +135,27 @@ class FilteringTests(unittest.TestCase):
         self.assertNotIn("PowerPotion", deck)
         self.assertIn("Vajra", relics)
 
+    def test_boss_relic_snapshots_use_next_act_floors(self):
+        floors = 34
+        run = standard_run(
+            floor_reached=floors,
+            boss_relics=[
+                {"picked": "Coffee Dripper", "not_picked": ["Sozu", "Ectoplasm"]},
+                {"picked": "Sozu", "not_picked": ["Ectoplasm", "Black Star"]},
+            ],
+            relics=["Burning Blood", "Coffee Dripper", "Sozu"],
+            current_hp_per_floor=[70] * floors,
+            max_hp_per_floor=[80] * floors,
+            gold_per_floor=[99] * floors,
+            path_per_floor=["M"] * floors,
+            path_taken=["M"] * floors,
+        )
+        result = process_run(run, self.catalog)
+        boss_rows = [row for row in result["rows"] if row["decision_type"] == "boss_relic"]
+        self.assertEqual([row["floor"] for row in boss_rows], [17, 34])
+        self.assertIn("Coffee Dripper", boss_rows[0]["relics"].split(","))
+        self.assertIn("Sozu", boss_rows[1]["relics"].split(","))
+
     def test_final_deck_must_match_exactly(self):
         run = standard_run(master_deck=STARTER_DECK + ["Anger"])
         with self.assertRaisesRegex(RunRejected, "deck_reconstruction_mismatch"):
@@ -252,11 +273,12 @@ class DifficultyWeightingTests(unittest.TestCase):
         for contribution in contributions[1:]:
             self.assertAlmostEqual(contribution, contributions[0])
 
-        logits = torch.zeros((6, 1))
-        labels = torch.zeros((6, 1))
+        logits = torch.zeros((6, 4))
+        labels = torch.zeros((6, 4))
+        masks = torch.ones((6, 4))
         globals_ = torch.zeros((6, 9))
         globals_[:, 8] = torch.tensor([0, 1, 6, 11, 16, 20]) / 20.0
-        loss = weighted_bce_loss(logits, labels, globals_, torch.tensor(weights))
+        loss = weighted_bce_loss(logits, labels, masks, globals_, torch.tensor(weights))
         self.assertTrue(torch.isfinite(loss))
 
 

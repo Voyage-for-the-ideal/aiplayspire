@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 try:
     from .checkpointing import load_checkpoint, save_checkpoint
     from .config import Config
-    from .data_contract import ASCENSION_BAND_NAMES, FILTER_VERSION
+    from .data_contract import ASCENSION_BAND_NAMES, FILTER_VERSION, VALUE_COMPONENT_NAMES
     from .dataset import (
         ChunkShuffleSampler,
         STSDataset,
@@ -23,7 +23,7 @@ try:
 except ImportError:
     from checkpointing import load_checkpoint, save_checkpoint
     from config import Config
-    from data_contract import ASCENSION_BAND_NAMES, FILTER_VERSION
+    from data_contract import ASCENSION_BAND_NAMES, FILTER_VERSION, VALUE_COMPONENT_NAMES
     from dataset import (
         ChunkShuffleSampler,
         STSDataset,
@@ -108,32 +108,26 @@ def difficulty_weights(manifest):
     return [total / (len(counts) * count) for count in counts]
 
 
-def weighted_bce_loss(logits, labels, global_features, band_weights):
+def weighted_bce_loss(logits, targets, masks, global_features, band_weights):
     losses = nn.functional.binary_cross_entropy_with_logits(
-        logits, labels, reduction="none"
+        logits, targets, reduction="none"
     )
     sample_weights = band_weights[ascension_band_tensor(global_features)].unsqueeze(1)
-    return (losses * sample_weights).mean()
+    weighted_masks = masks * sample_weights
+    return (losses * weighted_masks).sum() / masks.sum().clamp_min(1.0)
 
 
 def _classification_metrics(labels, probabilities):
     labels = np.asarray(labels)
     probabilities = np.asarray(probabilities)
-    metrics = {
+    if labels.size == 0 or np.unique(labels).size < 2:
+        return {name: float("nan") for name in ("roc_auc", "pr_auc", "brier", "ece")}
+    return {
+        "roc_auc": float(roc_auc_score(labels, probabilities)),
+        "pr_auc": float(average_precision_score(labels, probabilities)),
         "brier": float(brier_score_loss(labels, probabilities)),
         "ece": expected_calibration_error(labels, probabilities),
-        "pr_auc": (
-            float(average_precision_score(labels, probabilities))
-            if np.any(labels == 1)
-            else float("nan")
-        ),
     }
-    metrics["roc_auc"] = (
-        float(roc_auc_score(labels, probabilities))
-        if len(set(labels.tolist())) > 1
-        else float("nan")
-    )
-    return metrics
 
 
 def model_config(vocab_size):
@@ -164,26 +158,33 @@ def make_dataset(split, vocabulary, feature_encoder, progress=None):
     )
 
 
-def evaluate(model, loader, criterion, device, progress=None, name="Evaluation"):
+def evaluate(model, loader, device, progress=None, name="Evaluation"):
     model.eval()
     total_loss = 0.0
-    labels = []
+    targets = []
+    masks = []
     probabilities = []
     ascension_bands = []
     started = time.monotonic()
     last_progress = started
     with torch.no_grad():
-        for batch_index, (seq, upgrades, counts, globals_, batch_labels) in enumerate(
+        for batch_index, (seq, upgrades, counts, globals_, batch_targets, batch_masks) in enumerate(
             loader, start=1
         ):
-            seq, upgrades, counts, globals_, batch_labels = (
+            seq, upgrades, counts, globals_, batch_targets, batch_masks = (
                 value.to(device, non_blocking=device.type == "cuda")
-                for value in (seq, upgrades, counts, globals_, batch_labels)
+                for value in (seq, upgrades, counts, globals_, batch_targets, batch_masks)
             )
             logits = model(seq, upgrades, counts, globals_)
-            total_loss += criterion(logits, batch_labels).item()
-            probabilities.extend(torch.sigmoid(logits).cpu().numpy().reshape(-1))
-            labels.extend(batch_labels.cpu().numpy().reshape(-1))
+            raw_loss = nn.functional.binary_cross_entropy_with_logits(
+                logits, batch_targets, reduction="none"
+            )
+            total_loss += (
+                (raw_loss * batch_masks).sum() / batch_masks.sum().clamp_min(1.0)
+            ).item()
+            probabilities.extend(torch.sigmoid(logits).cpu().numpy())
+            targets.extend(batch_targets.cpu().numpy())
+            masks.extend(batch_masks.cpu().numpy())
             ascension_bands.extend(
                 ascension_band_tensor(globals_).cpu().numpy().reshape(-1)
             )
@@ -201,21 +202,34 @@ def evaluate(model, loader, criterion, device, progress=None, name="Evaluation")
                     f"rate={batch_index / elapsed:.1f} batches/s"
                 )
                 last_progress = now
-    if not labels:
+    if not targets:
         raise ValueError("Evaluation split has no valid samples")
     metrics = {"loss": total_loss / len(loader)}
-    metrics.update(_classification_metrics(labels, probabilities))
-    labels_array = np.asarray(labels)
+    targets_array = np.asarray(targets)
     probabilities_array = np.asarray(probabilities)
+    masks_array = np.asarray(masks).astype(bool)
     bands_array = np.asarray(ascension_bands)
+    metrics["components"] = {}
+    for index, component in enumerate(VALUE_COMPONENT_NAMES):
+        include = masks_array[:, index]
+        component_metrics = _classification_metrics(
+            targets_array[include, index], probabilities_array[include, index]
+        )
+        component_metrics["samples"] = int(include.sum())
+        metrics["components"][component] = component_metrics
     metrics["by_ascension_band"] = {}
     for band, name in enumerate(ASCENSION_BAND_NAMES):
         include = bands_array == band
         if include.any():
-            band_metrics = _classification_metrics(
-                labels_array[include], probabilities_array[include]
-            )
-            band_metrics["samples"] = int(include.sum())
+            band_metrics = {}
+            for index, component in enumerate(VALUE_COMPONENT_NAMES):
+                component_include = include & masks_array[:, index]
+                values = _classification_metrics(
+                    targets_array[component_include, index],
+                    probabilities_array[component_include, index],
+                )
+                values["samples"] = int(component_include.sum())
+                band_metrics[component] = values
             metrics["by_ascension_band"][name] = band_metrics
     return metrics
 
@@ -301,7 +315,6 @@ def train_model():
         f"Model initialized with "
         f"{sum(p.numel() for p in model.parameters()):,} parameters"
     )
-    criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE, weight_decay=0.01)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=Config.EPOCHS)
     raw_band_weights = difficulty_weights(manifest)
@@ -321,17 +334,18 @@ def train_model():
         log(f"Epoch {epoch + 1}/{Config.EPOCHS}: training started")
         model.train()
         running_loss = 0.0
-        for batch_index, (seq, upgrades, counts, globals_, labels) in enumerate(
+        for batch_index, (seq, upgrades, counts, globals_, targets, masks) in enumerate(
             loaders["train"], start=1
         ):
-            seq, upgrades, counts, globals_, labels = (
+            seq, upgrades, counts, globals_, targets, masks = (
                 value.to(device, non_blocking=device.type == "cuda")
-                for value in (seq, upgrades, counts, globals_, labels)
+                for value in (seq, upgrades, counts, globals_, targets, masks)
             )
             optimizer.zero_grad()
             loss = weighted_bce_loss(
                 model(seq, upgrades, counts, globals_),
-                labels,
+                targets,
+                masks,
                 globals_,
                 band_weights,
             )
@@ -365,7 +379,6 @@ def train_model():
         val_metrics = evaluate(
             model,
             loaders["val"],
-            criterion,
             device,
             progress=log,
             name=f"Epoch {epoch + 1}/{Config.EPOCHS} validation",
@@ -373,8 +386,7 @@ def train_model():
         train_loss = running_loss / len(loaders["train"])
         log(
             f"Epoch {epoch + 1}/{Config.EPOCHS}: train_loss={train_loss:.4f} "
-            f"val_loss={val_metrics['loss']:.4f} pr_auc={val_metrics['pr_auc']:.4f} "
-            f"brier={val_metrics['brier']:.4f} ece={val_metrics['ece']:.4f}"
+            f"val_loss={val_metrics['loss']:.4f} components={val_metrics['components']}"
         )
         metadata = {
             "epoch": epoch + 1,
@@ -410,7 +422,7 @@ def train_model():
     model.load_state_dict(best_checkpoint["model_state_dict"])
     log("Test evaluation started")
     test_metrics = evaluate(
-        model, loaders["test"], criterion, device, progress=log, name="Test"
+        model, loaders["test"], device, progress=log, name="Test"
     )
     save_checkpoint(
         final_path,
@@ -432,7 +444,7 @@ def train_model():
         },
     )
     log(f"Test metrics: {test_metrics}")
-    log(f"Saved v4 checkpoints to {Config.CHECKPOINT_DIR}")
+    log(f"Saved v5 multi-horizon checkpoints to {Config.CHECKPOINT_DIR}")
 
 
 if __name__ == "__main__":

@@ -1,11 +1,36 @@
 import torch
 import copy
-from src.model import STSValueNetwork
-from src.checkpointing import load_checkpoint
-from src.encoding import ItemVocabulary, encode_items
-from src.dataset import GlobalFeatureEncoder
-from src.config import Config
+try:
+    from .model import STSValueNetwork
+    from .checkpointing import load_checkpoint
+    from .encoding import ItemVocabulary, encode_items
+    from .dataset import GlobalFeatureEncoder
+    from .config import Config
+    from .data_contract import VALUE_COMPONENT_NAMES
+except ImportError:
+    from model import STSValueNetwork
+    from checkpointing import load_checkpoint
+    from encoding import ItemVocabulary, encode_items
+    from dataset import GlobalFeatureEncoder
+    from config import Config
+    from data_contract import VALUE_COMPONENT_NAMES
 import re
+
+
+def compose_scalar_value(components, floor, weights=None):
+    weights = dict(weights or Config.VALUE_WEIGHTS)
+    if set(weights) != set(VALUE_COMPONENT_NAMES):
+        raise ValueError("VALUE_WEIGHTS must define every multi-horizon component")
+    if abs(sum(weights.values()) - 1.0) > 1e-9:
+        raise ValueError("VALUE_WEIGHTS must sum to 1")
+    effective = dict(components)
+    if floor >= 17:
+        effective["reach17"] = 1.0
+    if floor >= 34:
+        effective["reach34"] = 1.0
+    if floor >= 50:
+        effective["reach50"] = 1.0
+    return sum(weights[name] * effective[name] for name in VALUE_COMPONENT_NAMES)
 
 class InferenceTokenizer:
     """Use the same frozen canonical item encoding as training."""
@@ -65,15 +90,23 @@ class STSInferenceEngine:
         values = self.feature_encoder.transform_state(state)
         return torch.tensor([values], dtype=torch.float32)
         
-    def evaluate_state(self, state):
-        """Evaluate a single state dictionary and return survival probability."""
+    def evaluate_state_components(self, state):
+        """Return raw calibrated probabilities in the fixed component order."""
         seq_tokens, upgrades, counts = self.tokenizer.encode(state['deck'], state['relics'])
         global_feats = self._global_features(state)
 
         with torch.no_grad():
             logits = self.model(seq_tokens, upgrades, counts, global_feats)
             prob = torch.sigmoid(logits)
-        return prob.item()
+        values = prob.squeeze(0).tolist()
+        return dict(zip(VALUE_COMPONENT_NAMES, values))
+
+    def evaluate_state(self, state):
+        """Return the cross-act scalar value composed from multi-horizon outputs."""
+        components = self.evaluate_state_components(state)
+        scalar = compose_scalar_value(components, float(state["floor"]))
+        self._last_evaluation = (components, scalar)
+        return scalar
 
     def evaluate_state_logits(self, state):
         """Evaluate a single state dictionary and return raw logits."""
@@ -82,7 +115,21 @@ class STSInferenceEngine:
         
         with torch.no_grad():
             logits = self.model(seq_tokens, upgrades, counts, global_feats)
-        return logits.item()
+        return dict(zip(VALUE_COMPONENT_NAMES, logits.squeeze(0).tolist()))
+
+    def _print_choice_score(self, label, score):
+        print(f"{label} -> V(S') = {score:.4f}")
+        if not getattr(self, "debug", Config.VALUE_DEBUG):
+            return
+        components, scalar = getattr(self, "_last_evaluation", ({}, score))
+        if components:
+            print(
+                "  "
+                + " ".join(
+                    f"{name}={components[name]:.3f}" for name in VALUE_COMPONENT_NAMES
+                )
+                + f" V={scalar:.3f}"
+            )
         
     def _apply_choice(self, current_state, choice):
         """Create a hypothetical new state based on the choice"""
@@ -177,20 +224,16 @@ class STSInferenceEngine:
                             elif "Defend" in new_state["deck"]:
                                 new_state["deck"].remove("Defend")
                 elif e_type == "random_upgrade":
-                    import random
                     amount = effect.get("amount", 1)
-                    unupgraded = [c for c in new_state["deck"] if "+" not in c]
-                    actual = min(amount, len(unupgraded))
-                    if actual > 0:
-                        chosen = random.sample(unupgraded, actual)
-                        for tc in chosen:
-                            new_state["deck"].remove(tc)
-                            new_state["deck"].append(tc + "+1")
+                    chosen = self.rank_cards_for_purpose(new_state, "upgrade", amount)
+                    for target_card in chosen:
+                        if target_card in new_state["deck"] and "+" not in target_card:
+                            new_state["deck"].remove(target_card)
+                            new_state["deck"].append(target_card + "+1")
                 elif e_type == "upgrade_card":
                     target_card = effect.get("card_id")
                     if target_card and target_card in new_state["deck"]:
                         new_state["deck"].remove(target_card)
-                        import re
                         match = re.match(r"(Searing Blow)\+(\d+)", target_card)
                         if match:
                             new_state["deck"].append(f"Searing Blow+{int(match.group(2)) + 1}")
@@ -206,7 +249,51 @@ class STSInferenceEngine:
                     if target_card and target_card in new_state["deck"]:
                         new_state["deck"].extend([target_card] * amount)
                 elif e_type == "obtain_relic":
-                    new_state["relics"].append(effect["relic_id"])
+                    relic_id = effect["relic_id"]
+                    replacements = {
+                        "Black Blood": ("Burning Blood",),
+                        "Ring of the Serpent": ("Ring of the Snake", "Ring of Snake"),
+                        "Frozen Core": ("Cracked Core",),
+                        "Holy Water": ("Pure Water",),
+                    }
+                    for starter in replacements.get(relic_id, ()):
+                        if starter in new_state["relics"]:
+                            new_state["relics"].remove(starter)
+                    if relic_id not in new_state["relics"]:
+                        new_state["relics"].append(relic_id)
+
+                    if relic_id == "Empty Cage":
+                        for _ in range(2):
+                            ranked = self.rank_cards_for_purpose(new_state, "purge", 1)
+                            if not ranked:
+                                break
+                            if ranked[0] not in new_state["deck"]:
+                                break
+                            new_state["deck"].remove(ranked[0])
+                    elif relic_id == "Astrolabe":
+                        # Random transform results are unknown; removing the three best
+                        # transform candidates is a deterministic conservative approximation.
+                        curse_ids = {
+                            "Regret", "Pain", "Normality", "Doubt", "Shame", "Clumsy",
+                            "Injury", "Writhe", "Decay", "Parasite", "Pride", "CurseOfTheBell",
+                        }
+                        cards = self.rank_cards_for_purpose(
+                            new_state, "transform", 3, exclude_ids=curse_ids
+                        )
+                        for card in cards:
+                            if card in new_state["deck"]:
+                                new_state["deck"].remove(card)
+                    elif relic_id == "Pandora's Box":
+                        starters = {
+                            "Strike_R", "Strike_G", "Strike_B", "Strike_P", "Strike",
+                            "Defend_R", "Defend_G", "Defend_B", "Defend_P", "Defend",
+                        }
+                        new_state["deck"] = [
+                            card for card in new_state["deck"]
+                            if re.sub(r"\+\d*$", "", card) not in starters
+                        ]
+                    elif relic_id == "Calling Bell" and not _should_block_curse_add("CurseOfTheBell"):
+                        new_state["deck"].append("CurseOfTheBell")
                 elif e_type == "lose_relic":
                     relic_id = effect.get("relic_id")
                     if relic_id in new_state["relics"]:
@@ -261,7 +348,6 @@ class STSInferenceEngine:
         elif action == "upgrade_card" and target:
             if target in new_state["deck"]:
                 new_state["deck"].remove(target)
-                import re
                 match = re.match(r"(Searing Blow)\+(\d+)", target)
                 if match:
                     new_state["deck"].append(f"Searing Blow+{int(match.group(2)) + 1}")
@@ -317,7 +403,7 @@ class STSInferenceEngine:
                 best_card_to_purge = None
 
                 deck = current_state.get("deck", [])
-                unique_cards = list(set(deck))
+                unique_cards = list(dict.fromkeys(deck))
 
                 if not unique_cards:
                     hypothetical_state = self._apply_choice(current_state, choice)
@@ -349,14 +435,14 @@ class STSInferenceEngine:
                 if best_card_to_purge:
                     eval_choice["_purge_intent_id"] = best_card_to_purge
 
-                print(f"Choice: composite_purge (remove={best_card_to_purge}) -> V(S') = {score:.4f}")
+                self._print_choice_score(f"Choice: composite_purge (remove={best_card_to_purge})", score)
 
             elif needs_upgrade_eval:
                 max_score_for_choice = -1.0
                 best_card_to_upgrade = None
 
                 deck = current_state.get("deck", [])
-                unique_unupgraded = list(set([c for c in deck if "+" not in c]))
+                unique_unupgraded = list(dict.fromkeys(c for c in deck if "+" not in c))
 
                 if not unique_unupgraded:
                     hypothetical_state = self._apply_choice(current_state, choice)
@@ -383,14 +469,14 @@ class STSInferenceEngine:
                 if best_card_to_upgrade:
                     eval_choice["_smith_intent_id"] = best_card_to_upgrade
 
-                print(f"Choice: composite_upgrade (upgrade={best_card_to_upgrade}) -> V(S') = {score:.4f}")
+                self._print_choice_score(f"Choice: composite_upgrade (upgrade={best_card_to_upgrade})", score)
 
             elif needs_duplicate_eval:
                 max_score_for_choice = -1.0
                 best_card_to_dup = None
 
                 deck = current_state.get("deck", [])
-                unique_cards = list(set(deck))
+                unique_cards = list(dict.fromkeys(deck))
 
                 if not unique_cards:
                     hypothetical_state = self._apply_choice(current_state, choice)
@@ -417,13 +503,13 @@ class STSInferenceEngine:
                 if best_card_to_dup:
                     eval_choice["_duplicate_intent_id"] = best_card_to_dup
 
-                print(f"Choice: duplicate (copy={best_card_to_dup}) -> V(S') = {score:.4f}")
+                self._print_choice_score(f"Choice: duplicate (copy={best_card_to_dup})", score)
 
             else:
                 hypothetical_state = self._apply_choice(current_state, choice)
                 score = self.evaluate_state(hypothetical_state)
                 eval_choice = choice
-                print(f"Choice: {eval_choice} -> V(S') = {score:.4f}")
+                self._print_choice_score(f"Choice: {eval_choice}", score)
 
             if score > best_score:
                 best_score = score
@@ -444,7 +530,7 @@ class STSInferenceEngine:
         Falls back to all cards if excluding leaves nothing.
         """
         deck = current_state.get("deck", [])
-        unique_cards = list(set(deck))
+        unique_cards = list(dict.fromkeys(deck))
         scored = []
 
         for card in unique_cards:

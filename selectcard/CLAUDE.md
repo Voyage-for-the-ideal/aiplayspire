@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Trains a **Set Transformer survival-value network** that evaluates Slay the Spire game states. Used by `sts_ai_framework` for card/relic/event/shop decisions. The model outputs a single scalar: probability of surviving the current act.
+Trains a **Set Transformer multi-horizon value network** that evaluates Slay the Spire game states. Used by `sts_ai_framework` for card/relic/event/shop decisions. The model outputs probabilities for reaching floors 17, 34, and 50 plus run victory; inference composes them into one cross-act scalar.
 
 ## Common Commands
 
@@ -86,7 +86,7 @@ Implicit changes are stored in `_implicit_removals[floor]` / `_implicit_addition
 - **No positional encoding** — the deck is an unordered set; permutation invariance is intentional
 - **[CLS] token** prepended to the sequence, pooled after transformer layers
 - **Global features** (floor, HP, gold, ascension) processed through a separate MLP, then concatenated with [CLS] output
-- **Output**: single logit → sigmoid → survival probability (0–1)
+- **Output**: four logits → sigmoid → reach17/reach34/reach50/win probabilities; configured weights compose the scalar value
 
 `SetAttention` is a standard transformer block (MHA + FFN with residual connections), applied over the set dimension.
 

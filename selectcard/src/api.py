@@ -34,7 +34,7 @@ class ShopRequest(BaseModel):
 @app.post("/recommend/choice")
 def recommend_choice(req: RecommendationRequest):
     """
-    Evaluates multiple choices and returns the one that maximizes survival probability.
+    Evaluates multiple choices and returns the one that maximizes cross-act scalar value.
     E.g., Card Rewards, Event choices.
     """
     state_dict = req.state.dict()
