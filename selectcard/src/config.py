@@ -17,9 +17,9 @@ class Config:
     # ==========================
     # 训练超参数
     # ==========================
-    BATCH_SIZE = 64
+    BATCH_SIZE = 256
     EPOCHS = 10
-    LEARNING_RATE = 1e-4
+    LEARNING_RATE = 2e-4
     LOG_INTERVAL_SECONDS = 60
     MAX_AUTO_DATALOADER_WORKERS = 16
     DATALOADER_PREFETCH_FACTOR = 2
