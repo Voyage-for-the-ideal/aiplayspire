@@ -17,12 +17,16 @@ class Config:
     # ==========================
     # 训练超参数
     # ==========================
-    BATCH_SIZE = 256
-    EPOCHS = 10
-    LEARNING_RATE = 2e-4
+    BATCH_SIZE = 512
+    EPOCHS = 20
+    # lr 2e-4 在 batch 256 下收敛良好；batch 翻倍后按 sqrt 缩放补偿
+    # （512/256)^0.5 ≈ 1.41 → 2.8e-4），配合 CosineAnnealingLR(T_max=EPOCHS)
+    LEARNING_RATE = 2.8e-4
     LOG_INTERVAL_SECONDS = 60
-    MAX_AUTO_DATALOADER_WORKERS = 16
-    DATALOADER_PREFETCH_FACTOR = 2
+    # 峰值显存仅 ~0.65 GiB（RTX 5090 32GB），瓶颈在 CPU dataloader：
+    # 提交 SLURM 作业时请用 --cpus-per-task=32，worker 数会按实际 CPU 自动裁剪
+    MAX_AUTO_DATALOADER_WORKERS = 32
+    DATALOADER_PREFETCH_FACTOR = 4
 
     # ==========================
     # 模型架构超参数
