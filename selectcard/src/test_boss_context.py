@@ -73,14 +73,22 @@ class BossContextTests(unittest.TestCase):
         resolved = BossContextResolver().resolve_run(
             {"seed_played": "42", "ascension_level": 20, "is_ascension_mode": True}
         )
-        self.assertEqual(resolved["act1_boss"], "Slime Boss")
+        self.assertEqual(resolved["act1_boss"], "Hexaghost")
         self.assertEqual(resolved["act2_boss"], "Automaton")
         self.assertEqual(resolved["act3_boss"], "Donu and Deca")
         self.assertEqual(
             BossContextResolver().resolve_run(
                 {"seed_played": "43", "ascension_level": 20, "is_ascension_mode": True}
             )["act1_boss"],
-            "Hexaghost",
+            "Slime Boss",
+        )
+        # A real corpus run (2020-01-27 build) whose observed Act I boss is
+        # The Guardian; regression anchor for the vanilla RNG consumption order.
+        self.assertEqual(
+            BossContextResolver().resolve_run(
+                {"seed_played": "4537055902605411270", "ascension_level": 2, "is_ascension_mode": True}
+            )["act1_boss"],
+            "The Guardian",
         )
 
     def test_enrichment_writes_new_dataset_and_rejects_unknowns(self):

@@ -4,6 +4,8 @@ This module intentionally has no access to combat telemetry.  In particular,
 ``damage_taken`` is audit-only data and must never be used to create this feature.
 """
 
+import numpy as np
+
 BOSS_SCHEMA_VERSION = "visible-boss-v1"
 BOSS_RESOLVER_VERSION = "vanilla-seed-boss-v1"
 
@@ -106,47 +108,115 @@ def _shuffle(values, seed):
     return values
 
 
-_ACTS = (
-    ((["Cultist", "Jaw Worm", "2 Louse", "Small Slimes"], [2]*4),
-     (["Blue Slaver", "Gremlin Gang", "Looter", "Large Slime", "Lots of Slimes", "Exordium Thugs", "Exordium Wildlife", "Red Slaver", "3 Louse", "2 Fungi Beasts"], [2,1,2,2,1,1.5,1.5,1,2,2]),
-     ["Gremlin Nob", "Lagavulin", "3 Sentries"], ["The Guardian", "Hexaghost", "Slime Boss"]),
-    ((["Spheric Guardian", "Chosen", "Shell Parasite", "3 Byrds", "2 Thieves"], [2]*5),
-     (["Chosen and Byrds", "Sentry and Sphere", "Snake Plant", "Snecko", "Centurion and Healer", "Cultist and Chosen", "3 Cultists", "Shelled Parasite and Fungi"], [2,2,6,4,6,3,3,3]),
-     ["Gremlin Leader", "Slavers", "Book of Stabbing"], ["Automaton", "Collector", "Champ"]),
-    ((["3 Darklings", "Orb Walker", "3 Shapes"], [2,2,2]),
-     (["Spire Growth", "Transient", "4 Shapes", "Maw", "Sphere and 2 Shapes", "Jaw Worm Horde", "3 Darklings", "Writhing Mass"], [1]*8),
-     ["Giant Head", "Nemesis", "Reptomancer"], ["Awakened One", "Time Eater", "Donu and Deca"]),
-)
+def _f32(value):
+    """Exact float32 semantics: vanilla normalizes and accumulates weights in
+    Java floats, and a wrong rounding at a roll boundary picks the wrong
+    monster.  float32 -> double is lossless, so comparing the float32 roll
+    against the float32 cumulative sum is exact."""
+    return np.float32(value)
 
 
-def _roll(rng, names, weights):
-    roll = rng.next_float(); total = sum(weights); current = 0.0
-    for name, weight in sorted(zip(names, weights), key=lambda item: item[1]):
-        current += weight / total
-        if roll < current: return name
+def _normalized(names, weights):
+    """MonsterInfo.normalizeWeights: stable sort by weight, then divide by total."""
+    pairs = sorted(zip(names, weights), key=lambda item: item[1])
+    total = np.float32(0.0)
+    for _, weight in pairs:
+        total += _f32(weight)
+    return [(name, _f32(_f32(weight) / total)) for name, weight in pairs]
+
+
+def _roll(rng, pairs):
+    """MonsterInfo.roll: iterate the normalized list in order, roll < cumulative."""
+    roll = rng.next_float()
+    current = np.float32(0.0)
+    for name, weight in pairs:
+        current = _f32(current + weight)
+        if roll < current:
+            return name
     raise AssertionError("unreachable weighted roll")
 
 
-def _populate(rng, names, weights, count, previous=()):
+def _populate(rng, pairs, count, previous=(), forbid_window=2):
+    """populateMonsterList.
+
+    forbid_window=2 mirrors the non-elite rule (reject a pick equal to the last
+    or second-to-last entry); forbid_window=1 mirrors the elite rule (reject
+    only a pick equal to the last entry).
+    """
     result = list(previous)
     while len(result) < len(previous) + count:
-        choice = _roll(rng, names, weights)
-        if choice not in result[-2:]: result.append(choice)
+        choice = _roll(rng, pairs)
+        if choice not in result[-forbid_window:]:
+            result.append(choice)
     return result
 
 
+# Per-act vanilla config, transcribed from Exordium / TheCity / TheBeyond.
+# exclusions map the last weak enemy to the strong enemies populateFirstStrongEnemy
+# must re-roll away from.
+_ACT_CONFIGS = (
+    {
+        "weak_count": 3,
+        "weak": (["Cultist", "Jaw Worm", "2 Louse", "Small Slimes"], [2.0] * 4),
+        "strong": (["Blue Slaver", "Gremlin Gang", "Looter", "Large Slime", "Lots of Slimes", "Exordium Thugs", "Exordium Wildlife", "Red Slaver", "3 Louse", "2 Fungi Beasts"], [2, 1, 2, 2, 1, 1.5, 1.5, 1, 2, 2]),
+        "elites": (["Gremlin Nob", "Lagavulin", "3 Sentries"], [1.0] * 3),
+        "exclusions": {
+            "Looter": ["Exordium Thugs"],
+            "Blue Slaver": ["Red Slaver", "Exordium Thugs"],
+            "2 Louse": ["3 Louse"],
+            "Small Slimes": ["Large Slime", "Lots of Slimes"],
+        },
+        "bosses": ["The Guardian", "Hexaghost", "Slime Boss"],
+    },
+    {
+        "weak_count": 2,
+        "weak": (["Spheric Guardian", "Chosen", "Shell Parasite", "3 Byrds", "2 Thieves"], [2.0] * 5),
+        "strong": (["Chosen and Byrds", "Sentry and Sphere", "Snake Plant", "Snecko", "Centurion and Healer", "Cultist and Chosen", "3 Cultists", "Shelled Parasite and Fungi"], [2, 2, 6, 4, 6, 3, 3, 3]),
+        "elites": (["Gremlin Leader", "Slavers", "Book of Stabbing"], [1.0] * 3),
+        "exclusions": {
+            "Spheric Guardian": ["Sentry and Sphere"],
+            "3 Byrds": ["Chosen and Byrds"],
+            "Chosen": ["Chosen and Byrds", "Cultist and Chosen"],
+        },
+        "bosses": ["Automaton", "Collector", "Champ"],
+    },
+    {
+        "weak_count": 2,
+        "weak": (["3 Darklings", "Orb Walker", "3 Shapes"], [2.0] * 3),
+        "strong": (["Spire Growth", "Transient", "4 Shapes", "Maw", "Sphere and 2 Shapes", "Jaw Worm Horde", "3 Darklings", "Writhing Mass"], [1.0] * 8),
+        "elites": (["Giant Head", "Nemesis", "Reptomancer"], [2.0] * 3),
+        "exclusions": {
+            "3 Darklings": ["3 Darklings"],
+            "Orb Walker": ["Orb Walker"],
+            "3 Shapes": ["4 Shapes"],
+        },
+        "bosses": ["Awakened One", "Time Eater", "Donu and Deca"],
+    },
+)
+
+
 class BossContextResolver:
-    """Resolve visible vanilla bosses from seed; never inspects run outcomes."""
+    """Resolve visible vanilla bosses from seed; never inspects run outcomes.
+
+    Faithful port of the vanilla RNG consumption: per Act the dungeon
+    constructor runs generateWeakEnemies -> generateStrongEnemies (with the
+    exclusion-based first pick) -> generateElites -> initializeBoss shuffle,
+    all off the LibGDX Random(seed) sequence.
+    """
     def resolve_run(self, event_data):
         try: seed = int(event_data["seed_played"])
         except (KeyError, TypeError, ValueError) as exc: raise ValueError("seed_played is required") from exc
         rng = _RandomXS128(seed)
         bosses = []
-        for weak, strong, elites, candidates in _ACTS:
-            monster_list = _populate(rng, *weak, 3 if len(weak[0]) == 4 else 2)
-            first = _roll(rng, *strong)
+        for config in _ACT_CONFIGS:
+            monster_list = _populate(rng, _normalized(*config["weak"]), config["weak_count"])
+            excluded = config["exclusions"].get(monster_list[-1], ())
+            strong = _normalized(*config["strong"])
+            first = _roll(rng, strong)
+            while first in excluded:  # populateFirstStrongEnemy do/while
+                first = _roll(rng, strong)
             monster_list.append(first)
-            _populate(rng, *strong, 12, previous=monster_list)
-            _populate(rng, elites, [1] * len(elites), 10)
-            bosses.append(_shuffle(candidates, rng.next_long())[0])
+            _populate(rng, strong, 12, previous=monster_list)
+            _populate(rng, _normalized(*config["elites"]), 10, forbid_window=1)
+            bosses.append(_shuffle(list(config["bosses"]), rng.next_long())[0])
         return {"act1_boss": bosses[0], "act2_boss": bosses[1], "act3_boss": bosses[2], "resolver_version": BOSS_RESOLVER_VERSION, "resolver_status": "resolved"}
