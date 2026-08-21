@@ -13,6 +13,7 @@ import tempfile
 import pandas as pd
 
 from boss_context import BOSS_RESOLVER_VERSION, BOSS_SCHEMA_VERSION, canonicalize_boss_name
+from data_contract import PREPROCESSING_VERSION
 
 
 def visible_boss_for_sample(floor, decision_type, ascension, resolved_context):
@@ -71,6 +72,7 @@ def enrich_processed_dataset(source_dir, sidecar_path, output_dir):
             high_asc_unknown = (frame["ascension"] >= 15) & (frame["visible_boss"] == "UNKNOWN_BOSS")
             if high_asc_unknown.any():
                 raise ValueError("Enrichment produced UNKNOWN_BOSS for A15+; do not publish")
+            frame["preprocessing_version"] = PREPROCESSING_VERSION
             for boss, count in frame["visible_boss"].value_counts().items():
                 distributions[boss] = distributions.get(boss, 0) + int(count)
             frame.to_parquet(os.path.join(staging, os.path.basename(path)), index=False)
@@ -84,6 +86,7 @@ def enrich_processed_dataset(source_dir, sidecar_path, output_dir):
             "below_a15_policy": "UNKNOWN_BOSS",
             "distributions": {"samples_by_visible_boss": distributions},
         }
+        manifest["preprocessing_version"] = PREPROCESSING_VERSION
         with open(os.path.join(staging, "dataset_manifest.json"), "w", encoding="utf-8") as handle:
             json.dump(manifest, handle, indent=2, sort_keys=True)
         os.replace(staging, output_dir)

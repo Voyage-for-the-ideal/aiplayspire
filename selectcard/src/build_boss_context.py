@@ -47,7 +47,12 @@ def build_sidecar(input_dir, output_path, audit_path=None, minimum_samples=100):
                     "resolver_status": "below_a15_unknown",
                 }
             else:
-                resolved = resolver.resolve_run(event)
+                try:
+                    resolved = resolver.resolve_run(event)
+                except ValueError:
+                    # A15+ rows lacking a usable seed must make the audit gate fail,
+                    # rather than being silently omitted from the training sidecar.
+                    resolved = {"act1_boss": "UNKNOWN_BOSS", "act2_boss": "UNKNOWN_BOSS", "act3_boss": "UNKNOWN_BOSS", "resolver_version": BOSS_RESOLVER_VERSION, "resolver_status": "missing_seed"}
             rows.append({"run_id": stable_run_id(event), **resolved})
             if ascension >= MIN_RESOLVED_ASCENSION:
                 for field, observed in _observed_bosses(event).items():
