@@ -62,7 +62,12 @@ def _observed_bosses(event):
 
 def build_sidecar(input_dir, output_path, audit_path=None, minimum_samples=100):
     resolver = BossContextResolver(); rows = []; audits = []
-    for path in glob.glob(os.path.join(input_dir, "**", "*.json*"), recursive=True):
+    run_files = glob.glob(os.path.join(input_dir, "**", "*.json*"), recursive=True)
+    if not run_files:
+        raise ValueError(
+            f"No run files found under {input_dir}; check the raw data path"
+        )
+    for path in run_files:
         for event in _events(path):
             ascension = int(event.get("ascension_level", 0)) if event.get("is_ascension_mode") else 0
             if ascension == 0:
@@ -116,7 +121,11 @@ def build_sidecar(input_dir, output_path, audit_path=None, minimum_samples=100):
                         "observed_boss": observed_boss,
                     })
     audit = pd.DataFrame(audits)
-    if audit.empty: raise ValueError("No audit boss combats found; refusing to publish sidecar")
+    if audit.empty:
+        raise ValueError(
+            "No A1+ runs with boss combats found; refusing to publish sidecar "
+            "(check ascension fields and boss-floor combat records in the raw data)"
+        )
     audit["matches"] = audit.predicted_boss == audit.observed_boss
     # Full-dimension report: act x ascension level x ascension band x build version.
     summary = audit.groupby(["act", "ascension", "ascension_band", "build_version"], dropna=False).agg(samples=("matches", "size"), matches=("matches", "sum")).reset_index()
