@@ -215,3 +215,17 @@ class GameAction(BaseModel):
         if self.choice_index is not None:
             payload["choice_index"] = self.choice_index
         return payload
+
+
+def visible_boss_of(state: "GameState") -> str:
+    """Visible-boss for value-network state builders.
+
+    Prefers the formal ``visible_boss`` field, which carries the Java-side
+    semantic gating (boss rewards, boss relics, floor 0 -> NO_BOSS).  Falls
+    back to the legacy ``next_boss`` field only for old CommunicationMod
+    clients that never emit the formal field.
+    """
+    value = getattr(state, "visible_boss", None)
+    if value:
+        return value
+    return getattr(state, "next_boss", None) or "NO_BOSS"

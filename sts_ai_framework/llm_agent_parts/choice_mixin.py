@@ -2,7 +2,7 @@ from typing import List, Optional, Tuple
 
 from colorama import Fore, Style
 
-from ..models import ActionType, GameAction, GameState
+from ..models import ActionType, GameAction, GameState, visible_boss_of
 
 
 class ChoiceMixin:
@@ -43,7 +43,7 @@ class ChoiceMixin:
             "gold": state.player.gold,
             "floor": state.floor,
             "ascension": 20,
-            "next_boss": getattr(state, "next_boss", "UNKNOWN"),
+            "visible_boss": visible_boss_of(state),
             "deck": [card.id for card in state.deck] if hasattr(state, "deck") else [],
             "relics": [relic.id for relic in state.relics] if hasattr(state, "relics") else [],
         }
