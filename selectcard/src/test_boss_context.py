@@ -9,6 +9,7 @@ from boss_context import (
     BOSS_SCHEMA_VERSION, BOSS_VOCABULARY, NO_BOSS, UNKNOWN_BOSS, BossContextResolver,
     boss_id, boss_name, canonicalize_boss_name,
 )
+from build_boss_context import build_sidecar
 from enrich_boss_context import enrich_processed_dataset, visible_boss_for_sample
 
 
@@ -36,6 +37,54 @@ class BossContextTests(unittest.TestCase):
         self.assertEqual(visible_boss_for_sample(8, "card_reward", 1, context), "Hexaghost")
         self.assertEqual(visible_boss_for_sample(8, "card_reward", 14, context), "Hexaghost")
         self.assertEqual(visible_boss_for_sample(8, "card_reward", 15, context), "Hexaghost")
+
+    def test_sidecar_prefers_observed_boss_and_backfills_with_resolver(self):
+        # Same seed, same vanilla outcome: run A reached its Act I boss (combat
+        # record exists), run B died at floor 8 (no record).  The sidecar must
+        # use the observed boss for A and the resolver backfill for B, so
+        # NO_BOSS never becomes a death signal during training.
+        run_a = {
+            "event": {
+                "seed_played": "4537055902605411270", "ascension_level": 15,
+                "is_ascension_mode": True, "build_version": "2020-01-27",
+                "play_id": "a",
+                "damage_taken": [
+                    {"floor": 16, "enemies": "The Guardian", "damage": 0},
+                    {"floor": 10, "enemies": "Gremlin Nob", "damage": 5},
+                ],
+            }
+        }
+        run_b = {
+            "event": {
+                "seed_played": "4537055902605411270", "ascension_level": 15,
+                "is_ascension_mode": True, "build_version": "2020-01-27",
+                "play_id": "b",
+                "damage_taken": [
+                    {"floor": 8, "enemies": "Gremlin Nob", "damage": 9},
+                ],
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            with open(os.path.join(directory, "runs.json"), "w", encoding="utf-8") as handle:
+                json.dump([run_a, run_b], handle)
+            summary = build_sidecar(
+                directory, os.path.join(directory, "sidecar.parquet"), None,
+                minimum_samples=1,
+            )
+            frame = pd.read_parquet(os.path.join(directory, "sidecar.parquet"))
+            self.assertEqual(len(frame), 2)
+            self.assertEqual(set(frame["resolver_status"]), {"observed", "resolved"})
+            observed_row = frame[frame["resolver_status"] == "observed"].iloc[0]
+            backfill_row = frame[frame["resolver_status"] == "resolved"].iloc[0]
+            self.assertEqual(observed_row["act1_boss"], "The Guardian")
+            self.assertEqual(observed_row["act1_source"], "observed")
+            # Same seed -> same resolved boss; the backfill carries it.
+            self.assertEqual(backfill_row["act1_boss"], "The Guardian")
+            self.assertEqual(backfill_row["act1_source"], "resolved")
+            self.assertEqual(backfill_row["act1_boss"], observed_row["act1_boss"])
+            # The audit compares resolver vs observation on the run with data.
+            self.assertEqual(summary["samples"].sum(), 1)
+            self.assertEqual(summary["matches"].sum(), 1)
 
     def test_resolution_never_reads_run_outcomes(self):
         # Plan section 31: two runs with the same seed must resolve to the same
@@ -101,8 +150,10 @@ class BossContextTests(unittest.TestCase):
             ]).to_parquet(os.path.join(source, "train_valid_chunk_00000.parquet"), index=False)
             sidecar = os.path.join(directory, "bosses.parquet")
             pd.DataFrame([
-                {"run_id": "r", "act1_boss": "Hexaghost", "act2_boss": "Champ", "act3_boss": "Time Eater", "resolver_status": "resolved"},
-                {"run_id": "a0", "act1_boss": "NO_BOSS", "act2_boss": "NO_BOSS", "act3_boss": "NO_BOSS", "resolver_status": "a0_no_boss"},
+                {"run_id": "r", "act1_boss": "Hexaghost", "act2_boss": "Champ", "act3_boss": "Time Eater",
+                 "act1_source": "observed", "act2_source": "resolved", "act3_source": "resolved", "resolver_status": "observed"},
+                {"run_id": "a0", "act1_boss": "NO_BOSS", "act2_boss": "NO_BOSS", "act3_boss": "NO_BOSS",
+                 "act1_source": "a0_no_boss", "act2_source": "a0_no_boss", "act3_source": "a0_no_boss", "resolver_status": "a0_no_boss"},
             ]).to_parquet(sidecar, index=False)
             with open(os.path.join(source, "dataset_manifest.json"), "w", encoding="utf-8") as handle:
                 json.dump({}, handle)
@@ -123,7 +174,8 @@ class BossContextTests(unittest.TestCase):
             os.mkdir(source)
             pd.DataFrame([{"run_id": "r", "floor": 8, "decision_type": "card_reward", "ascension": 20}]).to_parquet(os.path.join(source, "train_valid_chunk_00000.parquet"), index=False)
             sidecar = os.path.join(directory, "bosses.parquet")
-            pd.DataFrame([{"run_id": "r", "act1_boss": "UNKNOWN_BOSS", "act2_boss": "UNKNOWN_BOSS", "act3_boss": "UNKNOWN_BOSS", "resolver_status": "resolved"}]).to_parquet(sidecar, index=False)
+            pd.DataFrame([{"run_id": "r", "act1_boss": "UNKNOWN_BOSS", "act2_boss": "UNKNOWN_BOSS", "act3_boss": "UNKNOWN_BOSS",
+                           "act1_source": "observed", "act2_source": "observed", "act3_source": "observed", "resolver_status": "observed"}]).to_parquet(sidecar, index=False)
             with open(os.path.join(source, "dataset_manifest.json"), "w", encoding="utf-8") as handle:
                 json.dump({}, handle)
             with self.assertRaisesRegex(ValueError, "UNKNOWN_BOSS"):
@@ -135,7 +187,8 @@ class BossContextTests(unittest.TestCase):
             os.mkdir(source)
             pd.DataFrame([{"run_id": "r", "floor": 8, "decision_type": "card_reward", "ascension": 20}]).to_parquet(os.path.join(source, "train_valid_chunk_00000.parquet"), index=False)
             sidecar = os.path.join(directory, "bosses.parquet")
-            pd.DataFrame([{"run_id": "r", "act1_boss": "Hexaghost", "act2_boss": "Champ", "act3_boss": "Time Eater", "resolver_status": "missing_seed"}]).to_parquet(sidecar, index=False)
+            pd.DataFrame([{"run_id": "r", "act1_boss": "Hexaghost", "act2_boss": "Champ", "act3_boss": "Time Eater",
+                           "act1_source": "observed", "act2_source": "observed", "act3_source": "observed", "resolver_status": "missing_seed"}]).to_parquet(sidecar, index=False)
             with open(os.path.join(source, "dataset_manifest.json"), "w", encoding="utf-8") as handle:
                 json.dump({}, handle)
             with self.assertRaisesRegex(ValueError, "unsupported resolver statuses"):

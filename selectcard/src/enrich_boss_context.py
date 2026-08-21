@@ -1,7 +1,10 @@
 """Pure rules and a staging-only join for boss-context enrichment.
 
-The resolver/audit job supplies ``resolved_context``.  This module never reads
-combat outcomes, including damage_taken, victory, killed_by, or floor_reached.
+The sidecar job supplies ``resolved_context``: each Act's boss comes from the
+run's own boss combat when one exists (already public at decision time) and
+from the seed resolver only as a backfill for runs that died before their
+Act's boss.  This module never reads combat outcomes itself; it joins the
+pre-built sidecar by run_id.
 """
 
 import glob
@@ -45,15 +48,22 @@ def enrich_processed_dataset(source_dir, sidecar_path, output_dir, resolver_mism
     if os.path.exists(output_dir):
         raise FileExistsError(f"Refusing to overwrite output directory: {output_dir}")
     sidecar = pd.read_parquet(sidecar_path)
-    required = {"run_id", "act1_boss", "act2_boss", "act3_boss", "resolver_status"}
+    required = {
+        "run_id", "act1_boss", "act2_boss", "act3_boss",
+        "act1_source", "act2_source", "act3_source", "resolver_status",
+    }
     missing = required.difference(sidecar.columns)
     if missing:
         raise ValueError(f"Boss sidecar is incomplete: {sorted(missing)}")
     if sidecar["run_id"].duplicated().any():
         raise ValueError("Boss sidecar contains duplicate run IDs")
-    allowed_statuses = {"resolved", "a0_no_boss"}
+    allowed_statuses = {"observed", "resolved", "a0_no_boss"}
     if not sidecar["resolver_status"].isin(allowed_statuses).all():
         raise ValueError("Boss sidecar contains unsupported resolver statuses")
+    allowed_sources = {"observed", "resolved", "a0_no_boss"}
+    for column in ("act1_source", "act2_source", "act3_source"):
+        if not sidecar[column].isin(allowed_sources).all():
+            raise ValueError(f"Boss sidecar contains unsupported {column} values")
     contexts = sidecar.set_index("run_id")[['act1_boss', 'act2_boss', 'act3_boss']].to_dict("index")
     source_files = sorted(glob.glob(os.path.join(source_dir, "*_valid_chunk_*.parquet")))
     if not source_files:
