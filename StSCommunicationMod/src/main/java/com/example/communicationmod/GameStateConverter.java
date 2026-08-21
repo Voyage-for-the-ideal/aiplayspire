@@ -210,26 +210,46 @@ public class GameStateConverter {
     }
 
     /**
-     * Returns only the boss a player can see at this decision point.  Never expose
-     * AbstractDungeon.bossList: on A20 it contains a still-hidden second Act III boss.
+     * Decision-time gating for the boss visible to the player.  Never expose
+     * AbstractDungeon.bossList: on A20 it contains a still-hidden second Act III
+     * boss.  The room-typed flags are computed in getVisibleBoss() from the live
+     * room; this pure function holds the gating rules so they are testable
+     * without booting the game.
      */
-    private static String getVisibleBoss() {
-        if (!CardCrawlGame.isInARun() || AbstractDungeon.floorNum == 0) {
+    static String visibleBossFor(boolean inRun, int floor, int act,
+                                 boolean bossRelicRoom, boolean completedBossRoom,
+                                 String bossKey) {
+        if (!inRun || floor == 0) {
             return "NO_BOSS";
         }
-        AbstractRoom room = AbstractDungeon.getCurrRoom();
-        if (room == null || room instanceof TreasureRoomBoss) {
+        // Boss relic selection happens while the next Act's boss is not public.
+        if (bossRelicRoom) {
             return "NO_BOSS";
         }
-        // A completed boss encounter can still show its rare-card reward.  The next
-        // Act's boss has not been generated or revealed at that point.
-        if (room instanceof MonsterRoomBoss && room.phase == AbstractRoom.RoomPhase.COMPLETE) {
+        // A completed boss encounter can still show its rare-card reward.  The
+        // next Act's boss has not been generated or revealed at that point.
+        if (completedBossRoom) {
             return "NO_BOSS";
         }
-        if (AbstractDungeon.actNum == 4) {
+        if (act == 4) {
             return "Corrupt Heart";
         }
-        return AbstractDungeon.bossKey == null ? "NO_BOSS" : AbstractDungeon.bossKey;
+        return bossKey == null ? "NO_BOSS" : bossKey;
+    }
+
+    static String getVisibleBoss() {
+        AbstractRoom room = AbstractDungeon.getCurrRoom();
+        boolean bossRelicRoom = room instanceof TreasureRoomBoss;
+        boolean completedBossRoom = room instanceof MonsterRoomBoss
+            && room.phase == AbstractRoom.RoomPhase.COMPLETE;
+        return visibleBossFor(
+            CardCrawlGame.isInARun(),
+            AbstractDungeon.floorNum,
+            AbstractDungeon.actNum,
+            bossRelicRoom,
+            completedBossRoom,
+            AbstractDungeon.bossKey
+        );
     }
 
     private static List<Map<String, Object>> convertCardGroup(ArrayList<AbstractCard> cards) {
