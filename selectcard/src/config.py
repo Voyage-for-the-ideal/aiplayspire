@@ -23,6 +23,10 @@ class Config:
     # （512/256)^0.5 ≈ 1.41 → 2.8e-4），配合 CosineAnnealingLR(T_max=EPOCHS)
     LEARNING_RATE = 2.8e-4
     LOG_INTERVAL_SECONDS = 60
+    EARLY_STOPPING_PATIENCE = 5
+    # Let the 20-epoch cosine schedule leave its high-learning-rate phase before
+    # treating validation fluctuations as evidence that training has stalled.
+    EARLY_STOPPING_START_EPOCH = 10
     # 峰值显存仅 ~0.65 GiB（RTX 5090 32GB），瓶颈在 CPU dataloader：
     # 提交 SLURM 作业时请用 --cpus-per-task=32，worker 数会按实际 CPU 自动裁剪
     MAX_AUTO_DATALOADER_WORKERS = 32
@@ -37,6 +41,8 @@ class Config:
     D_MODEL = 128            # 隐藏层/嵌入层维度
     N_HEADS = 4              # 注意力头数
     N_LAYERS = 3             # 注意力层数
+    # Act progress/resources.  Boss data is not available in the current v2
+    # parquet files, so do not feed an all-unknown one-hot vector to the model.
     NUM_GLOBAL_FEATURES = 9
     DROPOUT = 0.1            # Dropout 比例
     GLOBAL_CONDITIONING = "token"  # "token" or "late_concat"
@@ -55,3 +61,4 @@ class Config:
     # ==========================
     CHECKPOINT_DIR = os.path.join(BASE_DIR, "checkpoints")
     CHECKPOINT_NAME = "sts_value_model_final.pth"
+    TRAINING_REPORT_NAME = "training_report.png"

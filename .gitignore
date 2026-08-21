@@ -48,3 +48,4 @@ mismatched_runs.txt
 
 # Git sub-repos
 selectcard/.git/
+selectcard/processed_data_v2.zip

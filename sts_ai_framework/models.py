@@ -180,6 +180,7 @@ class GameState(BaseModel):
     grid_selected_count: int = 0
     grid_num_cards: int = 1
     grid_purpose: str = ""
+    next_boss: str = "UNKNOWN"
     is_end_turn_button_enabled: bool = False
     event: Optional[EventState] = None
 

@@ -97,6 +97,7 @@ public class GameStateConverter {
         // Room Info
         state.put("floor", AbstractDungeon.floorNum);
         state.put("act", AbstractDungeon.actNum);
+        state.put("next_boss", AbstractDungeon.bossKey == null ? "UNKNOWN" : AbstractDungeon.bossKey);
         state.put("room_phase", AbstractDungeon.getCurrRoom().phase.name());
 
         // Screen Info
@@ -105,6 +106,14 @@ public class GameStateConverter {
         state.put("choice_list", ChoiceScreenUtils.getCurrentChoiceList());
         state.put("can_proceed", ChoiceScreenUtils.isConfirmButtonAvailable());
         state.put("can_cancel", ChoiceScreenUtils.isCancelButtonAvailable());
+
+        // Card-reward choices need structured, language-independent card data.
+        // `choice_list` remains a human-readable display field; clients that make
+        // model decisions should use this field's stable ID and upgrade count.
+        if (currentChoiceType == ChoiceScreenUtils.ChoiceType.CARD_REWARD) {
+            state.put("card_reward_cards",
+                convertCardGroup(AbstractDungeon.cardRewardScreen.rewardGroup));
+        }
 
         if (currentChoiceType == ChoiceScreenUtils.ChoiceType.EVENT) {
             state.put("event", EventStateExtractor.extract(
@@ -221,9 +230,9 @@ public class GameStateConverter {
         jsonCard.put("can_upgrade", card.canUpgrade());
 
         // Upgrades
-        if (card.timesUpgraded > 0) {
-            jsonCard.put("upgrades", card.timesUpgraded);
-        }
+        // Always include this value so callers can distinguish an unupgraded
+        // reward from a payload that omitted upgrade information.
+        jsonCard.put("upgrades", card.timesUpgraded);
 
         // Playability (only valid in combat context really, but useful)
         if (AbstractDungeon.getMonsters() != null) {

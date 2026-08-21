@@ -34,7 +34,7 @@ ARTIFACT_PROGRESS_INTERVAL = 25
 
 
 class GlobalFeatureEncoder:
-    schema_version = "global-features-v4"
+    schema_version = "global-features-v6"
     quantile = 0.995
     source_feature_names = ("floor", "hp", "max_hp", "gold", "ascension")
     feature_names = (

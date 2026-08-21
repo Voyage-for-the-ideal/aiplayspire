@@ -24,7 +24,7 @@ from encoding import (
 )
 from model import STSValueNetwork
 from inference import STSInferenceEngine, compose_scalar_value
-from train import weighted_bce_loss
+from train import save_training_report, weighted_bce_loss
 
 
 def supervision_fields(valid=True, label=0.0):
@@ -285,6 +285,17 @@ class GlobalFeatureEncoderTests(unittest.TestCase):
 
 
 class ModelTests(unittest.TestCase):
+    def test_training_report_is_written(self):
+        history = [
+            {"epoch": 1, "train_loss": 0.4, "val_loss": 0.5, "learning_rate": 2e-4},
+            {"epoch": 2, "train_loss": 0.3, "val_loss": 0.35, "learning_rate": 1e-4},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "training_report.png")
+            save_training_report(history, path)
+            self.assertTrue(os.path.isfile(path))
+            self.assertGreater(os.path.getsize(path), 0)
+
     def _model(self, global_conditioning="token", norm_position="pre"):
         model = STSValueNetwork(
             vocab_size=12,

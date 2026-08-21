@@ -43,6 +43,7 @@ class ChoiceMixin:
             "gold": state.player.gold,
             "floor": state.floor,
             "ascension": 20,
+            "next_boss": getattr(state, "next_boss", "UNKNOWN"),
             "deck": [card.id for card in state.deck] if hasattr(state, "deck") else [],
             "relics": [relic.id for relic in state.relics] if hasattr(state, "relics") else [],
         }
@@ -55,9 +56,9 @@ class ChoiceMixin:
             elif "smithoption" in text_lower:
                 best_upgrade_score = -9999.0
                 best_upgrade_card = None
-                unique_cards = set([c.id for c in state.deck])
-                for card_id in unique_cards:
-                    if "+1" not in card_id:
+                unique_cards = {c.id: c for c in state.deck}
+                for card_id, card in unique_cards.items():
+                    if card.can_upgrade and card.type != "CURSE":
                         hypo_state = self.value_engine._apply_choice(current_state, {"action": "upgrade_card", "target": card_id})
                         score = self.value_engine.evaluate_state(hypo_state)
                         if score > best_upgrade_score:

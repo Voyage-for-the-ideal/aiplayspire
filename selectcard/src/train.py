@@ -117,6 +117,46 @@ def weighted_bce_loss(logits, targets, masks, global_features, band_weights):
     return (losses * weighted_masks).sum() / masks.sum().clamp_min(1.0)
 
 
+def save_training_report(history, output_path):
+    """Save epoch-level loss and learning-rate history as a PNG report."""
+    if not history:
+        return
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    epochs = [entry["epoch"] for entry in history]
+    train_losses = [entry["train_loss"] for entry in history]
+    val_losses = [entry["val_loss"] for entry in history]
+    learning_rates = [entry["learning_rate"] for entry in history]
+    best_index = min(range(len(val_losses)), key=val_losses.__getitem__)
+
+    figure, (loss_axis, lr_axis) = plt.subplots(1, 2, figsize=(14, 5))
+    loss_axis.plot(epochs, train_losses, marker="o", label="Train Loss (weighted)")
+    loss_axis.plot(epochs, val_losses, marker="o", label="Validation Loss")
+    loss_axis.scatter(
+        [epochs[best_index]], [val_losses[best_index]], color="tab:red",
+        marker="*", s=160, zorder=3,
+        label=f"Best Validation Loss (Epoch {epochs[best_index]})",
+    )
+    loss_axis.set(title="Loss History", xlabel="Epoch", ylabel="Loss")
+    loss_axis.legend()
+    loss_axis.grid(alpha=0.25)
+
+    lr_axis.plot(
+        epochs, learning_rates, color="green", marker="s", label="Learning Rate"
+    )
+    lr_axis.set(title="Learning Rate Schedule", xlabel="Epoch", ylabel="Learning Rate")
+    lr_axis.legend()
+    lr_axis.grid(alpha=0.25)
+
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=150)
+    plt.close(figure)
+
+
 def _classification_metrics(labels, probabilities):
     labels = np.asarray(labels)
     probabilities = np.asarray(probabilities)
@@ -325,8 +365,10 @@ def train_model():
     final_path = os.path.join(Config.CHECKPOINT_DIR, Config.CHECKPOINT_NAME)
     best_val_loss = float("inf")
     patience_counter = 0
+    history = []
 
     for epoch in range(Config.EPOCHS):
+        learning_rate = optimizer.param_groups[0]["lr"]
         epoch_started = time.monotonic()
         last_progress = epoch_started
         if device.type == "cuda":
@@ -402,21 +444,33 @@ def train_model():
                 "difficulty_weights": raw_band_weights,
             },
         }
-        if val_metrics["loss"] < best_val_loss:
+        is_best = val_metrics["loss"] < best_val_loss
+        history.append(
+            {
+                "epoch": epoch + 1,
+                "train_loss": train_loss,
+                "val_loss": val_metrics["loss"],
+                "learning_rate": learning_rate,
+            }
+        )
+        if is_best:
             best_val_loss = val_metrics["loss"]
             patience_counter = 0
             save_checkpoint(
                 best_path, model, architecture, vocabulary, feature_encoder, metadata
             )
             log(f"Saved new best checkpoint to {best_path}")
-        else:
+        elif epoch + 1 > Config.EARLY_STOPPING_START_EPOCH:
             patience_counter += 1
-            if patience_counter >= getattr(Config, "EARLY_STOPPING_PATIENCE", 5):
+            if patience_counter >= Config.EARLY_STOPPING_PATIENCE:
                 log(
                     f"Early stopping after {patience_counter} epochs without improvement"
                 )
                 break
 
+    report_path = os.path.join(Config.CHECKPOINT_DIR, Config.TRAINING_REPORT_NAME)
+    save_training_report(history, report_path)
+    log(f"Saved training report to {report_path}")
     log(f"Loading best checkpoint from {best_path}")
     best_checkpoint, _, _ = load_checkpoint(best_path, map_location=device)
     model.load_state_dict(best_checkpoint["model_state_dict"])

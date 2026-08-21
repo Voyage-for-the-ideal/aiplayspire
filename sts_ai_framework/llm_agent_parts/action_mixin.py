@@ -24,6 +24,12 @@ class ActionMixin:
 
         self.last_screen_type = state.screen_type
 
+        # BattleAiMod owns every combat-time choice screen too (for example
+        # Discovery/Foreign Influence).  Do not let the route AI choose cards
+        # for a combat card's effect.
+        if state.room_phase == "COMBAT":
+            return GameAction(type=ActionType.WAIT)
+
         if state.screen_type == "REST":
             return self._handle_rest_room(state)
 
@@ -258,20 +264,17 @@ class ActionMixin:
                             Style.RESET_ALL)
                         return GameAction(type=ActionType.CHOOSE, choice_index=i)
 
-            # Card not found in choice_list - may already be selected (duplicate names)
+            # A stale intent must never be retried forever.  In particular,
+            # Smith can no longer offer a card after it was upgraded.
             print(Fore.YELLOW +
-                f"GRID: 找不到目标卡牌 {card_to_select} 在可选列表中 (可能已选或牌名重复)" +
-                Style.RESET_ALL)
-
-        # Edge case: confirm available but lost track of count (game resume etc.)
-        if confirm_available:
-            print(Fore.MAGENTA +
-                f"GRID操作完成 ({purpose}), 点击确认..." +
+                f"GRID: 目标卡牌 {card_to_select} 不在可选列表中，清除失效意图。" +
                 Style.RESET_ALL)
             self._pending_grid = None
             self.intended_purge_card = None
             self.intended_smith_card = None
-            return GameAction(type=ActionType.CHOOSE, choice_index=0)
+            if getattr(state, "can_cancel", False):
+                return GameAction(type=ActionType.CANCEL)
+            return GameAction(type=ActionType.WAIT)
 
         return None
 
@@ -304,12 +307,11 @@ class ActionMixin:
 
         # Get or compute target_ids
         target_ids = None
-        selected_count = 0
+        selected_count = getattr(state, "grid_selected_count", 0) or 0
 
         pending = getattr(self, "_pending_grid", None)
         if pending and pending.get("purpose") == purpose:
             target_ids = pending.get("target_ids", [])
-            selected_count = pending.get("selected_count", 0)
             # num_to_select from pending takes priority if set
             if pending.get("num_to_select"):
                 num_to_select = pending["num_to_select"]
@@ -341,15 +343,22 @@ class ActionMixin:
                 "gold": state.player.gold,
                 "floor": state.floor,
                 "ascension": 20,
+                "next_boss": getattr(state, "next_boss", "UNKNOWN"),
                 "deck": [card.id for card in state.deck] if hasattr(state, "deck") else [],
                 "relics": [relic.id for relic in state.relics] if hasattr(state, "relics") else [],
                 "relic_states": self._build_relic_state_payload(state) if hasattr(self, "_build_relic_state_payload") else [],
             }
 
-            # For transform, exclude curse cards
+            # Never target non-upgradeable cards (notably Necronomicurse), and
+            # keep curses out of transforms where a non-curse exists.
             exclude_ids = None
             if purpose == "transform":
                 exclude_ids = {card.id for card in state.deck if card.type == "CURSE"}
+            elif purpose == "upgrade":
+                exclude_ids = {
+                    card.id for card in state.deck
+                    if card.type == "CURSE" or not card.can_upgrade
+                }
 
             target_ids = self.value_engine.rank_cards_for_purpose(
                 current_state, purpose, num_to_select, exclude_ids=exclude_ids

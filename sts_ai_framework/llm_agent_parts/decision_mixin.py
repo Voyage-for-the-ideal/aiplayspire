@@ -184,6 +184,41 @@ class DecisionMixin:
 
         return choice_text_clean, effects
 
+    @staticmethod
+    def _has_empty_potion_slot(state: GameState) -> bool:
+        potions = getattr(state, "potions", None)
+        if not potions:
+            # Preserve compatibility with older CommunicationMod payloads that
+            # did not include potion slots.
+            return True
+        return any(
+            potion.is_empty or potion.id == "Potion Slot" or potion.name == "Potion Slot"
+            for potion in potions
+        )
+
+    def _shop_choice(self, choice_text: str, index: int, state: GameState):
+        """Translate CommunicationMod's shop labels into value-model actions."""
+        text = self._clean_effect_text(choice_text)
+        lower = text.lower()
+        price_match = re.search(r"\((\d+)\s+gold\)", lower)
+        cost = int(price_match.group(1)) if price_match else 0
+        target = self._extract_bracket_label(text)
+        if lower == "leave":
+            return {"action": "skip", "target": None, "index": index, "cost": 0}
+        if lower.startswith("purge "):
+            return {"action": "remove_card", "target": None, "index": index, "cost": cost}
+        if lower.startswith("relic:") and target:
+            return {"action": "buy_relic", "target": target, "index": index, "cost": cost}
+        if lower.startswith("add potion:"):
+            # A full potion belt opens a discard prompt instead of obtaining the
+            # purchase.  Do not create an impossible action for the value model.
+            if not self._has_empty_potion_slot(state):
+                return None
+            return {"action": "buy_potion", "target": target, "index": index, "cost": cost}
+        if target and "cost:" in lower:
+            return {"action": "buy_card", "target": target, "index": index, "cost": cost}
+        return None
+
     def _get_model_shop_decision(self, state: GameState) -> Optional[GameAction]:
         current_state = {
             "hp": state.player.current_hp,
@@ -191,6 +226,7 @@ class DecisionMixin:
             "gold": state.player.gold,
             "floor": state.floor,
             "ascension": 20,
+            "next_boss": getattr(state, "next_boss", "UNKNOWN"),
             "deck": [card.id for card in state.deck] if hasattr(state, "deck") else [],
             "relics": [relic.id for relic in state.relics] if hasattr(state, "relics") else [],
         }
@@ -198,15 +234,9 @@ class DecisionMixin:
         choices = []
         unified_choices = self._build_unified_choices(state)
         for i, (choice_text, _) in enumerate(unified_choices):
-            choice_text_clean, effects = self._parse_event_effects(choice_text, state)
-            choice_text_lower = choice_text_clean.lower()
-
-            if "skip" in choice_text_lower or "leave" in choice_text_lower or "cancel" in choice_text_lower:
-                choices.append({"action": "skip", "target": None, "index": i, "cost": 0})
-            elif len(effects) > 0:
-                choices.append({"action": "composite_event", "effects": effects, "index": i, "raw_text": choice_text_clean})
-            else:
-                choices.append({"action": "skip", "target": None, "index": i, "cost": 0})
+            choice = self._shop_choice(choice_text, i, state)
+            if choice is not None:
+                choices.append(choice)
 
         if len(choices) == 0:
             return None
@@ -235,6 +265,7 @@ class DecisionMixin:
             "gold": state.player.gold,
             "floor": state.floor,
             "ascension": 20,
+            "next_boss": getattr(state, "next_boss", "UNKNOWN"),
             "deck": [card.id for card in state.deck] if hasattr(state, "deck") else [],
             "relics": [relic.id for relic in state.relics] if hasattr(state, "relics") else [],
             "relic_states": self._build_relic_state_payload(state),
@@ -279,6 +310,7 @@ class DecisionMixin:
             "gold": state.player.gold,
             "floor": state.floor,
             "ascension": 20,
+            "next_boss": getattr(state, "next_boss", "UNKNOWN"),
             "deck": [card.id for card in state.deck],
             "relics": [relic.id for relic in state.relics],
             "relic_states": self._build_relic_state_payload(state),
@@ -575,6 +607,7 @@ class DecisionMixin:
             "gold": state.player.gold,
             "floor": state.floor,
             "ascension": 20,
+            "next_boss": getattr(state, "next_boss", "UNKNOWN"),
             "deck": [card.id for card in state.deck] if hasattr(state, "deck") else [],
             "relics": [relic.id for relic in state.relics] if hasattr(state, "relics") else [],
         }
@@ -678,6 +711,7 @@ class DecisionMixin:
             "gold": state.player.gold,
             "floor": state.floor,
             "ascension": 20,
+            "next_boss": getattr(state, "next_boss", "UNKNOWN"),
             "deck": [card.id for card in state.deck] if hasattr(state, "deck") else [],
             "relics": [relic.id for relic in state.relics] if hasattr(state, "relics") else [],
         }
