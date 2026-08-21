@@ -31,7 +31,7 @@ class BossContextTests(unittest.TestCase):
         self.assertEqual(visible_boss_for_sample(16, "boss_card_reward", 20, context), "NO_BOSS")
         self.assertEqual(visible_boss_for_sample(17, "boss_relic", 20, context), "NO_BOSS")
         self.assertEqual(visible_boss_for_sample(17, "card_reward", 20, context), "Champ")
-        self.assertEqual(visible_boss_for_sample(8, "card_reward", 0, context), "NO_BOSS")
+        self.assertEqual(visible_boss_for_sample(8, "card_reward", 0, context), "UNKNOWN_BOSS")
 
     def test_enrichment_writes_new_dataset_and_rejects_unknowns(self):
         with tempfile.TemporaryDirectory() as directory:

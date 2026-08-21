@@ -412,8 +412,8 @@ def process_run(event_data, catalog):
                 "preprocessing_version": PREPROCESSING_VERSION,
                 "filter_version": FILTER_VERSION,
                 "ascension_band": validated["ascension_band"],
-                # The approved V1 policy intentionally withholds boss identity at A0.
-                "visible_boss": "NO_BOSS",
+                # Low-ascension historical data intentionally carries no resolved boss.
+                "visible_boss": "UNKNOWN_BOSS",
                 "deck": ",".join(snapshot["deck"]),
                 "relics": ",".join(snapshot["relics"]),
                 "candidates": ",".join(snapshot["candidates"]),

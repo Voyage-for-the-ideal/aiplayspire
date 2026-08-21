@@ -17,7 +17,9 @@ from boss_context import BOSS_RESOLVER_VERSION, BOSS_SCHEMA_VERSION, canonicaliz
 
 def visible_boss_for_sample(floor, decision_type, ascension, resolved_context):
     """Return the player-visible boss for an already reconstructed snapshot."""
-    if int(ascension) == 0 or int(floor) == 0 or decision_type == "boss_relic":
+    if int(ascension) < 15:
+        return "UNKNOWN_BOSS"
+    if int(floor) == 0 or decision_type == "boss_relic":
         return "NO_BOSS"
     if decision_type in {"boss_card_reward", "boss_reward"}:
         return "NO_BOSS"
@@ -46,8 +48,9 @@ def enrich_processed_dataset(source_dir, sidecar_path, output_dir):
         raise ValueError(f"Boss sidecar is incomplete: {sorted(missing)}")
     if sidecar["run_id"].duplicated().any():
         raise ValueError("Boss sidecar contains duplicate run IDs")
-    if not (sidecar["resolver_status"] == "resolved").all():
-        raise ValueError("Boss sidecar contains unresolved runs")
+    allowed_statuses = {"resolved", "below_a15_unknown"}
+    if not sidecar["resolver_status"].isin(allowed_statuses).all():
+        raise ValueError("Boss sidecar contains unsupported resolver statuses")
     contexts = sidecar.set_index("run_id")[['act1_boss', 'act2_boss', 'act3_boss']].to_dict("index")
     source_files = sorted(glob.glob(os.path.join(source_dir, "*_valid_chunk_*.parquet")))
     if not source_files:
@@ -65,8 +68,9 @@ def enrich_processed_dataset(source_dir, sidecar_path, output_dir):
                 visible_boss_for_sample(row.floor, row.decision_type, row.ascension, contexts[row.run_id])
                 for row in frame.itertuples(index=False)
             ]
-            if (frame["visible_boss"] == "UNKNOWN_BOSS").any():
-                raise ValueError("Enrichment produced UNKNOWN_BOSS; do not publish")
+            high_asc_unknown = (frame["ascension"] >= 15) & (frame["visible_boss"] == "UNKNOWN_BOSS")
+            if high_asc_unknown.any():
+                raise ValueError("Enrichment produced UNKNOWN_BOSS for A15+; do not publish")
             for boss, count in frame["visible_boss"].value_counts().items():
                 distributions[boss] = distributions.get(boss, 0) + int(count)
             frame.to_parquet(os.path.join(staging, os.path.basename(path)), index=False)
@@ -77,7 +81,7 @@ def enrich_processed_dataset(source_dir, sidecar_path, output_dir):
         manifest["boss_context"] = {
             "schema_version": BOSS_SCHEMA_VERSION,
             "resolver_version": BOSS_RESOLVER_VERSION,
-            "a0_policy": "NO_BOSS",
+            "below_a15_policy": "UNKNOWN_BOSS",
             "distributions": {"samples_by_visible_boss": distributions},
         }
         with open(os.path.join(staging, "dataset_manifest.json"), "w", encoding="utf-8") as handle:
