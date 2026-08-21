@@ -376,10 +376,6 @@ def _validate_snapshot(snapshot, expected_ascension):
 def process_run(event_data, catalog):
     run_id = stable_run_id(event_data)
     validated = validate_raw_run(event_data, catalog)
-    # A1+ visible-boss identity is supplied only by the deterministic sidecar
-    # resolver/enrichment workflow.  Do not substitute combat outcomes here.
-    if validated["ascension"] > 0:
-        raise RunRejected("visible_boss_sidecar_required")
     recon = RunReconstructor(event_data, content_catalog=catalog)
     snapshots = list(recon.replay())
     if not recon.is_match_with_master_deck():
@@ -412,8 +408,12 @@ def process_run(event_data, catalog):
                 "preprocessing_version": PREPROCESSING_VERSION,
                 "filter_version": FILTER_VERSION,
                 "ascension_band": validated["ascension_band"],
-                # Low-ascension historical data intentionally carries no resolved boss.
-                "visible_boss": "UNKNOWN_BOSS",
+                # A0 samples carry no resolved boss by product policy; A1+
+                # identity is supplied only by the sidecar enrichment workflow,
+                # never inferred from combat outcomes.
+                "visible_boss": (
+                    "NO_BOSS" if validated["ascension"] == 0 else "UNKNOWN_BOSS"
+                ),
                 "deck": ",".join(snapshot["deck"]),
                 "relics": ",".join(snapshot["relics"]),
                 "candidates": ",".join(snapshot["candidates"]),

@@ -12,8 +12,12 @@ def generate(raw_dir, processed_dir, output_dir, audit_path, minimum_samples=100
         raise FileExistsError(f"Refusing to overwrite output dataset: {output_dir}")
     with tempfile.TemporaryDirectory(prefix="boss-sidecar-") as temporary:
         sidecar = os.path.join(temporary, "boss_context_v1.parquet")
-        build_sidecar(raw_dir, sidecar, audit_path, minimum_samples)
-        enrich_processed_dataset(processed_dir, sidecar, output_dir)
+        report = build_sidecar(raw_dir, sidecar, audit_path, minimum_samples)
+        mismatch_count = int(report["samples"].sum() - report["matches"].sum())
+        enrich_processed_dataset(
+            processed_dir, sidecar, output_dir,
+            resolver_mismatch_count=mismatch_count,
+        )
 
 
 if __name__ == "__main__":
