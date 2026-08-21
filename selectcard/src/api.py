@@ -18,6 +18,7 @@ class PlayerState(BaseModel):
     gold: int
     floor: int
     ascension: int
+    visible_boss: str = "NO_BOSS"
     
 class Choice(BaseModel):
     action: str

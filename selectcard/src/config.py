@@ -41,8 +41,8 @@ class Config:
     D_MODEL = 128            # 隐藏层/嵌入层维度
     N_HEADS = 4              # 注意力头数
     N_LAYERS = 3             # 注意力层数
-    # Act progress/resources.  Boss data is not available in the current v2
-    # parquet files, so do not feed an all-unknown one-hot vector to the model.
+    # Boss identity is a separate categorical [BOSS] context token, not a numeric
+    # global feature.  Keep this input contract at nine dimensions.
     NUM_GLOBAL_FEATURES = 9
     DROPOUT = 0.1            # Dropout 比例
     GLOBAL_CONDITIONING = "token"  # "token" or "late_concat"

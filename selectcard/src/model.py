@@ -52,6 +52,7 @@ class STSValueNetwork(nn.Module):
         n_heads=4,
         n_layers=3,
         num_global_features=9,
+        num_bosses=12,
         dropout=0.1,
         global_conditioning="token",
         norm_position="pre",
@@ -66,6 +67,8 @@ class STSValueNetwork(nn.Module):
         self.upgrade_emb = nn.Embedding(max_upgrade, d_model, padding_idx=0)
         self.count_emb = nn.Embedding(max_count, d_model, padding_idx=0)
         self.cls_token = nn.Parameter(torch.randn(1, 1, d_model))
+        self.boss_token = nn.Parameter(torch.randn(1, 1, d_model))
+        self.boss_emb = nn.Embedding(num_bosses, d_model)
         self.global_mlp = nn.Sequential(
             nn.Linear(num_global_features, d_model),
             nn.ReLU(),
@@ -87,7 +90,7 @@ class STSValueNetwork(nn.Module):
             nn.Linear(d_model // 2, VALUE_OUTPUT_DIM),
         )
 
-    def forward(self, seq_tokens, upgrades, counts, global_features):
+    def forward(self, seq_tokens, upgrades, counts, global_features, boss_ids):
         batch_size = seq_tokens.size(0)
         x = (
             self.token_emb(seq_tokens)
@@ -95,6 +98,7 @@ class STSValueNetwork(nn.Module):
             + self.count_emb(counts)
         )
         cls_tokens = self.cls_token.expand(batch_size, -1, -1)
+        boss_context = self.boss_token.expand(batch_size, -1, -1) + self.boss_emb(boss_ids).unsqueeze(1)
         padding_mask = seq_tokens.eq(0)
         context_mask = torch.zeros(
             (batch_size, 1), dtype=torch.bool, device=seq_tokens.device
@@ -102,13 +106,13 @@ class STSValueNetwork(nn.Module):
 
         global_out = self.global_mlp(global_features)
         if self.global_conditioning == "token":
-            x = torch.cat([cls_tokens, global_out.unsqueeze(1), x], dim=1)
+            x = torch.cat([cls_tokens, global_out.unsqueeze(1), boss_context, x], dim=1)
             key_padding_mask = torch.cat(
-                [context_mask, context_mask, padding_mask], dim=1
+                [context_mask, context_mask, context_mask, padding_mask], dim=1
             )
         else:
-            x = torch.cat([cls_tokens, x], dim=1)
-            key_padding_mask = torch.cat([context_mask, padding_mask], dim=1)
+            x = torch.cat([cls_tokens, boss_context, x], dim=1)
+            key_padding_mask = torch.cat([context_mask, context_mask, padding_mask], dim=1)
 
         for layer in self.layers:
             x = layer(x, key_padding_mask=key_padding_mask)

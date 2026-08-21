@@ -376,6 +376,10 @@ def _validate_snapshot(snapshot, expected_ascension):
 def process_run(event_data, catalog):
     run_id = stable_run_id(event_data)
     validated = validate_raw_run(event_data, catalog)
+    # A1+ visible-boss identity is supplied only by the deterministic sidecar
+    # resolver/enrichment workflow.  Do not substitute combat outcomes here.
+    if validated["ascension"] > 0:
+        raise RunRejected("visible_boss_sidecar_required")
     recon = RunReconstructor(event_data, content_catalog=catalog)
     snapshots = list(recon.replay())
     if not recon.is_match_with_master_deck():
@@ -408,6 +412,8 @@ def process_run(event_data, catalog):
                 "preprocessing_version": PREPROCESSING_VERSION,
                 "filter_version": FILTER_VERSION,
                 "ascension_band": validated["ascension_band"],
+                # The approved V1 policy intentionally withholds boss identity at A0.
+                "visible_boss": "NO_BOSS",
                 "deck": ",".join(snapshot["deck"]),
                 "relics": ",".join(snapshot["relics"]),
                 "candidates": ",".join(snapshot["candidates"]),
@@ -573,6 +579,7 @@ def _validate_staging(staging, expected_samples):
         "preprocessing_version",
         "filter_version",
         "ascension_band",
+        "visible_boss",
     }
     columns = set(pd.read_parquet(parquet_files[0]).columns)
     missing = required.difference(columns)

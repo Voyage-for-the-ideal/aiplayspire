@@ -13,9 +13,11 @@ from torch.utils.data import Dataset, Sampler
 try:
     from .data_contract import FILTER_VERSION, MASK_COLUMNS, PREPROCESSING_VERSION, TARGET_COLUMNS
     from .encoding import ItemVocabulary, encode_items, split_items
+    from .boss_context import boss_id
 except ImportError:
     from data_contract import FILTER_VERSION, MASK_COLUMNS, PREPROCESSING_VERSION, TARGET_COLUMNS
     from encoding import ItemVocabulary, encode_items, split_items
+    from boss_context import boss_id
 
 
 REQUIRED_COLUMNS = {
@@ -26,6 +28,7 @@ REQUIRED_COLUMNS = {
     "preprocessing_version",
     "filter_version",
     "ascension_band",
+    "visible_boss",
 }
 
 TRAINING_ARTIFACT_CACHE_NAME = "training_artifacts.json"
@@ -352,6 +355,7 @@ class STSDataset(Dataset):
                     "preprocessing_version",
                     "filter_version",
                     "ascension_band",
+                    "visible_boss",
                 ],
             )
             if set(metadata["split"].unique()) != {split}:
@@ -397,6 +401,7 @@ class STSDataset(Dataset):
             self.max_count,
         )
         global_features = self.feature_encoder.transform_row(row)
+        encoded_boss = boss_id(row["visible_boss"])
         targets = [float(row[column]) for column in TARGET_COLUMNS]
         masks = [float(bool(row[column])) for column in MASK_COLUMNS]
         return (
@@ -404,6 +409,7 @@ class STSDataset(Dataset):
             torch.tensor(upgrades, dtype=torch.long),
             torch.tensor(counts, dtype=torch.long),
             torch.tensor(global_features, dtype=torch.float32),
+            torch.tensor(encoded_boss, dtype=torch.long),
             torch.tensor(targets, dtype=torch.float32),
             torch.tensor(masks, dtype=torch.float32),
         )

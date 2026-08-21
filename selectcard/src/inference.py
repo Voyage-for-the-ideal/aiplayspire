@@ -7,6 +7,7 @@ try:
     from .dataset import GlobalFeatureEncoder
     from .config import Config
     from .data_contract import VALUE_COMPONENT_NAMES
+    from .boss_context import NUM_BOSS_IDS, boss_id, get_visible_boss
 except ImportError:
     from model import STSValueNetwork
     from checkpointing import load_checkpoint
@@ -14,6 +15,7 @@ except ImportError:
     from dataset import GlobalFeatureEncoder
     from config import Config
     from data_contract import VALUE_COMPONENT_NAMES
+    from boss_context import NUM_BOSS_IDS, boss_id, get_visible_boss
 import re
 
 
@@ -73,6 +75,7 @@ class STSInferenceEngine:
                 "n_heads": Config.N_HEADS,
                 "n_layers": Config.N_LAYERS,
                 "num_global_features": Config.NUM_GLOBAL_FEATURES,
+                "num_bosses": NUM_BOSS_IDS,
                 "dropout": Config.DROPOUT,
                 "global_conditioning": Config.GLOBAL_CONDITIONING,
                 "norm_position": Config.NORM_POSITION,
@@ -89,14 +92,18 @@ class STSInferenceEngine:
     def _global_features(self, state):
         values = self.feature_encoder.transform_state(state)
         return torch.tensor([values], dtype=torch.float32)
+
+    def _boss_id(self, state):
+        return torch.tensor([boss_id(get_visible_boss(state))], dtype=torch.long)
         
     def evaluate_state_components(self, state):
         """Return raw calibrated probabilities in the fixed component order."""
         seq_tokens, upgrades, counts = self.tokenizer.encode(state['deck'], state['relics'])
         global_feats = self._global_features(state)
+        boss_ids = self._boss_id(state)
 
         with torch.no_grad():
-            logits = self.model(seq_tokens, upgrades, counts, global_feats)
+            logits = self.model(seq_tokens, upgrades, counts, global_feats, boss_ids)
             prob = torch.sigmoid(logits)
         values = prob.squeeze(0).tolist()
         return dict(zip(VALUE_COMPONENT_NAMES, values))
@@ -112,9 +119,10 @@ class STSInferenceEngine:
         """Evaluate a single state dictionary and return raw logits."""
         seq_tokens, upgrades, counts = self.tokenizer.encode(state['deck'], state['relics'])
         global_feats = self._global_features(state)
+        boss_ids = self._boss_id(state)
         
         with torch.no_grad():
-            logits = self.model(seq_tokens, upgrades, counts, global_feats)
+            logits = self.model(seq_tokens, upgrades, counts, global_feats, boss_ids)
         return dict(zip(VALUE_COMPONENT_NAMES, logits.squeeze(0).tolist()))
 
     def _print_choice_score(self, label, score):

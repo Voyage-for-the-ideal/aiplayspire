@@ -25,6 +25,7 @@ from encoding import (
 from model import STSValueNetwork
 from inference import STSInferenceEngine, compose_scalar_value
 from train import save_training_report, weighted_bce_loss
+from boss_context import NUM_BOSS_IDS
 
 
 def supervision_fields(valid=True, label=0.0):
@@ -195,6 +196,7 @@ class GlobalFeatureEncoderTests(unittest.TestCase):
                     "preprocessing_version": PREPROCESSING_VERSION,
                     "filter_version": FILTER_VERSION,
                     "ascension_band": 5,
+                    "visible_boss": "Time Eater",
                     "floor": 10,
                     "hp": 50.0,
                     "max_hp": 80.0,
@@ -223,6 +225,7 @@ class GlobalFeatureEncoderTests(unittest.TestCase):
                     "preprocessing_version": PREPROCESSING_VERSION,
                     "filter_version": FILTER_VERSION,
                     "ascension_band": 0,
+                    "visible_boss": "NO_BOSS",
                     "floor": 1,
                     "hp": 70.0,
                     "max_hp": 80.0,
@@ -260,6 +263,7 @@ class GlobalFeatureEncoderTests(unittest.TestCase):
                     "preprocessing_version": PREPROCESSING_VERSION,
                     "filter_version": FILTER_VERSION,
                     "ascension_band": 0,
+                    "visible_boss": "NO_BOSS",
                     "floor": index + 1,
                     "hp": 70.0,
                     "max_hp": 80.0,
@@ -305,6 +309,7 @@ class ModelTests(unittest.TestCase):
             n_heads=4,
             n_layers=2,
             num_global_features=9,
+            num_bosses=NUM_BOSS_IDS,
             dropout=0.0,
             global_conditioning=global_conditioning,
             norm_position=norm_position,
@@ -320,12 +325,14 @@ class ModelTests(unittest.TestCase):
                 torch.tensor([[0, 1, 0]]),
                 torch.tensor([[2, 1, 0]]),
                 globals_,
+                torch.tensor([8]),
             )
             permuted = model(
                 torch.tensor([[3, 2, 0, 0]]),
                 torch.tensor([[1, 0, 0, 0]]),
                 torch.tensor([[1, 2, 0, 0]]),
                 globals_,
+                torch.tensor([8]),
             )
         torch.testing.assert_close(first, permuted, rtol=1e-5, atol=1e-6)
 
@@ -335,6 +342,7 @@ class ModelTests(unittest.TestCase):
             torch.tensor([[0, 0]]),
             torch.tensor([[1, 0]]),
             torch.zeros((1, 9)),
+            torch.tensor([0]),
         )
         for conditioning in ("token", "late_concat"):
             for norm in ("pre", "post"):
@@ -350,6 +358,15 @@ class ModelTests(unittest.TestCase):
         self.assertNotEqual(logits.grad[0, 0].item(), 0.0)
         torch.testing.assert_close(logits.grad[0, 1:], torch.zeros(3))
 
+    def test_boss_ids_follow_distinct_embedding_paths(self):
+        model = self._model()
+        self.assertFalse(torch.equal(model.boss_emb.weight[8], model.boss_emb.weight[9]))
+        inputs = (
+            torch.tensor([[2, 0]]), torch.tensor([[0, 0]]),
+            torch.tensor([[1, 0]]), torch.zeros((1, 9)),
+        )
+        self.assertEqual(model(*inputs, torch.tensor([0])).shape, (1, 4))
+
     def test_scalar_value_clamps_completed_horizon(self):
         components = {"reach17": 0.3, "reach34": 0.4, "reach50": 0.2, "win": 0.1}
         self.assertAlmostEqual(compose_scalar_value(components, 20), 0.275)
@@ -362,6 +379,12 @@ class ModelTests(unittest.TestCase):
             "effects": [{"type": "obtain_relic", "relic_id": "Black Blood"}],
         })
         self.assertEqual(result["relics"], ["Black Blood"])
+
+    def test_choice_simulation_preserves_visible_boss(self):
+        engine = STSInferenceEngine.__new__(STSInferenceEngine)
+        state = {"deck": ["Strike_R"], "relics": [], "visible_boss": "Time Eater"}
+        result = engine._apply_choice(state, {"action": "skip"})
+        self.assertEqual(result["visible_boss"], "Time Eater")
 
     def test_calling_bell_adds_known_curse_without_fake_random_relics(self):
         engine = STSInferenceEngine.__new__(STSInferenceEngine)
@@ -406,7 +429,7 @@ class ModelTests(unittest.TestCase):
         })
         self.assertEqual(result["deck"], ["Bash", "Inflame"])
 
-    def test_v5_checkpoint_round_trip(self):
+    def test_v6_checkpoint_round_trip(self):
         model = self._model()
         config = {
             "vocab_size": 12,
@@ -416,6 +439,7 @@ class ModelTests(unittest.TestCase):
             "n_heads": 4,
             "n_layers": 2,
             "num_global_features": 9,
+            "num_bosses": NUM_BOSS_IDS,
             "dropout": 0.0,
             "global_conditioning": "token",
             "norm_position": "pre",
@@ -432,7 +456,7 @@ class ModelTests(unittest.TestCase):
             path = os.path.join(directory, "model.pth")
             save_checkpoint(path, model, config, vocabulary, feature_encoder)
             checkpoint, loaded_vocab, loaded_encoder = load_checkpoint(path)
-        self.assertEqual(checkpoint["format_version"], 5)
+        self.assertEqual(checkpoint["format_version"], 6)
         self.assertEqual(loaded_vocab.to_dict(), vocabulary.to_dict())
         self.assertEqual(loaded_encoder.to_dict(), feature_encoder.to_dict())
 

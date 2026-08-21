@@ -2,8 +2,8 @@
   "modid": "CommunicationMod",
   "name": "Communication Mod",
   "author_list": ["YourName"],
-  "description": "Exposes game state and structured card-reward IDs with upgrade levels for external non-combat decisions.",
-  "version": "1.1.0",
+  "description": "Exposes game state, visible current-boss context, and structured card-reward IDs for external non-combat decisions.",
+  "version": "1.2.0",
   "dependencies": ["basemod"],
   "entry_point": "com.example.communicationmod.CommunicationMod",
   "credits": ""

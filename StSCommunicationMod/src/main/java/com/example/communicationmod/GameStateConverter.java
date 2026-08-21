@@ -16,6 +16,8 @@ import com.megacrit.cardcrawl.potions.PotionSlot;
 import com.megacrit.cardcrawl.powers.AbstractPower;
 import com.megacrit.cardcrawl.relics.AbstractRelic;
 import com.megacrit.cardcrawl.rooms.AbstractRoom;
+import com.megacrit.cardcrawl.rooms.MonsterRoomBoss;
+import com.megacrit.cardcrawl.rooms.TreasureRoomBoss;
 import com.megacrit.cardcrawl.screens.select.GridCardSelectScreen;
 import com.megacrit.cardcrawl.ui.buttons.GridSelectConfirmButton;
 import com.megacrit.cardcrawl.ui.buttons.EndTurnButton;
@@ -102,6 +104,7 @@ public class GameStateConverter {
 
         // Screen Info
         ChoiceScreenUtils.ChoiceType currentChoiceType = ChoiceScreenUtils.getCurrentChoiceType();
+        state.put("visible_boss", getVisibleBoss());
         state.put("screen_type", currentChoiceType.name());
         state.put("choice_list", ChoiceScreenUtils.getCurrentChoiceList());
         state.put("can_proceed", ChoiceScreenUtils.isConfirmButtonAvailable());
@@ -204,6 +207,29 @@ public class GameStateConverter {
         System.out.println("State Summary: Floor=" + AbstractDungeon.floorNum + ", HP=" + AbstractDungeon.player.currentHealth + 
                            ", Screen=" + state.get("screen_type") + ", EndTurnEnabled=" + isEndTurnButtonEnabled);
         return json;
+    }
+
+    /**
+     * Returns only the boss a player can see at this decision point.  Never expose
+     * AbstractDungeon.bossList: on A20 it contains a still-hidden second Act III boss.
+     */
+    private static String getVisibleBoss() {
+        if (!CardCrawlGame.isInARun() || AbstractDungeon.floorNum == 0) {
+            return "NO_BOSS";
+        }
+        AbstractRoom room = AbstractDungeon.getCurrRoom();
+        if (room == null || room instanceof TreasureRoomBoss) {
+            return "NO_BOSS";
+        }
+        // A completed boss encounter can still show its rare-card reward.  The next
+        // Act's boss has not been generated or revealed at that point.
+        if (room instanceof MonsterRoomBoss && room.phase == AbstractRoom.RoomPhase.COMPLETE) {
+            return "NO_BOSS";
+        }
+        if (AbstractDungeon.actNum == 4) {
+            return "Corrupt Heart";
+        }
+        return AbstractDungeon.bossKey == null ? "NO_BOSS" : AbstractDungeon.bossKey;
     }
 
     private static List<Map<String, Object>> convertCardGroup(ArrayList<AbstractCard> cards) {

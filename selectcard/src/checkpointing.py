@@ -1,16 +1,18 @@
 import torch
 
 try:
-    from .data_contract import VALUE_COMPONENT_NAMES
+    from .data_contract import VALUE_COMPONENT_NAMES, BOSS_SCHEMA_VERSION
     from .encoding import PREPROCESSING_VERSION, ItemVocabulary
     from .dataset import GlobalFeatureEncoder
+    from .boss_context import BOSS_VOCABULARY, NUM_BOSS_IDS
 except ImportError:
-    from data_contract import VALUE_COMPONENT_NAMES
+    from data_contract import VALUE_COMPONENT_NAMES, BOSS_SCHEMA_VERSION
     from encoding import PREPROCESSING_VERSION, ItemVocabulary
     from dataset import GlobalFeatureEncoder
+    from boss_context import BOSS_VOCABULARY, NUM_BOSS_IDS
 
 
-CHECKPOINT_FORMAT_VERSION = 5
+CHECKPOINT_FORMAT_VERSION = 6
 LEGACY_VALUE_TARGET_ERROR = (
     "Checkpoint uses legacy single-act value target. "
     "Rebuild processed_data_v2 and retrain the multi-horizon value model."
@@ -23,6 +25,8 @@ def create_checkpoint(model, model_config, vocabulary, feature_encoder, metadata
         "preprocessing_version": PREPROCESSING_VERSION,
         "value_components": list(VALUE_COMPONENT_NAMES),
         "global_feature_schema_version": feature_encoder.schema_version,
+        "boss_schema_version": BOSS_SCHEMA_VERSION,
+        "boss_vocabulary": dict(BOSS_VOCABULARY),
         "model_config": dict(model_config),
         "model_state_dict": model.state_dict(),
         "vocabulary": vocabulary.to_dict(),
@@ -57,12 +61,18 @@ def load_checkpoint(path, map_location="cpu"):
         "global_feature_schema_version",
         "global_feature_encoder",
         "value_components",
+        "boss_schema_version",
+        "boss_vocabulary",
     }
     missing = required.difference(checkpoint)
     if missing:
         raise ValueError(f"Incomplete checkpoint; missing: {sorted(missing)}")
     if tuple(checkpoint["value_components"]) != VALUE_COMPONENT_NAMES:
         raise ValueError(LEGACY_VALUE_TARGET_ERROR)
+    if checkpoint["boss_schema_version"] != BOSS_SCHEMA_VERSION or checkpoint["boss_vocabulary"] != BOSS_VOCABULARY:
+        raise ValueError("Checkpoint boss schema is incompatible; retraining required")
+    if checkpoint["model_config"].get("num_bosses") != NUM_BOSS_IDS:
+        raise ValueError("Checkpoint boss vocabulary size is incompatible; retraining required")
     if checkpoint["global_feature_schema_version"] != GlobalFeatureEncoder.schema_version:
         raise ValueError("Checkpoint global feature schema is incompatible")
     vocabulary = ItemVocabulary.from_dict(checkpoint["vocabulary"])

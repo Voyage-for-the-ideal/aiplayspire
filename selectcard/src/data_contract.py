@@ -1,8 +1,9 @@
 import math
 
 
-PREPROCESSING_VERSION = "set-transformer-v4-multi-horizon"
+PREPROCESSING_VERSION = "set-transformer-v5-visible-boss"
 FILTER_VERSION = "standard-vanilla-v1"
+BOSS_SCHEMA_VERSION = "visible-boss-v1"
 
 VALUE_COMPONENT_NAMES = ("reach17", "reach34", "reach50", "win")
 HORIZON_BOUNDARIES = (17, 34, 50)

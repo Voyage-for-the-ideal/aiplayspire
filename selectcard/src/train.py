@@ -171,6 +171,10 @@ def _classification_metrics(labels, probabilities):
 
 
 def model_config(vocab_size):
+    try:
+        from .boss_context import NUM_BOSS_IDS
+    except ImportError:
+        from boss_context import NUM_BOSS_IDS
     return {
         "vocab_size": vocab_size,
         "max_upgrade": Config.MAX_UPGRADE,
@@ -179,6 +183,7 @@ def model_config(vocab_size):
         "n_heads": Config.N_HEADS,
         "n_layers": Config.N_LAYERS,
         "num_global_features": Config.NUM_GLOBAL_FEATURES,
+        "num_bosses": NUM_BOSS_IDS,
         "dropout": Config.DROPOUT,
         "global_conditioning": Config.GLOBAL_CONDITIONING,
         "norm_position": Config.NORM_POSITION,
@@ -208,14 +213,14 @@ def evaluate(model, loader, device, progress=None, name="Evaluation"):
     started = time.monotonic()
     last_progress = started
     with torch.no_grad():
-        for batch_index, (seq, upgrades, counts, globals_, batch_targets, batch_masks) in enumerate(
+        for batch_index, (seq, upgrades, counts, globals_, boss_ids, batch_targets, batch_masks) in enumerate(
             loader, start=1
         ):
-            seq, upgrades, counts, globals_, batch_targets, batch_masks = (
+            seq, upgrades, counts, globals_, boss_ids, batch_targets, batch_masks = (
                 value.to(device, non_blocking=device.type == "cuda")
-                for value in (seq, upgrades, counts, globals_, batch_targets, batch_masks)
+                for value in (seq, upgrades, counts, globals_, boss_ids, batch_targets, batch_masks)
             )
-            logits = model(seq, upgrades, counts, globals_)
+            logits = model(seq, upgrades, counts, globals_, boss_ids)
             raw_loss = nn.functional.binary_cross_entropy_with_logits(
                 logits, batch_targets, reduction="none"
             )
@@ -376,16 +381,16 @@ def train_model():
         log(f"Epoch {epoch + 1}/{Config.EPOCHS}: training started")
         model.train()
         running_loss = 0.0
-        for batch_index, (seq, upgrades, counts, globals_, targets, masks) in enumerate(
+        for batch_index, (seq, upgrades, counts, globals_, boss_ids, targets, masks) in enumerate(
             loaders["train"], start=1
         ):
-            seq, upgrades, counts, globals_, targets, masks = (
+            seq, upgrades, counts, globals_, boss_ids, targets, masks = (
                 value.to(device, non_blocking=device.type == "cuda")
-                for value in (seq, upgrades, counts, globals_, targets, masks)
+                for value in (seq, upgrades, counts, globals_, boss_ids, targets, masks)
             )
             optimizer.zero_grad()
             loss = weighted_bce_loss(
-                model(seq, upgrades, counts, globals_),
+                model(seq, upgrades, counts, globals_, boss_ids),
                 targets,
                 masks,
                 globals_,
