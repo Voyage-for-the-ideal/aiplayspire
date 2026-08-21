@@ -287,6 +287,33 @@ class GlobalFeatureEncoderTests(unittest.TestCase):
         self.assertEqual(len(batches), 2)
         self.assertEqual(sum(batch[0].shape[0] for batch in batches), 4)
 
+    def test_missing_visible_boss_column_is_rejected(self):
+        frame = pd.DataFrame(
+            [
+                {
+                    "run_id": "run-1",
+                    "split": "train",
+                    **supervision_fields(),
+                    "preprocessing_version": PREPROCESSING_VERSION,
+                    "filter_version": FILTER_VERSION,
+                    "ascension_band": 0,
+                    "floor": 1,
+                    "hp": 70.0,
+                    "max_hp": 80.0,
+                    "gold": 99.0,
+                    "ascension": 0,
+                    "deck": "Bash",
+                    "relics": "Burning Blood",
+                }
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            frame.to_parquet(
+                os.path.join(directory, "train_valid_chunk_00000.parquet")
+            )
+            with self.assertRaisesRegex(ValueError, "visible_boss"):
+                build_training_artifacts(directory)
+
 
 class ModelTests(unittest.TestCase):
     def test_training_report_is_written(self):

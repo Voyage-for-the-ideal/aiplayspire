@@ -6,8 +6,8 @@ import unittest
 import pandas as pd
 
 from boss_context import (
-    BOSS_SCHEMA_VERSION, BOSS_VOCABULARY, NO_BOSS, UNKNOWN_BOSS, boss_id,
-    boss_name, canonicalize_boss_name,
+    BOSS_SCHEMA_VERSION, BOSS_VOCABULARY, NO_BOSS, UNKNOWN_BOSS, BossContextResolver,
+    boss_id, boss_name, canonicalize_boss_name,
 )
 from enrich_boss_context import enrich_processed_dataset, visible_boss_for_sample
 
@@ -36,6 +36,52 @@ class BossContextTests(unittest.TestCase):
         self.assertEqual(visible_boss_for_sample(8, "card_reward", 1, context), "Hexaghost")
         self.assertEqual(visible_boss_for_sample(8, "card_reward", 14, context), "Hexaghost")
         self.assertEqual(visible_boss_for_sample(8, "card_reward", 15, context), "Hexaghost")
+
+    def test_resolution_never_reads_run_outcomes(self):
+        # Plan section 31: two runs with the same seed must resolve to the same
+        # visible boss even when one dies early and the other reaches the boss.
+        # The feature path may never consult damage_taken, victory, killed_by,
+        # or floor_reached to decide boss identity.
+        base = {"seed_played": "42", "ascension_level": 20, "is_ascension_mode": True}
+        dead_run = {
+            **base, "floor_reached": 8,
+            "damage_taken": [{"floor": 4, "enemies": "Gremlin Nob", "damage": 12}],
+            "victory": False, "killed_by": "Gremlin Nob",
+        }
+        boss_run = {
+            **base, "floor_reached": 16,
+            "damage_taken": [{"floor": 16, "enemies": "Hexaghost", "damage": 0}],
+            "victory": False, "killed_by": "Hexaghost",
+        }
+        dead_context = BossContextResolver().resolve_run(dead_run)
+        boss_context = BossContextResolver().resolve_run(boss_run)
+        self.assertEqual(dead_context, boss_context)
+        self.assertEqual(
+            visible_boss_for_sample(8, "card_reward", 20, dead_context),
+            visible_boss_for_sample(8, "card_reward", 20, boss_context),
+        )
+        # And the rule applied to the survived run is identical.
+        self.assertEqual(
+            visible_boss_for_sample(15, "card_reward", 20, boss_context),
+            dead_context["act1_boss"],
+        )
+
+    def test_resolution_is_deterministic_per_seed(self):
+        # Frozen corpus anchors: seed 42 resolves to these bosses.  Guards the
+        # resolver against RNG-port regressions and against silently returning
+        # a constant.
+        resolved = BossContextResolver().resolve_run(
+            {"seed_played": "42", "ascension_level": 20, "is_ascension_mode": True}
+        )
+        self.assertEqual(resolved["act1_boss"], "Slime Boss")
+        self.assertEqual(resolved["act2_boss"], "Automaton")
+        self.assertEqual(resolved["act3_boss"], "Donu and Deca")
+        self.assertEqual(
+            BossContextResolver().resolve_run(
+                {"seed_played": "43", "ascension_level": 20, "is_ascension_mode": True}
+            )["act1_boss"],
+            "Hexaghost",
+        )
 
     def test_enrichment_writes_new_dataset_and_rejects_unknowns(self):
         with tempfile.TemporaryDirectory() as directory:
