@@ -1,7 +1,14 @@
 """Stable, training-facing encoding for the boss currently visible to a player.
 
-This module intentionally has no access to combat telemetry.  In particular,
-``damage_taken`` is audit-only data and must never be used to create this feature.
+The player knows the boss of the Act they are in once the Act map is
+generated, so a boss combat record is already-public information, not a future
+outcome.  The sidecar job (build_boss_context.py) reads boss combats to supply
+``visible_boss`` and falls back to the seed resolver for runs that died before
+their Act's boss, so ``NO_BOSS`` never correlates with losing an Act.  This
+module itself is outcome-free: the seed resolver below consumes only
+``seed_played``, and the snapshot rules in enrich_boss_context.py consume only
+floor/decision_type/ascension.  Nothing here reads survival results
+(floor_reached, victory, killed_by, damage taken by non-boss fights).
 """
 
 import numpy as np

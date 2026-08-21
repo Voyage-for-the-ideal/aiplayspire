@@ -87,10 +87,12 @@ class BossContextTests(unittest.TestCase):
             self.assertEqual(summary["matches"].sum(), 1)
 
     def test_resolution_never_reads_run_outcomes(self):
-        # Plan section 31: two runs with the same seed must resolve to the same
-        # visible boss even when one dies early and the other reaches the boss.
-        # The feature path may never consult damage_taken, victory, killed_by,
-        # or floor_reached to decide boss identity.
+        # Two runs with the same seed must resolve to the same visible boss
+        # even when one dies early and the other reaches the boss.  The seed
+        # backfill and the per-sample rules never consult survival results
+        # (victory, killed_by, floor_reached, non-boss damage).  Boss combats
+        # themselves are read only by the sidecar's observed-source path, which
+        # extracts already-public boss identity, never survival outcomes.
         base = {"seed_played": "42", "ascension_level": 20, "is_ascension_mode": True}
         dead_run = {
             **base, "floor_reached": 8,
