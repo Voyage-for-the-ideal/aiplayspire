@@ -8,7 +8,10 @@ class Config:
     # 数据路径与构建配置
     # ==========================
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    DATA_DIR = os.path.join(BASE_DIR, "processed_data_v2")
+    # STS_DATA_DIR 让训练可指向 enrich 后的新数据集目录，而不覆盖旧数据。
+    DATA_DIR = os.environ.get(
+        "STS_DATA_DIR", os.path.join(BASE_DIR, "processed_data_v2")
+    )
     TRAIN_SPLIT = 0.8
     VAL_SPLIT = 0.1
     TEST_SPLIT = 0.1
