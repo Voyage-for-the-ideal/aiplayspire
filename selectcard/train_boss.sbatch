@@ -8,8 +8,10 @@
 # 三步流程：全量 visible_boss 构建 -> 训练 -> 推理冒烟
 # 重跑前注意：processed_data_v3_boss 若已存在会拒绝覆盖（保护旧数据），
 # 确认无误后手动删除或改名即可。
+# 不用 -u：conda 的 activate.d 钩子（libblas_mkl_activate.sh）会引用未定义的
+# MKL_INTERFACE_LAYER，nounset 模式下 conda activate 直接失败。
 
-set -euo pipefail
+set -eo pipefail
 
 export PATH="/home/scc/pb23151808/software/miniconda3/bin:$PATH"
 source /home/scc/pb23151808/software/miniconda3/etc/profile.d/conda.sh
