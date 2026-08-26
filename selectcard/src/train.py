@@ -1,3 +1,4 @@
+import math
 import os
 import random
 import time
@@ -12,7 +13,13 @@ from torch.utils.data import DataLoader
 try:
     from .checkpointing import load_checkpoint, save_checkpoint
     from .config import Config
-    from .data_contract import ASCENSION_BAND_NAMES, FILTER_VERSION, VALUE_COMPONENT_NAMES
+    from .data_contract import (
+        ASCENSION_BAND_NAMES,
+        FILTER_VERSION,
+        HAZARD_ENDPOINTS,
+        HAZARD_NAMES,
+        HAZARD_OUTPUT_DIM,
+    )
     from .dataset import (
         ChunkShuffleSampler,
         STSDataset,
@@ -23,7 +30,13 @@ try:
 except ImportError:
     from checkpointing import load_checkpoint, save_checkpoint
     from config import Config
-    from data_contract import ASCENSION_BAND_NAMES, FILTER_VERSION, VALUE_COMPONENT_NAMES
+    from data_contract import (
+        ASCENSION_BAND_NAMES,
+        FILTER_VERSION,
+        HAZARD_ENDPOINTS,
+        HAZARD_NAMES,
+        HAZARD_OUTPUT_DIM,
+    )
     from dataset import (
         ChunkShuffleSampler,
         STSDataset,
@@ -108,13 +121,85 @@ def difficulty_weights(manifest):
     return [total / (len(counts) * count) for count in counts]
 
 
-def weighted_bce_loss(logits, targets, masks, global_features, band_weights):
-    losses = nn.functional.binary_cross_entropy_with_logits(
-        logits, targets, reduction="none"
+def constant_hazard_baseline(manifest):
+    """Build calibrated constant rates from training risk-set frequencies."""
+    distributions = manifest.get("distributions", {})
+    positives = distributions.get("positive_samples_by_target", {})
+    valid = distributions.get("valid_samples_by_target", {})
+    names = (*HAZARD_NAMES, "heart_win")
+    rates = []
+    for name in names:
+        denominator = int(valid.get(name, 0))
+        numerator = int(positives.get(name, 0))
+        if denominator <= 0 or not 0 <= numerator <= denominator:
+            raise ValueError(f"Invalid training baseline counts for {name}")
+        rates.append(numerator / denominator)
+    return rates
+
+
+def hazard_predictions(logits, floors):
+    """Return hazards, cumulative progress survival, and joint Heart chance."""
+    hazard_logits = logits[:, :HAZARD_OUTPUT_DIM]
+    heart_conditional = torch.sigmoid(logits[:, HAZARD_OUTPUT_DIM])
+    hazards = torch.sigmoid(hazard_logits)
+    endpoints = torch.as_tensor(
+        HAZARD_ENDPOINTS, dtype=floors.dtype, device=floors.device
+    ).unsqueeze(0)
+    future = endpoints > floors.unsqueeze(1)
+    survival_factors = torch.where(future, 1.0 - hazards, torch.ones_like(hazards))
+    survival = torch.cumprod(survival_factors, dim=1)
+    heart_probability = survival[:, -1] * heart_conditional
+    return hazards, survival, heart_probability
+
+
+def expected_terminal_floor(survival, floors):
+    endpoints = torch.as_tensor(
+        HAZARD_ENDPOINTS, dtype=floors.dtype, device=floors.device
     )
-    sample_weights = band_weights[ascension_band_tensor(global_features)].unsqueeze(1)
-    weighted_masks = masks * sample_weights
-    return (losses * weighted_masks).sum() / masks.sum().clamp_min(1.0)
+    previous = torch.cat([endpoints.new_zeros(1), endpoints[:-1]])
+    starts = torch.maximum(previous.unsqueeze(0), floors.unsqueeze(1))
+    widths = (endpoints.unsqueeze(0) - starts).clamp_min(0.0)
+    return floors + (widths * survival).sum(dim=1)
+
+
+def weighted_hazard_loss(logits, targets, masks, floors, global_features, band_weights):
+    """Risk-set hazard NLL plus calibrated joint Heart-win BCE."""
+    hazard_targets = targets[:, :HAZARD_OUTPUT_DIM]
+    hazard_masks = masks[:, :HAZARD_OUTPUT_DIM]
+    hazard_losses = nn.functional.binary_cross_entropy_with_logits(
+        logits[:, :HAZARD_OUTPUT_DIM], hazard_targets, reduction="none"
+    )
+    sample_weights = band_weights[ascension_band_tensor(global_features)]
+    weighted_hazard_masks = hazard_masks * sample_weights.unsqueeze(1)
+    hazard_loss = (hazard_losses * weighted_hazard_masks).sum() / (
+        weighted_hazard_masks.sum().clamp_min(1.0)
+    )
+
+    heart_target = targets[:, HAZARD_OUTPUT_DIM]
+    heart_mask = masks[:, HAZARD_OUTPUT_DIM]
+    endpoints = torch.as_tensor(
+        HAZARD_ENDPOINTS, dtype=floors.dtype, device=floors.device
+    ).unsqueeze(0)
+    future = endpoints > floors.unsqueeze(1)
+    log_survival = torch.where(
+        future,
+        nn.functional.logsigmoid(-logits[:, :HAZARD_OUTPUT_DIM]),
+        torch.zeros_like(logits[:, :HAZARD_OUTPUT_DIM]),
+    ).sum(dim=1)
+    log_heart_probability = log_survival + nn.functional.logsigmoid(
+        logits[:, HAZARD_OUTPUT_DIM]
+    )
+    negative_heart_nll = -torch.log1p(
+        -torch.exp(log_heart_probability).clamp(max=1.0 - 1e-7)
+    )
+    heart_losses = torch.where(
+        heart_target.bool(), -log_heart_probability, negative_heart_nll
+    )
+    weighted_heart_mask = heart_mask * sample_weights
+    heart_loss = (heart_losses * weighted_heart_mask).sum() / (
+        weighted_heart_mask.sum().clamp_min(1.0)
+    )
+    return hazard_loss + Config.HEART_HEAD_LOSS_WEIGHT * heart_loss
 
 
 def save_training_report(history, output_path):
@@ -122,7 +207,17 @@ def save_training_report(history, output_path):
     if not history:
         return
 
-    import matplotlib
+    try:
+        import matplotlib
+    except ImportError:
+        # matplotlib is a plotting-only dependency; a server without it must
+        # not block the final test evaluation.  History stays in the log.
+        print(
+            "WARNING: matplotlib is unavailable; skipping training report PNG. "
+            "Epoch loss history remains in the training log.",
+            flush=True,
+        )
+        return
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -160,14 +255,20 @@ def save_training_report(history, output_path):
 def _classification_metrics(labels, probabilities):
     labels = np.asarray(labels)
     probabilities = np.asarray(probabilities)
-    if labels.size == 0 or np.unique(labels).size < 2:
+    if labels.size == 0:
         return {name: float("nan") for name in ("roc_auc", "pr_auc", "brier", "ece")}
-    return {
-        "roc_auc": float(roc_auc_score(labels, probabilities)),
-        "pr_auc": float(average_precision_score(labels, probabilities)),
+    metrics = {
         "brier": float(brier_score_loss(labels, probabilities)),
         "ece": expected_calibration_error(labels, probabilities),
     }
+    if np.unique(labels).size < 2:
+        metrics.update({"roc_auc": float("nan"), "pr_auc": float("nan")})
+    else:
+        metrics.update({
+            "roc_auc": float(roc_auc_score(labels, probabilities)),
+            "pr_auc": float(average_precision_score(labels, probabilities)),
+        })
+    return metrics
 
 
 def model_config(vocab_size):
@@ -203,31 +304,60 @@ def make_dataset(split, vocabulary, feature_encoder, progress=None):
     )
 
 
-def evaluate(model, loader, device, progress=None, name="Evaluation"):
+def evaluate(model, loader, device, progress=None, name="Evaluation", baseline_rates=None):
     model.eval()
     total_loss = 0.0
     targets = []
     masks = []
-    probabilities = []
+    hazard_probabilities = []
+    heart_probabilities = []
+    predicted_floors = []
+    realized_floors = []
+    snapshot_floors = []
     ascension_bands = []
     started = time.monotonic()
     last_progress = started
     with torch.no_grad():
-        for batch_index, (seq, upgrades, counts, globals_, boss_ids, batch_targets, batch_masks) in enumerate(
+        for batch_index, (
+            seq, upgrades, counts, globals_, boss_ids, floors,
+            batch_targets, batch_masks,
+        ) in enumerate(
             loader, start=1
         ):
-            seq, upgrades, counts, globals_, boss_ids, batch_targets, batch_masks = (
+            seq, upgrades, counts, globals_, boss_ids, floors, batch_targets, batch_masks = (
                 value.to(device, non_blocking=device.type == "cuda")
-                for value in (seq, upgrades, counts, globals_, boss_ids, batch_targets, batch_masks)
+                for value in (
+                    seq, upgrades, counts, globals_, boss_ids, floors,
+                    batch_targets, batch_masks,
+                )
             )
             logits = model(seq, upgrades, counts, globals_, boss_ids)
-            raw_loss = nn.functional.binary_cross_entropy_with_logits(
-                logits, batch_targets, reduction="none"
+            raw_loss = weighted_hazard_loss(
+                logits,
+                batch_targets,
+                batch_masks,
+                floors,
+                globals_,
+                torch.ones(6, dtype=torch.float32, device=device),
             )
-            total_loss += (
-                (raw_loss * batch_masks).sum() / batch_masks.sum().clamp_min(1.0)
-            ).item()
-            probabilities.extend(torch.sigmoid(logits).cpu().numpy())
+            total_loss += raw_loss.item()
+            hazards, survival, heart_probability = hazard_predictions(logits, floors)
+            future = torch.as_tensor(
+                HAZARD_ENDPOINTS, dtype=floors.dtype, device=device
+            ).unsqueeze(0) > floors.unsqueeze(1)
+            realized_factors = torch.where(
+                future,
+                1.0 - batch_targets[:, :HAZARD_OUTPUT_DIM],
+                torch.ones_like(batch_targets[:, :HAZARD_OUTPUT_DIM]),
+            )
+            realized_survival = torch.cumprod(realized_factors, dim=1)
+            hazard_probabilities.extend(hazards.cpu().numpy())
+            heart_probabilities.extend(heart_probability.cpu().numpy())
+            predicted_floors.extend(expected_terminal_floor(survival, floors).cpu().numpy())
+            realized_floors.extend(
+                expected_terminal_floor(realized_survival, floors).cpu().numpy()
+            )
+            snapshot_floors.extend(floors.cpu().numpy())
             targets.extend(batch_targets.cpu().numpy())
             masks.extend(batch_masks.cpu().numpy())
             ascension_bands.extend(
@@ -251,35 +381,153 @@ def evaluate(model, loader, device, progress=None, name="Evaluation"):
         raise ValueError("Evaluation split has no valid samples")
     metrics = {"loss": total_loss / len(loader)}
     targets_array = np.asarray(targets)
-    probabilities_array = np.asarray(probabilities)
+    hazards_array = np.asarray(hazard_probabilities)
+    heart_array = np.asarray(heart_probabilities)
     masks_array = np.asarray(masks).astype(bool)
     bands_array = np.asarray(ascension_bands)
-    metrics["components"] = {}
-    for index, component in enumerate(VALUE_COMPONENT_NAMES):
+    metrics["hazards"] = {}
+    for index, component in enumerate(HAZARD_NAMES):
         include = masks_array[:, index]
         component_metrics = _classification_metrics(
-            targets_array[include, index], probabilities_array[include, index]
+            targets_array[include, index], hazards_array[include, index]
         )
         component_metrics["samples"] = int(include.sum())
-        metrics["components"][component] = component_metrics
+        metrics["hazards"][component] = component_metrics
+    heart_include = masks_array[:, HAZARD_OUTPUT_DIM]
+    metrics["heart_win"] = _classification_metrics(
+        targets_array[heart_include, HAZARD_OUTPUT_DIM], heart_array[heart_include]
+    )
+    metrics["heart_win"]["samples"] = int(heart_include.sum())
+    predicted_floors_array = np.asarray(predicted_floors)
+    realized_floors_array = np.asarray(realized_floors)
+    metrics["terminal_floor_mae"] = float(
+        np.abs(predicted_floors_array[heart_include] - realized_floors_array[heart_include]).mean()
+    )
+    if baseline_rates is not None:
+        baseline = np.clip(np.asarray(baseline_rates, dtype=np.float64), 1e-7, 1.0 - 1e-7)
+        if baseline.shape != (HAZARD_OUTPUT_DIM + 1,):
+            raise ValueError("constant baseline must define every hazard and Heart rate")
+        hazard_targets = targets_array[:, :HAZARD_OUTPUT_DIM]
+        hazard_masks = masks_array[:, :HAZARD_OUTPUT_DIM]
+        element_nll = -(
+            hazard_targets * np.log(baseline[:HAZARD_OUTPUT_DIM])
+            + (1.0 - hazard_targets) * np.log(1.0 - baseline[:HAZARD_OUTPUT_DIM])
+        )
+        hazard_nll = float(element_nll[hazard_masks].mean())
+        heart_targets = targets_array[heart_include, HAZARD_OUTPUT_DIM]
+        heart_rate = baseline[HAZARD_OUTPUT_DIM]
+        heart_nll = float(
+            -(
+                heart_targets * np.log(heart_rate)
+                + (1.0 - heart_targets) * np.log(1.0 - heart_rate)
+            ).mean()
+        )
+        baseline_hazards = np.broadcast_to(
+            baseline[:HAZARD_OUTPUT_DIM], hazards_array.shape
+        )
+        endpoints = np.asarray(HAZARD_ENDPOINTS, dtype=np.float64)
+        floors_array = np.asarray(snapshot_floors)
+        future = endpoints[None, :] > floors_array[:, None]
+        factors = np.where(future, 1.0 - baseline_hazards, 1.0)
+        baseline_survival = np.cumprod(factors, axis=1)
+        previous = np.concatenate(([0.0], endpoints[:-1]))
+        widths = np.maximum(
+            endpoints[None, :] - np.maximum(previous[None, :], floors_array[:, None]),
+            0.0,
+        )
+        baseline_floors = floors_array + (widths * baseline_survival).sum(axis=1)
+        metrics["constant_baseline"] = {
+            "loss": hazard_nll + Config.HEART_HEAD_LOSS_WEIGHT * heart_nll,
+            "hazard_nll": hazard_nll,
+            "heart_nll": heart_nll,
+            "terminal_floor_mae": float(
+                np.abs(
+                    baseline_floors[heart_include] - realized_floors_array[heart_include]
+                ).mean()
+            ),
+        }
     metrics["by_ascension_band"] = {}
     for band, name in enumerate(ASCENSION_BAND_NAMES):
         include = bands_array == band
         if include.any():
             band_metrics = {}
-            for index, component in enumerate(VALUE_COMPONENT_NAMES):
+            for index, component in enumerate(HAZARD_NAMES):
                 component_include = include & masks_array[:, index]
                 values = _classification_metrics(
-                    targets_array[component_include, index],
-                    probabilities_array[component_include, index],
+                    targets_array[component_include, index], hazards_array[component_include, index],
                 )
                 values["samples"] = int(component_include.sum())
                 band_metrics[component] = values
+            heart_band_include = include & heart_include
+            heart_values = _classification_metrics(
+                targets_array[heart_band_include, HAZARD_OUTPUT_DIM],
+                heart_array[heart_band_include],
+            )
+            heart_values["samples"] = int(heart_band_include.sum())
+            band_metrics["heart_win"] = heart_values
             metrics["by_ascension_band"][name] = band_metrics
     return metrics
 
 
-def train_model():
+def finish_training(
+    model,
+    loaders,
+    device,
+    log,
+    best_path,
+    final_path,
+    manifest,
+    raw_band_weights,
+    architecture,
+    vocabulary,
+    feature_encoder,
+    baseline_rates,
+    history,
+):
+    """Save the training report, then evaluate the best checkpoint on test.
+
+    Shared by the full training run and ``--test-only`` so a crashed report
+    step never blocks the final test evaluation.
+    """
+    report_path = os.path.join(Config.CHECKPOINT_DIR, Config.TRAINING_REPORT_NAME)
+    save_training_report(history, report_path)
+    log(f"Saved training report to {report_path}")
+    log(f"Loading best checkpoint from {best_path}")
+    best_checkpoint, _, _ = load_checkpoint(best_path, map_location=device)
+    model.load_state_dict(best_checkpoint["model_state_dict"])
+    log("Test evaluation started")
+    test_metrics = evaluate(
+        model,
+        loaders["test"],
+        device,
+        progress=log,
+        name="Test",
+        baseline_rates=baseline_rates,
+    )
+    save_checkpoint(
+        final_path,
+        model,
+        architecture,
+        vocabulary,
+        feature_encoder,
+        {
+            "seed": Config.RANDOM_SEED,
+            "test_metrics": test_metrics,
+            "dataset": {
+                "filter_version": FILTER_VERSION,
+                "content_catalog": manifest["content_catalog"],
+                "train_valid_samples_by_ascension_band": manifest[
+                    "distributions"
+                ]["train_valid_samples_by_ascension_band"],
+                "difficulty_weights": raw_band_weights,
+            },
+        },
+    )
+    log(f"Test metrics: {test_metrics}")
+    log(f"Saved v6 bucket-hazard checkpoints to {Config.CHECKPOINT_DIR}")
+
+
+def train_model(test_only=False):
     started = time.monotonic()
 
     def log(message):
@@ -361,9 +609,27 @@ def train_model():
         f"{sum(p.numel() for p in model.parameters()):,} parameters"
     )
     optimizer = optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE, weight_decay=0.01)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=Config.EPOCHS)
+    decay_epochs = Config.COSINE_DECAY_EPOCHS or Config.EPOCHS
+    min_lr_ratio = Config.LR_MIN_RATIO
+    if not isinstance(decay_epochs, int) or decay_epochs <= 0:
+        raise ValueError("COSINE_DECAY_EPOCHS must be a positive integer or None")
+    if not 0.0 <= min_lr_ratio <= 1.0:
+        raise ValueError("LR_MIN_RATIO must be between 0 and 1")
+
+    def cosine_decay(epoch):
+        progress = min(epoch, decay_epochs) / decay_epochs
+        return min_lr_ratio + (1.0 - min_lr_ratio) * 0.5 * (
+            1.0 + math.cos(math.pi * progress)
+        )
+
+    scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=cosine_decay)
+    log(
+        f"Learning rate: base={Config.LEARNING_RATE}; "
+        f"cosine_decay_epochs={decay_epochs}; min_ratio={min_lr_ratio}"
+    )
     raw_band_weights = difficulty_weights(manifest)
     band_weights = torch.tensor(raw_band_weights, dtype=torch.float32, device=device)
+    baseline_rates = constant_hazard_baseline(manifest)
 
     os.makedirs(Config.CHECKPOINT_DIR, exist_ok=True)
     best_path = os.path.join(Config.CHECKPOINT_DIR, "best_" + Config.CHECKPOINT_NAME)
@@ -371,6 +637,25 @@ def train_model():
     best_val_loss = float("inf")
     patience_counter = 0
     history = []
+
+    if test_only:
+        log("Test-only mode: skipping the training loop")
+        finish_training(
+            model,
+            loaders,
+            device,
+            log,
+            best_path,
+            final_path,
+            manifest,
+            raw_band_weights,
+            architecture,
+            vocabulary,
+            feature_encoder,
+            baseline_rates,
+            history=[],
+        )
+        return
 
     for epoch in range(Config.EPOCHS):
         learning_rate = optimizer.param_groups[0]["lr"]
@@ -381,18 +666,23 @@ def train_model():
         log(f"Epoch {epoch + 1}/{Config.EPOCHS}: training started")
         model.train()
         running_loss = 0.0
-        for batch_index, (seq, upgrades, counts, globals_, boss_ids, targets, masks) in enumerate(
+        for batch_index, (
+            seq, upgrades, counts, globals_, boss_ids, floors, targets, masks,
+        ) in enumerate(
             loaders["train"], start=1
         ):
-            seq, upgrades, counts, globals_, boss_ids, targets, masks = (
+            seq, upgrades, counts, globals_, boss_ids, floors, targets, masks = (
                 value.to(device, non_blocking=device.type == "cuda")
-                for value in (seq, upgrades, counts, globals_, boss_ids, targets, masks)
+                for value in (
+                    seq, upgrades, counts, globals_, boss_ids, floors, targets, masks,
+                )
             )
             optimizer.zero_grad()
-            loss = weighted_bce_loss(
+            loss = weighted_hazard_loss(
                 model(seq, upgrades, counts, globals_, boss_ids),
                 targets,
                 masks,
+                floors,
                 globals_,
                 band_weights,
             )
@@ -429,11 +719,13 @@ def train_model():
             device,
             progress=log,
             name=f"Epoch {epoch + 1}/{Config.EPOCHS} validation",
+            baseline_rates=baseline_rates,
         )
         train_loss = running_loss / len(loaders["train"])
         log(
             f"Epoch {epoch + 1}/{Config.EPOCHS}: train_loss={train_loss:.4f} "
-            f"val_loss={val_metrics['loss']:.4f} components={val_metrics['components']}"
+            f"val_loss={val_metrics['loss']:.4f} hazards={val_metrics['hazards']} "
+            f"heart={val_metrics['heart_win']}"
         )
         metadata = {
             "epoch": epoch + 1,
@@ -473,38 +765,34 @@ def train_model():
                 )
                 break
 
-    report_path = os.path.join(Config.CHECKPOINT_DIR, Config.TRAINING_REPORT_NAME)
-    save_training_report(history, report_path)
-    log(f"Saved training report to {report_path}")
-    log(f"Loading best checkpoint from {best_path}")
-    best_checkpoint, _, _ = load_checkpoint(best_path, map_location=device)
-    model.load_state_dict(best_checkpoint["model_state_dict"])
-    log("Test evaluation started")
-    test_metrics = evaluate(
-        model, loaders["test"], device, progress=log, name="Test"
-    )
-    save_checkpoint(
-        final_path,
+    finish_training(
         model,
+        loaders,
+        device,
+        log,
+        best_path,
+        final_path,
+        manifest,
+        raw_band_weights,
         architecture,
         vocabulary,
         feature_encoder,
-        {
-            "seed": Config.RANDOM_SEED,
-            "test_metrics": test_metrics,
-            "dataset": {
-                "filter_version": FILTER_VERSION,
-                "content_catalog": manifest["content_catalog"],
-                "train_valid_samples_by_ascension_band": manifest[
-                    "distributions"
-                ]["train_valid_samples_by_ascension_band"],
-                "difficulty_weights": raw_band_weights,
-            },
-        },
+        baseline_rates,
+        history,
     )
-    log(f"Test metrics: {test_metrics}")
-    log(f"Saved v5 multi-horizon checkpoints to {Config.CHECKPOINT_DIR}")
 
 
 if __name__ == "__main__":
-    train_model()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Train the STS value network.")
+    parser.add_argument(
+        "--test-only",
+        action="store_true",
+        help=(
+            "Skip training; load the best checkpoint and run the final test "
+            "evaluation, then save the final checkpoint with test metrics."
+        ),
+    )
+    args = parser.parse_args()
+    train_model(test_only=args.test_only)
