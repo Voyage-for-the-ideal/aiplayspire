@@ -5,6 +5,7 @@ from enum import Enum
 
 class Card(BaseModel):
     index: int
+    choice_index: Optional[int] = None
     uuid: str
     id: str
     name: str
@@ -54,6 +55,21 @@ class RelicState(BaseModel):
     id: str
     name: str
     counter: int = -1
+
+
+class KeyState(BaseModel):
+    ruby: bool = False
+    emerald: bool = False
+    sapphire: bool = False
+
+
+class RewardChoice(BaseModel):
+    """Structured combat/chest reward aligned with ``choice_list`` by index."""
+    choice_index: int
+    type: str
+    relic_id: Optional[str] = None
+    key_type: Optional[str] = None
+    linked_reward_index: Optional[int] = None
 
 class MapEdgeState(BaseModel):
     x: int
@@ -116,6 +132,8 @@ class EventEffect(BaseModel):
     pattern: Optional[str] = None
     exclude_ids: List[str] = Field(default_factory=list)
     unavoidable_hp_loss: Optional[int] = None
+    final_dmg: Optional[int] = None
+    book_relics: List[str] = Field(default_factory=list)
     slot: Optional[int] = None
     revealed_card_id: Optional[str] = None
 
@@ -175,6 +193,9 @@ class GameState(BaseModel):
     screen_type: Optional[str] = "NONE"
     choice_list: Optional[List[str]] = []
     reward_card_ids: Optional[List[str]] = []
+    reward_choices: List[RewardChoice] = Field(default_factory=list)
+    grid_cards: List[Card] = Field(default_factory=list)
+    keys: KeyState = Field(default_factory=KeyState)
     can_proceed: bool = False
     can_cancel: bool = False
     grid_selected_count: int = 0

@@ -241,7 +241,30 @@ class DecisionMixin:
         if len(choices) == 0:
             return None
 
-        best = self.value_engine.recommend_choice(current_state, choices)
+        # Purge targets are constrained by the same rules as the Java shop
+        # screen.  Keep these IDs out of value-network evaluation so a curse
+        # (or a bottled card) cannot create an intent that GRID will reject.
+        never_purgeable_ids = {
+            "AscendersBane", "Necronomicurse", "CurseOfTheBell"
+        }
+        deck_by_id = {}
+        for card in getattr(state, "deck", []):
+            deck_by_id.setdefault(card.id, []).append(card)
+        legal_purge_ids = {
+            card_id for card_id, copies in deck_by_id.items()
+            if card_id not in never_purgeable_ids
+            and any(not card.is_bottled for card in copies)
+        }
+        purge_excluded_ids = set(deck_by_id) - legal_purge_ids
+        if not legal_purge_ids:
+            choices = [choice for choice in choices
+                       if choice.get("action") != "remove_card"]
+        if len(choices) == 0:
+            return None
+
+        best = self.value_engine.recommend_choice(
+            current_state, choices, exclude_purge_ids=purge_excluded_ids
+        )
         if best:
             # Store GRID intent via unified path
             self._store_grid_intent_from_choice(best, state)
@@ -272,6 +295,11 @@ class DecisionMixin:
         }
 
         choices = []
+        grid_card_ids = {
+            card.choice_index: card.id
+            for card in (getattr(state, "grid_cards", None) or [])
+            if card.choice_index is not None
+        }
         unified_choices = self._build_unified_choices(state)
         for i, (choice_text, _) in enumerate(unified_choices):
             if "skip" in choice_text.lower() or "cancel" in choice_text.lower() or "leave" in choice_text.lower():
@@ -280,7 +308,9 @@ class DecisionMixin:
                 choices.append({"action": "skip", "target": None, "index": i})
             else:
                 card_id = choice_text
-                if hasattr(state, "reward_card_ids") and state.reward_card_ids and i < len(state.reward_card_ids):
+                if i in grid_card_ids:
+                    card_id = grid_card_ids[i]
+                elif hasattr(state, "reward_card_ids") and state.reward_card_ids and i < len(state.reward_card_ids):
                     card_id = state.reward_card_ids[i]
                 else:
                     matched_card = self._find_card_for_choice(state, choice_text)
@@ -289,7 +319,10 @@ class DecisionMixin:
 
                 choices.append({"action": "pick_card", "target": card_id, "index": i})
 
-        if getattr(state, "screen_type", "") == "CARD_REWARD" or getattr(state, "can_cancel", False) or getattr(state, "can_proceed", False):
+        # Ordinary card rewards are optional. Generated-card GRID choices such
+        # as The Library are mandatory after entering the selection screen,
+        # even though the vanilla GRID happens to expose a cancel button.
+        if getattr(state, "screen_type", "") == "CARD_REWARD":
             choices.append({"action": "skip", "target": None, "index": -1})
 
         best = self.value_engine.recommend_choice(current_state, choices)
@@ -356,6 +389,11 @@ class DecisionMixin:
         event = getattr(state, "event", None)
         if event is None:
             return
+        existing_pending = getattr(self, "_pending_event", {}) or {}
+        cursed_book_path = (
+            bool(existing_pending.get("cursed_tome_book_path"))
+            and existing_pending.get("event_id") == event.id
+        )
         choice = next(
             (item for item in event.choices if item.enabled and item.action_index == action_index),
             None,
@@ -369,6 +407,10 @@ class DecisionMixin:
             "followup": choice.followup,
             "floor": state.floor,
         }
+        if cursed_book_path:
+            for key in ("cursed_tome_book_path", "cursed_tome_final_dmg", "cursed_tome_book_relics"):
+                if key in existing_pending:
+                    pending[key] = existing_pending[key]
         self._pending_event = pending
 
         select_effect = None
@@ -381,12 +423,31 @@ class DecisionMixin:
             return
 
         purpose = (select_effect.purpose or "").lower()
+        requested_count = select_effect.count or 1
+
+        # A queued event choice can remain visible for another polling frame.
+        # Preserve the target selected by recommend_choice() instead of replacing
+        # it with an unscoped whole-deck ranking from that transitional frame.
+        existing_grid = getattr(self, "_pending_grid", None)
+        if (
+            existing_grid
+            and existing_grid.get("purpose") == purpose
+            and existing_grid.get("target_ids")
+            and len(existing_grid["target_ids"]) >= requested_count
+            and existing_grid.get("event_id") in (None, event.id)
+        ):
+            existing_grid.update({
+                "event_id": event.id,
+                "event_phase": event.phase,
+                "num_to_select": requested_count,
+            })
+            return
+
         target_ids = []
         best = best or {}
         for key in ("_purge_intent_id", "_smith_intent_id", "_duplicate_intent_id"):
             if best.get(key):
                 target_ids.append(best[key])
-        requested_count = select_effect.count or 1
         if self.value_engine is not None and len(target_ids) < requested_count:
             if event.class_name == "Bonfire":
                 target_ids = self._rank_bonfire_targets(state)
@@ -505,6 +566,10 @@ class DecisionMixin:
 
         if event.class_name == "GremlinMatchGame" and event.phase == "PLAY":
             return self._get_match_game_decision(state)
+        if event.class_name == "CursedTome":
+            action = self._get_cursed_tome_decision(state)
+            if action is not None:
+                return action
 
         enabled = [choice for choice in event.choices if choice.enabled and choice.action_index is not None]
         if event.decision_kind == "FORCED" and len(enabled) == 1:
@@ -547,6 +612,146 @@ class DecisionMixin:
 
         if event.decision_kind == "COMPLEX":
             return self._get_safe_complex_event_rule(state)
+        return None
+
+    def _get_cursed_tome_decision(self, state: GameState) -> Optional[GameAction]:
+        if state.event is None or self.value_engine is None:
+            return None
+        event = state.event
+        phase = event.phase
+        pending = getattr(self, "_pending_event", {}) or {}
+        if phase == "INTRO":
+            read_choice = None
+            leave_choice = None
+            commit_effect = None
+            for choice in event.choices:
+                if not choice.enabled or choice.action_index is None:
+                    continue
+                if len(choice.outcomes) != 1:
+                    continue
+                effects = choice.outcomes[0].effects
+                commit = next((effect for effect in effects if effect.type == "commit_reading"), None)
+                if commit is not None:
+                    read_choice = choice
+                    commit_effect = commit
+                elif any(effect.type == "gain_hp" for effect in effects) or not effects:
+                    leave_choice = choice
+
+            if read_choice is None or leave_choice is None:
+                return None
+
+            unavoidable = commit_effect.unavoidable_hp_loss
+            if unavoidable is None:
+                return None
+            final_dmg = commit_effect.final_dmg or 0
+            total_read_cost = unavoidable + final_dmg
+            if total_read_cost >= state.player.current_hp:
+                return GameAction(type=ActionType.CHOOSE, choice_index=leave_choice.action_index)
+
+            current = self._event_current_state(state)
+            mandatory_losses = [{"type": "lose_hp", "amount": total_read_cost}]
+            leave_score = self.value_engine.evaluate_state(current)
+            candidates = list(commit_effect.book_relics or [])
+            if not candidates:
+                candidates = ["Necronomicon", "Enchiridion", "Nilry's Codex", "Circlet"]
+
+            read_scores = []
+            for relic_id in candidates:
+                effects = list(mandatory_losses)
+                effects.extend([{"type": "obtain_relic", "relic_id": relic_id}])
+                if relic_id == "Necronomicon":
+                    effects.append({"type": "add_card", "card_id": "Necronomicurse", "amount": 1})
+                continuation = self.value_engine._apply_choice(current, {"action": "composite_event", "effects": effects})
+                read_scores.append(self.value_engine.evaluate_state(continuation))
+            read_score = sum(read_scores) / max(1, len(read_scores))
+
+            if read_score <= leave_score:
+                self._remember_event_followup(state, leave_choice.action_index)
+                return GameAction(type=ActionType.CHOOSE, choice_index=leave_choice.action_index)
+
+            self._remember_event_followup(state, read_choice.action_index)
+            pending = getattr(self, "_pending_event", {}) or {}
+            pending["cursed_tome_book_path"] = True
+            pending["cursed_tome_final_dmg"] = final_dmg
+            pending["cursed_tome_book_relics"] = candidates
+            self._pending_event = pending
+            return GameAction(type=ActionType.CHOOSE, choice_index=read_choice.action_index)
+
+        if phase in ("PAGE_1", "PAGE_2", "PAGE_3"):
+            if not pending.get("cursed_tome_book_path"):
+                return None
+            for choice in event.choices:
+                if choice.enabled and choice.action_index is not None and self._is_safe_event_action_index(
+                        state, choice.action_index):
+                    self._remember_event_followup(state, choice.action_index)
+                    return GameAction(type=ActionType.CHOOSE, choice_index=choice.action_index)
+            return None
+
+        if phase == "LAST_PAGE":
+            if pending.get("cursed_tome_book_path"):
+                for choice in event.choices:
+                    if choice.enabled and choice.action_index is not None and any(
+                            effect.type == "random_relic" for effect in
+                            (choice.outcomes[0].effects if choice.outcomes else [])):
+                        self._remember_event_followup(state, choice.action_index)
+                        return GameAction(type=ActionType.CHOOSE, choice_index=choice.action_index)
+                return None
+
+            current = self._event_current_state(state)
+            leave_choice = None
+            read_choice = None
+            for choice in event.choices:
+                if not choice.enabled or choice.action_index is None or not choice.outcomes:
+                    continue
+                outcome = choice.outcomes[0]
+                if any(effect.type == "random_relic" for effect in outcome.effects):
+                    read_choice = choice
+                elif any(effect.type == "lose_hp" for effect in outcome.effects):
+                    leave_choice = choice
+            if leave_choice is None or read_choice is None:
+                return None
+            leave_effects = self._event_choice_effects(leave_choice)
+            leave_state = self.value_engine._apply_choice(
+                current, {"action": "composite_event", "effects": leave_effects}
+            )
+            leave_score = self.value_engine.evaluate_state(leave_state)
+
+            read_effects = self._event_choice_effects(read_choice)
+            final_dmg = next(
+                (effect.get("amount", 0) or 0 for effect in read_effects if effect.get("type") == "lose_hp"),
+                None,
+            ) or 0
+            if final_dmg >= state.player.current_hp:
+                self._remember_event_followup(state, leave_choice.action_index)
+                return GameAction(type=ActionType.CHOOSE, choice_index=leave_choice.action_index)
+
+            candidates = pending.get("cursed_tome_book_relics")
+            if not candidates:
+                owned_relics = {relic.id for relic in getattr(state, "relics", [])}
+                candidates = [relic for relic in ("Necronomicon", "Enchiridion", "Nilry's Codex") if relic not in owned_relics]
+                if not candidates:
+                    candidates = ["Circlet"]
+            read_scores = []
+            for relic_id in candidates:
+                effects = [{"type": "lose_hp", "amount": final_dmg}, {"type": "obtain_relic", "relic_id": relic_id}]
+                if relic_id == "Necronomicon":
+                    effects.append({"type": "add_card", "card_id": "Necronomicurse", "amount": 1})
+                simulated = self.value_engine._apply_choice(current, {"action": "composite_event", "effects": effects})
+                read_scores.append(self.value_engine.evaluate_state(simulated))
+            read_avg = sum(read_scores) / max(1, len(read_scores))
+
+            if leave_score >= read_avg:
+                self._remember_event_followup(state, leave_choice.action_index)
+                return GameAction(type=ActionType.CHOOSE, choice_index=leave_choice.action_index)
+
+            self._remember_event_followup(state, read_choice.action_index)
+            pending = getattr(self, "_pending_event", {}) or {}
+            pending["cursed_tome_book_path"] = True
+            pending["cursed_tome_final_dmg"] = final_dmg
+            pending["cursed_tome_book_relics"] = candidates
+            self._pending_event = pending
+            return GameAction(type=ActionType.CHOOSE, choice_index=read_choice.action_index)
+
         return None
 
     def _get_match_game_decision(self, state: GameState) -> GameAction:
@@ -725,8 +930,6 @@ class DecisionMixin:
                 "effects": [{"type": "obtain_relic", "relic_id": relic_id}],
                 "index": i,
             })
-
-        choices.append({"action": "skip", "target": None, "index": -1})
 
         best = self.value_engine.recommend_choice(current_state, choices)
         if best:

@@ -33,6 +33,13 @@ class ActionMixin:
         if state.screen_type == "REST":
             return self._handle_rest_room(state)
 
+        # Structured map data is sufficient for a local deterministic route;
+        # retain the LLM path for older/partial Communication Mod payloads.
+        if state.screen_type == "MAP":
+            map_action = self._get_deterministic_map_action(state)
+            if map_action is not None:
+                return map_action
+
         # Prefer locale-independent structured event semantics. Text parsing remains
         # available only for older servers which do not expose state.event.
         if state.screen_type == "EVENT" and state.event is not None:
@@ -59,6 +66,21 @@ class ActionMixin:
                 if choice_list and "talk" in str(choice_list[0]).lower():
                     print(Fore.MAGENTA + "自动跳过 Neow 开场对话..." + Style.RESET_ALL)
                     return GameAction(type=ActionType.CHOOSE, choice_index=0)
+
+            # The Library and similar events present generated card rewards in
+            # GridCardSelectScreen rather than CardRewardScreen. Their grid
+            # purpose is not a deck-operation purpose, so route them before the
+            # generic purge/upgrade/transform/duplicate handler.
+            pending_event = getattr(self, "_pending_event", None) or {}
+            generated_card_grid = (
+                getattr(state, "grid_purpose", "") == "generated_card_reward"
+                or pending_event.get("followup") == "GENERATED_CARD_GRID"
+            )
+            if generated_card_grid and self.value_engine is not None:
+                print(Fore.MAGENTA + "正在使用本地价值网络 (Value Network) 进行生成卡牌选择..." + Style.RESET_ALL)
+                action = self._get_model_card_decision(state)
+                if action is not None:
+                    return action
 
             grid_action = self._handle_grid_selection(state)
             if grid_action is not None:
@@ -126,7 +148,10 @@ class ActionMixin:
                     ],
                     response_format={"type": "json_object"},
                 )
-            except Exception:
+            except Exception as response_format_error:
+                error_text = str(response_format_error).lower()
+                if "response_format" not in error_text and "json_object" not in error_text:
+                    raise
                 response = self.llm_client.chat.completions.create(
                     model=model,
                     messages=[
@@ -229,13 +254,22 @@ class ActionMixin:
         # Step 1: Determine grid purpose and num_to_select
         purpose, target_ids, num_to_select, selected_count = self._prepare_grid_targets(state)
         if not purpose or not target_ids:
+            effective_purpose = purpose or getattr(state, "grid_purpose", None)
+            if (effective_purpose == "purge"
+                    and getattr(state, "grid_cards", None) is not None
+                    and getattr(state, "can_cancel", False)):
+                self._pending_grid = None
+                self.intended_purge_card = None
+                return GameAction(type=ActionType.CANCEL)
             return None
 
+        # CommunicationMod emits ``confirm`` only when GridSelectConfirmButton
+        # is enabled. That live UI signal is authoritative; reflected
+        # selectedCards can lag behind it by a frame.
         confirm_available = str(choice_list[0]).lower() == "confirm"
-        all_selected = selected_count >= num_to_select
 
         # Step 2: State machine for card selection
-        if confirm_available and all_selected:
+        if confirm_available:
             # All cards selected, click confirm to finalize
             print(Fore.MAGENTA +
                 f"GRID操作完成 ({purpose}), 点击确认..." +
@@ -248,6 +282,18 @@ class ActionMixin:
         # Still need to select more cards
         if selected_count < num_to_select and selected_count < len(target_ids):
             card_to_select = target_ids[selected_count]
+
+            # Prefer the structured, locale-independent GRID metadata.  It also
+            # represents the exact legal target set, unlike the player's deck.
+            for card in getattr(state, "grid_cards", None) or []:
+                if card.id == card_to_select and card.choice_index is not None:
+                    if hasattr(self, "_pending_grid") and self._pending_grid:
+                        self._pending_grid["selected_count"] = selected_count + 1
+                    print(Fore.MAGENTA +
+                        f"GRID选择 [{selected_count + 1}/{num_to_select}] ({purpose}): {card.name}" +
+                        Style.RESET_ALL)
+                    return GameAction(type=ActionType.CHOOSE, choice_index=card.choice_index)
+
             target_name = None
             for card in state.deck:
                 if card.id == card_to_select:
@@ -310,11 +356,23 @@ class ActionMixin:
         selected_count = getattr(state, "grid_selected_count", 0) or 0
 
         pending = getattr(self, "_pending_grid", None)
+        stale_purge_target = False
         if pending and pending.get("purpose") == purpose:
             target_ids = pending.get("target_ids", [])
             # num_to_select from pending takes priority if set
             if pending.get("num_to_select"):
                 num_to_select = pending["num_to_select"]
+
+            # The structured GRID list is authoritative.  A shop decision can
+            # have been made against a previous deck snapshot, so discard a
+            # stale purge intent and rerank using only cards actually offered.
+            if purpose == "purge" and getattr(state, "grid_cards", None) is not None:
+                legal_grid_ids = {card.id for card in state.grid_cards}
+                if (not target_ids
+                        or any(card_id not in legal_grid_ids for card_id in target_ids)):
+                    target_ids = []
+                    stale_purge_target = True
+                    pending["target_ids"] = []
 
         # Backward compat: old single-card flags
         if not target_ids:
@@ -326,7 +384,8 @@ class ActionMixin:
                     "num_to_select": num_to_select,
                     "selected_count": 0,
                 }
-            elif purpose == "purge" and getattr(self, "intended_purge_card", None):
+            elif (purpose == "purge" and not stale_purge_target
+                  and getattr(self, "intended_purge_card", None)):
                 target_ids = [self.intended_purge_card]
                 self._pending_grid = {
                     "purpose": purpose,
@@ -351,17 +410,25 @@ class ActionMixin:
 
             # Never target non-upgradeable cards (notably Necronomicurse), and
             # keep curses out of transforms where a non-curse exists.
-            exclude_ids = None
+            exclude_ids = set()
+            grid_cards = getattr(state, "grid_cards", None)
+            if grid_cards is not None:
+                legal_ids = {card.id for card in grid_cards}
+                exclude_ids.update(card.id for card in state.deck if card.id not in legal_ids)
+                if purpose == "purge" and stale_purge_target:
+                    # Ensure ranking cannot inspect cards outside the live GRID,
+                    # even if a custom value engine ignores exclude_ids.
+                    current_state["deck"] = [card.id for card in grid_cards]
             if purpose == "transform":
-                exclude_ids = {card.id for card in state.deck if card.type == "CURSE"}
+                exclude_ids.update(card.id for card in state.deck if card.type == "CURSE")
             elif purpose == "upgrade":
-                exclude_ids = {
+                exclude_ids.update({
                     card.id for card in state.deck
                     if card.type == "CURSE" or not card.can_upgrade
-                }
+                })
 
             target_ids = self.value_engine.rank_cards_for_purpose(
-                current_state, purpose, num_to_select, exclude_ids=exclude_ids
+                current_state, purpose, num_to_select, exclude_ids=exclude_ids or None
             )
 
             if target_ids:

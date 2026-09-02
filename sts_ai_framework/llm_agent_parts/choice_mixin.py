@@ -37,6 +37,15 @@ class ChoiceMixin:
                 return GameAction(type=ActionType.PROCEED)
             return GameAction(type=ActionType.WAIT)
 
+        # Guarantee the Ruby Key during Act III. Recall is not a relic and the
+        # current value network has no key feature, so this must remain an
+        # explicit progression rule until a key-aware model is trained.
+        if state.act >= 3 and not getattr(state.keys, "ruby", False):
+            for i, choice_text in enumerate(state.choice_list):
+                if "recalloption" in str(choice_text).lower():
+                    print(Fore.MAGENTA + "尚未取得红宝石钥匙，优先在营火回忆..." + Style.RESET_ALL)
+                    return GameAction(type=ActionType.CHOOSE, choice_index=i)
+
         current_state = {
             "hp": state.player.current_hp,
             "max_hp": state.player.max_hp,
@@ -137,10 +146,50 @@ class ChoiceMixin:
 
     def _handle_combat_reward(self, state: GameState) -> GameAction:
         print(Fore.MAGENTA + "自动处理 COMBAT_REWARD (优先遗物>金币>药水>卡牌)..." + Style.RESET_ALL)
+
+        # Structured rewards are the authoritative protocol. In particular,
+        # Emerald/Sapphire keys do not have stable localized display text, and
+        # Sapphire can be linked to the relic it replaces. Claim every offered
+        # key before considering ordinary rewards or the proceed button.
+        structured_rewards = getattr(state, "reward_choices", None) or []
+        for reward in structured_rewards:
+            if reward.type.upper() == "EMERALD_KEY":
+                return GameAction(type=ActionType.CHOOSE, choice_index=reward.choice_index)
+
+        sapphire_reward = next(
+            (reward for reward in structured_rewards if reward.type.upper() == "SAPPHIRE_KEY"),
+            None,
+        )
+        if sapphire_reward is not None and self._should_take_sapphire_key(
+                state, sapphire_reward, structured_rewards):
+            return GameAction(type=ActionType.CHOOSE, choice_index=sapphire_reward.choice_index)
+
+        # Relics remain a mandatory reward before proceeding. Prefer an
+        # unlinked relic so a linked Sapphire-key alternative is not selected
+        # ahead of the key handled above.
+        linked_relic_indices = {
+            reward.linked_reward_index
+            for reward in structured_rewards
+            if reward.type.upper() == "SAPPHIRE_KEY" and reward.linked_reward_index is not None
+        }
+        for reward in structured_rewards:
+            if reward.type.upper() == "RELIC" and reward.choice_index not in linked_relic_indices:
+                return GameAction(type=ActionType.CHOOSE, choice_index=reward.choice_index)
+
+        for reward in structured_rewards:
+            if reward.type.upper() == "RELIC":
+                return GameAction(type=ActionType.CHOOSE, choice_index=reward.choice_index)
+
         if not state.choice_list:
             if state.can_proceed:
                 return GameAction(type=ActionType.PROCEED)
             return GameAction(type=ActionType.WAIT)
+
+        # Backward compatibility for an older Communication Mod which exposed
+        # key rewards only as display strings.
+        for i, choice_text in enumerate(state.choice_list):
+            if str(choice_text).strip().lower() in {"emerald_key", "sapphire_key"}:
+                return GameAction(type=ActionType.CHOOSE, choice_index=i)
 
         relics = []
         golds = []
@@ -198,6 +247,57 @@ class ChoiceMixin:
             return GameAction(type=ActionType.CANCEL)
 
         return GameAction(type=ActionType.WAIT)
+
+    def _should_take_sapphire_key(self, state, sapphire_reward, rewards) -> bool:
+        """Compare the linked relic's learned delta with a rule-valued key.
+
+        The current checkpoint has no key feature, so the key side remains an
+        explicit Act-dependent utility. The relic side still uses the local
+        value network. Act III is forced to guarantee final-act access.
+        """
+        if state.act >= 3:
+            return True
+
+        linked_index = sapphire_reward.linked_reward_index
+        linked_relic = next(
+            (reward for reward in rewards
+             if reward.choice_index == linked_index and reward.relic_id),
+            None,
+        )
+        if linked_relic is None:
+            return True
+
+        if self.value_engine is None:
+            return state.act >= 2
+
+        current_state = {
+            "hp": state.player.current_hp,
+            "max_hp": state.player.max_hp,
+            "gold": state.player.gold,
+            "floor": state.floor,
+            "ascension": 20,
+            "visible_boss": visible_boss_of(state),
+            "deck": [card.id for card in state.deck],
+            "relics": [relic.id for relic in state.relics],
+        }
+        try:
+            current_value = self.value_engine.evaluate_state(current_state)
+            relic_state = self.value_engine._apply_choice(
+                current_state,
+                {"action": "buy_relic", "target": linked_relic.relic_id, "cost": 0},
+            )
+            relic_gain = max(0.0, self.value_engine.evaluate_state(relic_state) - current_value)
+        except Exception as exc:
+            print(Fore.YELLOW + f"蓝钥匙比较失败，使用Act规则: {exc}" + Style.RESET_ALL)
+            return state.act >= 2
+
+        key_utility = 0.02 if state.act == 1 else 0.05
+        print(
+            Fore.MAGENTA
+            + f"蓝钥匙比较: key={key_utility:.4f}, relic={linked_relic.relic_id} gain={relic_gain:.4f}"
+            + Style.RESET_ALL
+        )
+        return key_utility >= relic_gain
 
     # === COMBAT MODULE DISABLED - outsourced to masterspire BattleAiMod.jar ===
     # def _choose_simple_combat_fallback(self, state: GameState) -> Optional[GameAction]:

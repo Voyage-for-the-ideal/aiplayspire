@@ -26,6 +26,10 @@ except ImportError:
 init()
 
 
+def _is_battle_owned_state(state) -> bool:
+    return state.room_phase == "COMBAT"
+
+
 def _is_action_effective(prev_state, next_state, action) -> bool:
     if next_state is None:
         return False
@@ -117,6 +121,8 @@ def main():
     # 重试计数器
     retry_count = 0
     max_retries = 10 # 增加重试次数，因为动画可能很长
+    pending_submission = None
+    pending_submission_timeout = 15.0
 
     try:
         while True:
@@ -138,11 +144,23 @@ def main():
                 sys.stdout.write("\n") # 换行
                 retry_count = 0
 
-            # COMBAT: compact single-line output, submit WAIT silently
-            if state.screen_type == "NONE" and state.room_phase == "COMBAT":
-                action = agent.choose_action(state)
-                if action:
-                    client.submit_action(action)
+            # The Mod acknowledges actions when they enter its queue, before the
+            # game necessarily consumes them.  Do not enqueue the same choice on
+            # every polling iteration while the old screen is still visible.
+            if pending_submission is not None:
+                pending_state, pending_action, submitted_at = pending_submission
+                if _is_action_effective(pending_state, state, pending_action):
+                    pending_submission = None
+                elif time.monotonic() - submitted_at < pending_submission_timeout:
+                    time.sleep(args.interval)
+                    continue
+                else:
+                    print(Fore.YELLOW + "排队动作超时且状态未变化，允许重新决策。" + Style.RESET_ALL)
+                    pending_submission = None
+
+            # COMBAT: BattleAiMod handles all combat-time decision screens,
+            # including HAND_SELECT/GRID/CARD_REWARD.
+            if _is_battle_owned_state(state):
                 sys.stdout.write(f"\r战斗进行中... (第 {state.floor} 层 | HP: {state.player.current_hp}/{state.player.max_hp} | 能量: {state.player.energy})   ")
                 sys.stdout.flush()
                 time.sleep(args.interval)
@@ -185,6 +203,8 @@ def main():
                             print(Fore.GREEN + "检测到动作已生效。" + Style.RESET_ALL)
                         else:
                             print(Fore.YELLOW + "动作已提交，但暂未观察到明显状态变化（可能仍在动画或队列处理中）。" + Style.RESET_ALL)
+                            if action.type != ActionType.WAIT:
+                                pending_submission = (pre_action_state, action, time.monotonic())
                     else:
                         print(Fore.RED + f"行动提交失败: {error_msg}" + Style.RESET_ALL)
 

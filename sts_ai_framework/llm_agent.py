@@ -6,7 +6,7 @@ from openai import OpenAI
 
 from .agent_base import Agent
 from .knowledge_base import KnowledgeBase
-from .llm_agent_parts import ActionMixin, ChoiceMixin, DecisionMixin, InfoPromptMixin
+from .llm_agent_parts import ActionMixin, ChoiceMixin, DecisionMixin, InfoPromptMixin, RouteMixin
 
 # 添加 selectcard 到 PYTHONPATH 以便导入模型
 sys.path.append(os.path.join(os.path.dirname(os.path.dirname(__file__)), "selectcard"))
@@ -16,7 +16,7 @@ except ImportError:
     STSInferenceEngine = None
 
 
-class LLMAgent(ActionMixin, DecisionMixin, InfoPromptMixin, ChoiceMixin, Agent):
+class LLMAgent(ActionMixin, DecisionMixin, InfoPromptMixin, ChoiceMixin, RouteMixin, Agent):
     def __init__(
         self,
         model_name: str = "deepseek-v4-flash",
@@ -34,7 +34,12 @@ class LLMAgent(ActionMixin, DecisionMixin, InfoPromptMixin, ChoiceMixin, Agent):
         # Initialize DeepSeek LLM client via OpenAI SDK
         api_key = os.getenv("DEEPSEEK_API_KEY", "")
         base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-        self.llm_client = OpenAI(api_key=api_key, base_url=base_url)
+        self.llm_client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=10.0,
+            max_retries=0,
+        )
 
         # 加载本地选卡决策模型
         self.value_engine = None
