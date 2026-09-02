@@ -11,11 +11,17 @@ import torch
 from torch.utils.data import Dataset, Sampler
 
 try:
-    from .data_contract import FILTER_VERSION, MASK_COLUMNS, PREPROCESSING_VERSION, TARGET_COLUMNS
+    from .data_contract import (
+        FILTER_VERSION, HAZARD_ENDPOINTS, MASK_COLUMNS, PREPROCESSING_VERSION,
+        TARGET_COLUMNS, VALUE_TARGET_SCHEMA,
+    )
     from .encoding import ItemVocabulary, encode_items, split_items
     from .boss_context import boss_id
 except ImportError:
-    from data_contract import FILTER_VERSION, MASK_COLUMNS, PREPROCESSING_VERSION, TARGET_COLUMNS
+    from data_contract import (
+        FILTER_VERSION, HAZARD_ENDPOINTS, MASK_COLUMNS, PREPROCESSING_VERSION,
+        TARGET_COLUMNS, VALUE_TARGET_SCHEMA,
+    )
     from encoding import ItemVocabulary, encode_items, split_items
     from boss_context import boss_id
 
@@ -201,6 +207,10 @@ def load_dataset_manifest(parquet_dir):
         raise ValueError("Dataset manifest preprocessing version is incompatible")
     if manifest.get("filter_version") != FILTER_VERSION:
         raise ValueError("Dataset manifest filter version is incompatible")
+    if manifest.get("value_target_schema") != VALUE_TARGET_SCHEMA:
+        raise ValueError("Dataset manifest value target is incompatible")
+    if tuple(manifest.get("hazard_endpoints", ())) != HAZARD_ENDPOINTS:
+        raise ValueError("Dataset manifest hazard endpoints are incompatible")
     return manifest
 
 
@@ -410,6 +420,7 @@ class STSDataset(Dataset):
             torch.tensor(counts, dtype=torch.long),
             torch.tensor(global_features, dtype=torch.float32),
             torch.tensor(encoded_boss, dtype=torch.long),
+            torch.tensor(float(row["floor"]), dtype=torch.float32),
             torch.tensor(targets, dtype=torch.float32),
             torch.tensor(masks, dtype=torch.float32),
         )

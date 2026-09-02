@@ -19,10 +19,14 @@ try:
     from .content_catalog import VanillaContentCatalog, canonical_card_id
     from .data_contract import (
         FILTER_VERSION,
-        HORIZON_BOUNDARIES,
+        HAZARD_ENDPOINTS,
+        HAZARD_MASK_COLUMNS,
+        HAZARD_NAMES,
+        HEART_MASK_COLUMN,
         MASK_COLUMNS,
         PREPROCESSING_VERSION,
         TARGET_COLUMNS,
+        VALUE_TARGET_SCHEMA,
         ascension_band,
     )
     from .reconstructor import RunReconstructor
@@ -31,10 +35,14 @@ except ImportError:
     from content_catalog import VanillaContentCatalog, canonical_card_id
     from data_contract import (
         FILTER_VERSION,
-        HORIZON_BOUNDARIES,
+        HAZARD_ENDPOINTS,
+        HAZARD_MASK_COLUMNS,
+        HAZARD_NAMES,
+        HEART_MASK_COLUMN,
         MASK_COLUMNS,
         PREPROCESSING_VERSION,
         TARGET_COLUMNS,
+        VALUE_TARGET_SCHEMA,
         ascension_band,
     )
     from reconstructor import RunReconstructor
@@ -79,17 +87,42 @@ def assign_split(run_id):
     return "test"
 
 
-def horizon_targets(floor, floor_reached, terminal_known, victory):
-    """Return fixed reach17/reach34/reach50/win labels and validity masks."""
+def is_heart_victory(event_data):
+    """Identify a Heart kill from the terminal combat, not from floor alone."""
+    if not bool(event_data.get("victory")):
+        return False
+    combats = event_data.get("damage_taken") or []
+    if not combats or not isinstance(combats[-1], dict):
+        return False
+    enemy = " ".join(str(combats[-1].get("enemies", "")).lower().split())
+    return enemy in {"the heart", "corrupt heart", "the corrupt heart"}
+
+
+def hazard_targets(floor, floor_reached, terminal_known, heart_victory):
+    """Return discrete stopping-hazard labels, masks, and the Heart label."""
     if floor < 0 or floor_reached < 0:
         raise ValueError("floors must be non-negative")
+    if floor > floor_reached:
+        raise ValueError("snapshot floor cannot exceed the run's reached floor")
+    effective_progress = 57 if heart_victory else floor_reached
     targets = []
     masks = []
-    for boundary in HORIZON_BOUNDARIES:
-        reached = floor_reached >= boundary
-        targets.append(int(reached))
-        masks.append(bool(reached or terminal_known))
-    targets.append(int(bool(victory)))
+    stop_recorded = False
+    for endpoint in HAZARD_ENDPOINTS:
+        if endpoint <= floor:
+            targets.append(0)
+            masks.append(False)
+        elif endpoint <= effective_progress:
+            targets.append(0)
+            masks.append(True)
+        elif terminal_known and not stop_recorded:
+            targets.append(1)
+            masks.append(True)
+            stop_recorded = True
+        else:
+            targets.append(0)
+            masks.append(False)
+    targets.append(int(bool(heart_victory)))
     masks.append(bool(terminal_known))
     return targets, masks
 
@@ -387,14 +420,15 @@ def process_run(event_data, catalog):
 
     split = assign_split(run_id)
     terminal_known = bool(recon.is_victory or recon.killed_by)
+    heart_victory = is_heart_victory(event_data)
     rows = []
     for snapshot in snapshots:
         floor = _validate_snapshot(snapshot, validated["ascension"])
-        targets, masks = horizon_targets(
+        targets, masks = hazard_targets(
             floor,
             validated["floor_reached"],
             terminal_known,
-            bool(event_data.get("victory")),
+            heart_victory,
         )
         target_fields = dict(zip(TARGET_COLUMNS, targets))
         mask_fields = dict(zip(MASK_COLUMNS, masks))
@@ -624,6 +658,9 @@ def build_dataset(
         "samples_by_split": Counter(),
         "positive_samples_by_target": Counter(),
         "valid_samples_by_target": Counter(),
+        "at_risk_samples_by_hazard": Counter(),
+        "stop_samples_by_hazard": Counter(),
+        "censored_samples_by_hazard": Counter(),
         "valid_samples_by_split": Counter(),
         "train_valid_samples_by_ascension_band": Counter(),
     }
@@ -674,6 +711,17 @@ def build_dataset(
                             dimensions["valid_samples_by_target"][target_name] += 1
                             if row[target_column]:
                                 dimensions["positive_samples_by_target"][target_name] += 1
+                    for name, mask_column in zip(HAZARD_NAMES, HAZARD_MASK_COLUMNS):
+                        if row[mask_column]:
+                            dimensions["at_risk_samples_by_hazard"][name] += 1
+                            target_column = f"target_{name}"
+                            if row[target_column]:
+                                dimensions["stop_samples_by_hazard"][name] += 1
+                        elif (
+                            not row[HEART_MASK_COLUMN]
+                            and int(name.rsplit("_", 1)[-1]) > row["floor"]
+                        ):
+                            dimensions["censored_samples_by_hazard"][name] += 1
                     target_valid = any(row[column] for column in MASK_COLUMNS)
                     if target_valid:
                         valid_sample_count += 1
@@ -699,6 +747,8 @@ def build_dataset(
         manifest = {
             "preprocessing_version": PREPROCESSING_VERSION,
             "filter_version": FILTER_VERSION,
+            "value_target_schema": VALUE_TARGET_SCHEMA,
+            "hazard_endpoints": list(HAZARD_ENDPOINTS),
             "created_at_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
             "input": {
                 "files": len(files),

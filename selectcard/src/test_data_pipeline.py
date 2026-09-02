@@ -10,7 +10,15 @@ import pandas as pd
 import torch
 
 from content_catalog import VanillaContentCatalog, canonical_card_id
-from data_contract import FILTER_VERSION, MASK_COLUMNS, PREPROCESSING_VERSION, TARGET_COLUMNS, ascension_band
+from data_contract import (
+    FILTER_VERSION,
+    HAZARD_ENDPOINTS,
+    MASK_COLUMNS,
+    PREPROCESSING_VERSION,
+    TARGET_COLUMNS,
+    VALUE_TARGET_SCHEMA,
+    ascension_band,
+)
 from data_pipeline import (
     RunRejected,
     assign_split,
@@ -21,7 +29,7 @@ from data_pipeline import (
     validate_raw_run,
 )
 from dataset import ChunkShuffleSampler, STSDataset, build_training_artifacts
-from train import dataloader_worker_count, difficulty_weights, weighted_bce_loss
+from train import dataloader_worker_count, difficulty_weights, weighted_hazard_loss
 
 
 STARTER_DECK = ["Strike_R"] * 5 + ["Defend_R"] * 4 + ["Bash"]
@@ -216,6 +224,10 @@ class DatasetBuildTests(unittest.TestCase):
 
         self.assertEqual(manifest["output"]["accepted_runs"], 1)
         self.assertEqual(stored_manifest["filter_version"], FILTER_VERSION)
+        self.assertEqual(stored_manifest["value_target_schema"], VALUE_TARGET_SCHEMA)
+        self.assertEqual(stored_manifest["hazard_endpoints"], list(HAZARD_ENDPOINTS))
+        self.assertTrue(stored_manifest["distributions"]["at_risk_samples_by_hazard"])
+        self.assertTrue(stored_manifest["distributions"]["stop_samples_by_hazard"])
         self.assertEqual(set(frame["preprocessing_version"]), {PREPROCESSING_VERSION})
         self.assertEqual(set(frame["filter_version"]), {FILTER_VERSION})
         self.assertEqual(set(frame["ascension_band"]), {0})
@@ -273,12 +285,15 @@ class DifficultyWeightingTests(unittest.TestCase):
         for contribution in contributions[1:]:
             self.assertAlmostEqual(contribution, contributions[0])
 
-        logits = torch.zeros((6, 4))
-        labels = torch.zeros((6, 4))
-        masks = torch.ones((6, 4))
+        logits = torch.zeros((6, 21))
+        labels = torch.zeros((6, 21))
+        masks = torch.ones((6, 21))
+        floors = torch.ones(6)
         globals_ = torch.zeros((6, 9))
         globals_[:, 8] = torch.tensor([0, 1, 6, 11, 16, 20]) / 20.0
-        loss = weighted_bce_loss(logits, labels, masks, globals_, torch.tensor(weights))
+        loss = weighted_hazard_loss(
+            logits, labels, masks, floors, globals_, torch.tensor(weights)
+        )
         self.assertTrue(torch.isfinite(loss))
 
 

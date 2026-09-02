@@ -7,6 +7,7 @@ This repository contains an AI-driven system for **Slay the Spire** that predict
 - **Run Reconstructor**: A "Time Machine" logic that reconstructs the state of each floor (deck, relics, gold, HP) from raw run data files.
 - **Data Pipeline**: Automated processing of large-scale Slay the Spire run data (JSON) into a format suitable for Deep Learning.
 - **Deep Learning Model**: A neural network designed to evaluate card selection decisions based on the current context (current deck, relics, floor, character, etc.).
+- **Continuous Value Target**: Predicts stopping hazards over Boss-aligned 2-3 floor buckets, then scores states by expected terminal floor plus a configurable Heart-win premium.
 - **Inference Engine**: Provides real-time or batch recommendations for card picking at any given floor.
 - **Mismatch Analysis**: Identifies discrepancies between the AI's predictions and actual player choices to refine the training process.
 

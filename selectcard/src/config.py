@@ -23,8 +23,13 @@ class Config:
     BATCH_SIZE = 512
     EPOCHS = 20
     # lr 2e-4 在 batch 256 下收敛良好；batch 翻倍后按 sqrt 缩放补偿
-    # （512/256)^0.5 ≈ 1.41 → 2.8e-4），配合 CosineAnnealingLR(T_max=EPOCHS)
+    # （512/256)^0.5 ≈ 1.41 → 2.8e-4），配合余弦衰减调度。
     LEARNING_RATE = 2.8e-4
+    # None means decay across the full configured run.  A shorter decay is
+    # useful for fixed-budget comparison jobs and is clamped at its minimum
+    # rather than cycling back up.
+    COSINE_DECAY_EPOCHS = None
+    LR_MIN_RATIO = 0.0
     LOG_INTERVAL_SECONDS = 60
     EARLY_STOPPING_PATIENCE = 5
     # Let the 20-epoch cosine schedule leave its high-learning-rate phase before
@@ -51,12 +56,8 @@ class Config:
     GLOBAL_CONDITIONING = "token"  # "token" or "late_concat"
     NORM_POSITION = "pre"           # "pre" or "post"
     RANDOM_SEED = 42
-    VALUE_WEIGHTS = {
-        "reach17": 0.10,
-        "reach34": 0.20,
-        "reach50": 0.25,
-        "win": 0.45,
-    }
+    HEART_WIN_BONUS_FLOORS = 3.0
+    HEART_HEAD_LOSS_WEIGHT = 1.0
     VALUE_DEBUG = os.environ.get("STS_VALUE_DEBUG", "").lower() in {"1", "true", "yes"}
 
     # ==========================

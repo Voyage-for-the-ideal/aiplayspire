@@ -6,7 +6,7 @@ try:
     from .encoding import ItemVocabulary, encode_items
     from .dataset import GlobalFeatureEncoder
     from .config import Config
-    from .data_contract import VALUE_COMPONENT_NAMES
+    from .data_contract import HAZARD_ENDPOINTS, HAZARD_OUTPUT_DIM
     from .boss_context import NUM_BOSS_IDS, boss_id, get_visible_boss
 except ImportError:
     from model import STSValueNetwork
@@ -14,25 +14,49 @@ except ImportError:
     from encoding import ItemVocabulary, encode_items
     from dataset import GlobalFeatureEncoder
     from config import Config
-    from data_contract import VALUE_COMPONENT_NAMES
+    from data_contract import HAZARD_ENDPOINTS, HAZARD_OUTPUT_DIM
     from boss_context import NUM_BOSS_IDS, boss_id, get_visible_boss
 import re
 
 
-def compose_scalar_value(components, floor, weights=None):
-    weights = dict(weights or Config.VALUE_WEIGHTS)
-    if set(weights) != set(VALUE_COMPONENT_NAMES):
-        raise ValueError("VALUE_WEIGHTS must define every multi-horizon component")
-    if abs(sum(weights.values()) - 1.0) > 1e-9:
-        raise ValueError("VALUE_WEIGHTS must sum to 1")
-    effective = dict(components)
-    if floor >= 17:
-        effective["reach17"] = 1.0
-    if floor >= 34:
-        effective["reach34"] = 1.0
-    if floor >= 50:
-        effective["reach50"] = 1.0
-    return sum(weights[name] * effective[name] for name in VALUE_COMPONENT_NAMES)
+def compose_hazard_value(hazards, heart_conditional, floor, heart_bonus_floors=None):
+    """Compose monotone progress survival into an interpretable scalar value."""
+    if set(hazards) != set(HAZARD_ENDPOINTS):
+        raise ValueError("hazards must define every configured bucket endpoint")
+    floor = float(floor)
+    bonus = float(
+        Config.HEART_WIN_BONUS_FLOORS
+        if heart_bonus_floors is None
+        else heart_bonus_floors
+    )
+    if not 0.0 <= floor <= HAZARD_ENDPOINTS[-1]:
+        raise ValueError("floor must be between 0 and 57")
+    if bonus < 0.0:
+        raise ValueError("heart_bonus_floors must be non-negative")
+    if not 0.0 <= float(heart_conditional) <= 1.0:
+        raise ValueError("heart_conditional must be a probability")
+
+    survival = {}
+    cumulative = 1.0
+    expected_floor = floor
+    previous = 0.0
+    for endpoint in HAZARD_ENDPOINTS:
+        probability = float(hazards[endpoint])
+        if not 0.0 <= probability <= 1.0:
+            raise ValueError("hazard values must be probabilities")
+        if endpoint <= floor:
+            survival[endpoint] = 1.0
+        else:
+            cumulative *= 1.0 - probability
+            survival[endpoint] = cumulative
+            width = endpoint - max(floor, previous)
+            expected_floor += width * cumulative
+        previous = float(endpoint)
+    heart_probability = cumulative * float(heart_conditional)
+    scalar = (expected_floor + bonus * heart_probability) / (
+        HAZARD_ENDPOINTS[-1] + bonus
+    )
+    return survival, heart_probability, expected_floor, scalar
 
 class InferenceTokenizer:
     """Use the same frozen canonical item encoding as training."""
@@ -96,24 +120,44 @@ class STSInferenceEngine:
     def _boss_id(self, state):
         return torch.tensor([boss_id(get_visible_boss(state))], dtype=torch.long)
         
-    def evaluate_state_components(self, state):
-        """Return raw calibrated probabilities in the fixed component order."""
+    def _evaluate_state_distribution(self, state, heart_bonus_floors=None):
         seq_tokens, upgrades, counts = self.tokenizer.encode(state['deck'], state['relics'])
         global_feats = self._global_features(state)
         boss_ids = self._boss_id(state)
 
         with torch.no_grad():
             logits = self.model(seq_tokens, upgrades, counts, global_feats, boss_ids)
-            prob = torch.sigmoid(logits)
-        values = prob.squeeze(0).tolist()
-        return dict(zip(VALUE_COMPONENT_NAMES, values))
+            probabilities = torch.sigmoid(logits).squeeze(0).tolist()
+        hazards = dict(zip(HAZARD_ENDPOINTS, probabilities[:HAZARD_OUTPUT_DIM]))
+        heart_conditional = probabilities[HAZARD_OUTPUT_DIM]
+        survival, heart_probability, expected_floor, scalar = compose_hazard_value(
+            hazards,
+            heart_conditional,
+            float(state["floor"]),
+            heart_bonus_floors=heart_bonus_floors,
+        )
+        result = {
+            "hazards": hazards,
+            "survival": survival,
+            "heart_conditional": heart_conditional,
+            "heart_probability": heart_probability,
+            "expected_floor": expected_floor,
+            "value": scalar,
+        }
+        self._last_evaluation = result
+        return result
 
-    def evaluate_state(self, state):
-        """Return the cross-act scalar value composed from multi-horizon outputs."""
-        components = self.evaluate_state_components(state)
-        scalar = compose_scalar_value(components, float(state["floor"]))
-        self._last_evaluation = (components, scalar)
-        return scalar
+    def evaluate_state_hazards(self, state):
+        """Return calibrated stopping hazards keyed by bucket endpoint."""
+        return self._evaluate_state_distribution(state)["hazards"]
+
+    def evaluate_state_survival(self, state):
+        """Return monotone cumulative progress probabilities by endpoint."""
+        return self._evaluate_state_distribution(state)["survival"]
+
+    def evaluate_state(self, state, heart_bonus_floors=None):
+        """Return expected progress plus the configured Heart-win premium."""
+        return self._evaluate_state_distribution(state, heart_bonus_floors)["value"]
 
     def evaluate_state_logits(self, state):
         """Evaluate a single state dictionary and return raw logits."""
@@ -123,20 +167,28 @@ class STSInferenceEngine:
         
         with torch.no_grad():
             logits = self.model(seq_tokens, upgrades, counts, global_feats, boss_ids)
-        return dict(zip(VALUE_COMPONENT_NAMES, logits.squeeze(0).tolist()))
+        values = logits.squeeze(0).tolist()
+        return {
+            "hazards": dict(zip(HAZARD_ENDPOINTS, values[:HAZARD_OUTPUT_DIM])),
+            "heart_conditional": values[HAZARD_OUTPUT_DIM],
+        }
 
     def _print_choice_score(self, label, score):
         print(f"{label} -> V(S') = {score:.4f}")
         if not getattr(self, "debug", Config.VALUE_DEBUG):
             return
-        components, scalar = getattr(self, "_last_evaluation", ({}, score))
-        if components:
+        result = getattr(self, "_last_evaluation", None)
+        if result:
+            buckets = " ".join(
+                f"h{endpoint}={result['hazards'][endpoint]:.3f}/"
+                f"S{endpoint}={result['survival'][endpoint]:.3f}"
+                for endpoint in HAZARD_ENDPOINTS
+                if endpoint > 49
+            )
             print(
-                "  "
-                + " ".join(
-                    f"{name}={components[name]:.3f}" for name in VALUE_COMPONENT_NAMES
-                )
-                + f" V={scalar:.3f}"
+                f"  {buckets} E[F]={result['expected_floor']:.2f} "
+                f"P(Heart)={result['heart_probability']:.3f} "
+                f"V={result['value']:.3f}"
             )
         
     def _apply_choice(self, current_state, choice):

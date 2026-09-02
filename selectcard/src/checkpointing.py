@@ -1,21 +1,27 @@
 import torch
 
 try:
-    from .data_contract import VALUE_COMPONENT_NAMES, BOSS_SCHEMA_VERSION
+    from .data_contract import (
+        HAZARD_ENDPOINTS,
+        VALUE_TARGET_SCHEMA,
+        BOSS_SCHEMA_VERSION,
+    )
     from .encoding import PREPROCESSING_VERSION, ItemVocabulary
     from .dataset import GlobalFeatureEncoder
     from .boss_context import BOSS_VOCABULARY, NUM_BOSS_IDS
+    from .config import Config
 except ImportError:
-    from data_contract import VALUE_COMPONENT_NAMES, BOSS_SCHEMA_VERSION
+    from data_contract import HAZARD_ENDPOINTS, VALUE_TARGET_SCHEMA, BOSS_SCHEMA_VERSION
     from encoding import PREPROCESSING_VERSION, ItemVocabulary
     from dataset import GlobalFeatureEncoder
     from boss_context import BOSS_VOCABULARY, NUM_BOSS_IDS
+    from config import Config
 
 
-CHECKPOINT_FORMAT_VERSION = 6
+CHECKPOINT_FORMAT_VERSION = 7
 LEGACY_VALUE_TARGET_ERROR = (
-    "Checkpoint uses legacy single-act value target. "
-    "Rebuild processed_data_v2 and retrain the multi-horizon value model."
+    "Checkpoint uses a legacy or incompatible value target. "
+    "Rebuild processed_data_v2 and retrain the bucket hazard model."
 )
 
 
@@ -23,7 +29,9 @@ def create_checkpoint(model, model_config, vocabulary, feature_encoder, metadata
     return {
         "format_version": CHECKPOINT_FORMAT_VERSION,
         "preprocessing_version": PREPROCESSING_VERSION,
-        "value_components": list(VALUE_COMPONENT_NAMES),
+        "value_target_schema": VALUE_TARGET_SCHEMA,
+        "hazard_endpoints": list(HAZARD_ENDPOINTS),
+        "default_heart_bonus_floors": Config.HEART_WIN_BONUS_FLOORS,
         "global_feature_schema_version": feature_encoder.schema_version,
         "boss_schema_version": BOSS_SCHEMA_VERSION,
         "boss_vocabulary": dict(BOSS_VOCABULARY),
@@ -60,14 +68,24 @@ def load_checkpoint(path, map_location="cpu"):
         "vocabulary",
         "global_feature_schema_version",
         "global_feature_encoder",
-        "value_components",
+        "value_target_schema",
+        "hazard_endpoints",
+        "default_heart_bonus_floors",
         "boss_schema_version",
         "boss_vocabulary",
     }
     missing = required.difference(checkpoint)
     if missing:
         raise ValueError(f"Incomplete checkpoint; missing: {sorted(missing)}")
-    if tuple(checkpoint["value_components"]) != VALUE_COMPONENT_NAMES:
+    if checkpoint["value_target_schema"] != VALUE_TARGET_SCHEMA:
+        raise ValueError(LEGACY_VALUE_TARGET_ERROR)
+    try:
+        checkpoint_endpoints = tuple(checkpoint["hazard_endpoints"])
+    except (TypeError, ValueError):
+        raise ValueError(LEGACY_VALUE_TARGET_ERROR) from None
+    if checkpoint_endpoints != tuple(HAZARD_ENDPOINTS):
+        raise ValueError(LEGACY_VALUE_TARGET_ERROR)
+    if checkpoint["default_heart_bonus_floors"] != Config.HEART_WIN_BONUS_FLOORS:
         raise ValueError(LEGACY_VALUE_TARGET_ERROR)
     if checkpoint["boss_schema_version"] != BOSS_SCHEMA_VERSION or checkpoint["boss_vocabulary"] != BOSS_VOCABULARY:
         raise ValueError("Checkpoint boss schema is incompatible; retraining required")

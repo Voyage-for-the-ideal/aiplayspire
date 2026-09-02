@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Trains a **Set Transformer multi-horizon value network** that evaluates Slay the Spire game states. Used by `sts_ai_framework` for card/relic/event/shop decisions. The model outputs probabilities for reaching floors 17, 34, and 50 plus run victory; inference composes them into one cross-act scalar.
+Trains a **Set Transformer bucket-hazard value network** that evaluates Slay the Spire game states. Used by `sts_ai_framework` for card/relic/event/shop decisions. The model predicts monotone progress survival across 20 two-to-three-floor buckets plus conditional Heart victory; inference composes them into expected terminal floor with a configurable Heart premium.
 
 ## Common Commands
 
@@ -53,14 +53,15 @@ STS Data/*.json.gz  →  data_pipeline.py  →  processed_data_v2/*.parquet  →
 - Characters, cards, relics, potions, shop items, and enemies must resolve to the vanilla source catalog
 - PrismaticShard, malformed telemetry, missing enemy history, and unknown content are excluded
 - Final reconstructed deck and relic multisets must exactly match `master_deck` and `relics`
-- Abandoned runs are retained as censored: completed-act positives remain valid, unresolved current-act negatives do not train
+- Abandoned runs are retained as censored: observed bucket progress remains valid and unresolved future buckets do not train
 
-**Labeling scheme** (in `data_pipeline.py` lines 49-54):
-- Floor ≤16: label=1 if run reached floor >16 (survived Act 1 boss)
-- Floor 17-33: label=1 if run reached floor >33 (survived Act 2 boss)
-- Floor 34+: label=1 if run reached floor ≥50 (survived Act 3 boss / heart)
+**Labeling scheme**:
+- Bucket endpoints are `3,6,9,12,15,17,20,23,26,29,32,34,37,40,43,46,49,51,54,57`.
+- Each output is the conditional risk of stopping before its endpoint. Completed buckets are masked, reached future buckets have hazard target 0, and only the first known unreached bucket has target 1.
+- Heart victories are normalized to progress 57 and receive a separate terminal label; ordinary victories stop progress at their recorded Act 3 endpoint.
+- The cumulative survival curve is `S_i = product(1 - h_j)`, so farther progress can never be more likely than nearer progress.
 
-This is act-survival, not whole-run victory/loss. The model learns "will I survive this act" rather than "will I win the run."
+The scalar value is expected terminal floor plus a configurable Heart-win bonus measured in equivalent floors. The default bonus is 3; 6 can be evaluated with the same checkpoint.
 
 ### Reconstructor (`reconstructor.py`)
 
@@ -86,7 +87,7 @@ Implicit changes are stored in `_implicit_removals[floor]` / `_implicit_addition
 - **No positional encoding** — the deck is an unordered set; permutation invariance is intentional
 - **[CLS] token** prepended to the sequence, pooled after transformer layers
 - **Global features** (floor, HP, gold, ascension) processed through a separate MLP, then concatenated with [CLS] output
-- **Output**: four logits → sigmoid → reach17/reach34/reach50/win probabilities; configured weights compose the scalar value
+- **Output**: 20 stopping-hazard logits plus one conditional Heart logit; cumulative products produce monotone survival probabilities
 
 `SetAttention` is a standard transformer block (MHA + FFN with residual connections), applied over the set dimension.
 

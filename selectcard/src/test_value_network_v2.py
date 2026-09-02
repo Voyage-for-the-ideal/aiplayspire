@@ -8,8 +8,14 @@ import torch
 from torch.utils.data import DataLoader
 
 from checkpointing import load_checkpoint, save_checkpoint
-from data_contract import FILTER_VERSION, MASK_COLUMNS, TARGET_COLUMNS
-from data_pipeline import assign_split, horizon_targets
+from data_contract import (
+    FILTER_VERSION,
+    HAZARD_ENDPOINTS,
+    HAZARD_OUTPUT_DIM,
+    MASK_COLUMNS,
+    TARGET_COLUMNS,
+)
+from data_pipeline import assign_split, hazard_targets, is_heart_victory
 from dataset import (
     TRAINING_ARTIFACT_CACHE_NAME,
     GlobalFeatureEncoder,
@@ -23,8 +29,8 @@ from encoding import (
     parse_item_name,
 )
 from model import STSValueNetwork
-from inference import STSInferenceEngine, compose_scalar_value
-from train import save_training_report, weighted_bce_loss
+from inference import STSInferenceEngine, compose_hazard_value
+from train import evaluate, hazard_predictions, save_training_report, weighted_hazard_loss
 from boss_context import NUM_BOSS_IDS
 
 
@@ -80,23 +86,63 @@ class DataContractTests(unittest.TestCase):
         self.assertEqual(assign_split("same-run"), assign_split("same-run"))
         self.assertIn(assign_split("same-run"), {"train", "val", "test"})
 
-    def test_act_target_is_continuous_across_boundary(self):
-        before = horizon_targets(16, 40, False, False)
-        after = horizon_targets(17, 40, False, False)
-        self.assertEqual(before, after)
-        self.assertEqual(before, ([1, 1, 0, 0], [True, True, False, False]))
+    def test_terminal_death_marks_only_first_unreached_bucket(self):
+        targets, masks = hazard_targets(20, 25, True, False)
+        endpoint_index = HAZARD_ENDPOINTS.index(26)
+        self.assertEqual(targets[endpoint_index], 1)
+        self.assertTrue(masks[endpoint_index])
+        self.assertFalse(any(masks[endpoint_index + 1:HAZARD_OUTPUT_DIM]))
+        self.assertEqual(targets[-1], 0)
+        self.assertTrue(masks[-1])
 
-    def test_terminal_death_labels_all_horizons(self):
-        self.assertEqual(
-            horizon_targets(20, 25, True, False),
-            ([1, 0, 0, 0], [True, True, True, True]),
-        )
+    def test_every_bucket_boundary_has_one_stopping_event(self):
+        previous = 0
+        for endpoint in HAZARD_ENDPOINTS:
+            with self.subTest(endpoint=endpoint):
+                floor = previous
+                targets, masks = hazard_targets(floor, endpoint - 1, True, False)
+                index = HAZARD_ENDPOINTS.index(endpoint)
+                self.assertEqual(targets[index], 1)
+                self.assertTrue(masks[index])
+                self.assertFalse(any(masks[index + 1:HAZARD_OUTPUT_DIM]))
+            previous = endpoint
+
+    def test_completed_buckets_are_not_in_the_risk_set(self):
+        targets, masks = hazard_targets(17, 40, True, False)
+        completed = HAZARD_ENDPOINTS.index(17)
+        self.assertFalse(any(masks[:completed + 1]))
+        self.assertFalse(any(targets[:completed + 1]))
+
+    def test_normal_victory_stops_before_act4(self):
+        targets, masks = hazard_targets(49, 51, True, False)
+        self.assertEqual(targets[HAZARD_ENDPOINTS.index(54)], 1)
+        self.assertTrue(masks[HAZARD_ENDPOINTS.index(54)])
+        self.assertFalse(masks[HAZARD_ENDPOINTS.index(57)])
+
+    def test_heart_death_at_56_stops_before_57(self):
+        targets, masks = hazard_targets(54, 56, True, False)
+        self.assertEqual(targets[HAZARD_ENDPOINTS.index(57)], 1)
+        self.assertTrue(masks[HAZARD_ENDPOINTS.index(57)])
+        self.assertEqual(targets[-1], 0)
 
     def test_abandoned_run_masks_unknown_future(self):
-        self.assertEqual(
-            horizon_targets(20, 25, False, False),
-            ([1, 0, 0, 0], [True, False, False, False]),
-        )
+        targets, masks = hazard_targets(20, 25, False, False)
+        self.assertEqual(targets[HAZARD_ENDPOINTS.index(23)], 0)
+        self.assertTrue(masks[HAZARD_ENDPOINTS.index(23)])
+        self.assertFalse(masks[HAZARD_ENDPOINTS.index(26)])
+        self.assertFalse(masks[-1])
+
+    def test_heart_win_normalizes_progress_to_final_endpoint(self):
+        targets, masks = hazard_targets(49, 56, True, True)
+        self.assertEqual(targets[:HAZARD_OUTPUT_DIM], [0] * HAZARD_OUTPUT_DIM)
+        self.assertTrue(all(masks[HAZARD_ENDPOINTS.index(51):]))
+        self.assertEqual(targets[-1], 1)
+
+    def test_heart_win_requires_terminal_heart_combat(self):
+        base = {"victory": True, "damage_taken": [{"enemies": "Time Eater"}]}
+        self.assertFalse(is_heart_victory(base))
+        base["damage_taken"].append({"enemies": "The Heart"})
+        self.assertTrue(is_heart_victory(base))
 
 
 class GlobalFeatureEncoderTests(unittest.TestCase):
@@ -373,17 +419,21 @@ class ModelTests(unittest.TestCase):
         )
         for conditioning in ("token", "late_concat"):
             for norm in ("pre", "post"):
-                self.assertEqual(self._model(conditioning, norm)(*inputs).shape, (1, 4))
+                self.assertEqual(self._model(conditioning, norm)(*inputs).shape, (1, 21))
 
-    def test_masked_loss_ignores_invalid_horizon_gradient(self):
-        logits = torch.zeros((1, 4), requires_grad=True)
-        targets = torch.ones((1, 4))
-        masks = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+    def test_masked_loss_ignores_invalid_hazard_gradient(self):
+        logits = torch.zeros((1, 21), requires_grad=True)
+        targets = torch.zeros((1, 21))
+        masks = torch.zeros((1, 21))
+        targets[0, 0] = 1.0
+        masks[0, 0] = 1.0
         globals_ = torch.zeros((1, 9))
-        loss = weighted_bce_loss(logits, targets, masks, globals_, torch.ones(6))
+        loss = weighted_hazard_loss(
+            logits, targets, masks, torch.tensor([1.0]), globals_, torch.ones(6)
+        )
         loss.backward()
         self.assertNotEqual(logits.grad[0, 0].item(), 0.0)
-        torch.testing.assert_close(logits.grad[0, 1:], torch.zeros(3))
+        torch.testing.assert_close(logits.grad[0, 1:], torch.zeros(20))
 
     def test_boss_ids_follow_distinct_embedding_paths(self):
         model = self._model()
@@ -392,11 +442,59 @@ class ModelTests(unittest.TestCase):
             torch.tensor([[2, 0]]), torch.tensor([[0, 0]]),
             torch.tensor([[1, 0]]), torch.zeros((1, 9)),
         )
-        self.assertEqual(model(*inputs, torch.tensor([0])).shape, (1, 4))
+        self.assertEqual(model(*inputs, torch.tensor([0])).shape, (1, 21))
 
-    def test_scalar_value_clamps_completed_horizon(self):
-        components = {"reach17": 0.3, "reach34": 0.4, "reach50": 0.2, "win": 0.1}
-        self.assertAlmostEqual(compose_scalar_value(components, 20), 0.275)
+    def test_hazard_survival_is_monotone_and_heart_is_bounded(self):
+        logits = torch.linspace(-2.0, 2.0, 21).unsqueeze(0)
+        _, survival, heart = hazard_predictions(logits, torch.tensor([10.0]))
+        self.assertTrue(torch.all(survival[:, 1:] <= survival[:, :-1]))
+        self.assertLessEqual(heart.item(), survival[0, -1].item())
+
+    def test_evaluation_reports_hazards_heart_floor_and_baseline(self):
+        batch_size = 2
+        targets = torch.zeros((batch_size, 21))
+        targets[0, 0] = 1.0
+        targets[1, -1] = 1.0
+        masks = torch.ones((batch_size, 21))
+        batch = (
+            torch.tensor([[2, 0], [2, 0]]),
+            torch.zeros((batch_size, 2), dtype=torch.long),
+            torch.tensor([[1, 0], [1, 0]]),
+            torch.zeros((batch_size, 9)),
+            torch.zeros(batch_size, dtype=torch.long),
+            torch.ones(batch_size),
+            targets,
+            masks,
+        )
+        metrics = evaluate(
+            self._model(), [batch], torch.device("cpu"), baseline_rates=[0.1] * 21
+        )
+        self.assertEqual(len(metrics["hazards"]), HAZARD_OUTPUT_DIM)
+        self.assertIn("heart_win", metrics)
+        self.assertTrue(torch.isfinite(torch.tensor(metrics["terminal_floor_mae"])))
+        self.assertIn("constant_baseline", metrics)
+
+    def test_scalar_value_rewards_act4_progress_and_heart_win(self):
+        normal_hazards = {endpoint: 0.0 for endpoint in HAZARD_ENDPOINTS}
+        normal_hazards[54] = 1.0
+        _, _, normal_floor, normal_value = compose_hazard_value(
+            normal_hazards, 0.0, 0, heart_bonus_floors=3
+        )
+        deep_hazards = dict(normal_hazards)
+        deep_hazards[54] = 0.0
+        deep_hazards[57] = 1.0
+        _, _, deep_floor, deep_value = compose_hazard_value(
+            deep_hazards, 0.0, 0, heart_bonus_floors=3
+        )
+        self.assertEqual(normal_floor, 51.0)
+        self.assertEqual(deep_floor, 54.0)
+        self.assertGreater(deep_value, normal_value)
+        perfect = {endpoint: 0.0 for endpoint in HAZARD_ENDPOINTS}
+        self.assertAlmostEqual(compose_hazard_value(perfect, 1.0, 0, 3)[-1], 1.0)
+        self.assertNotEqual(
+            compose_hazard_value(normal_hazards, 0.5, 0, 3)[-1],
+            compose_hazard_value(normal_hazards, 0.5, 0, 6)[-1],
+        )
 
     def test_boss_relic_hypothetical_replaces_starter_relic(self):
         engine = STSInferenceEngine.__new__(STSInferenceEngine)
@@ -456,7 +554,7 @@ class ModelTests(unittest.TestCase):
         })
         self.assertEqual(result["deck"], ["Bash", "Inflame"])
 
-    def test_v6_checkpoint_round_trip(self):
+    def test_v7_checkpoint_round_trip(self):
         model = self._model()
         config = {
             "vocab_size": 12,
@@ -483,7 +581,7 @@ class ModelTests(unittest.TestCase):
             path = os.path.join(directory, "model.pth")
             save_checkpoint(path, model, config, vocabulary, feature_encoder)
             checkpoint, loaded_vocab, loaded_encoder = load_checkpoint(path)
-        self.assertEqual(checkpoint["format_version"], 6)
+        self.assertEqual(checkpoint["format_version"], 7)
         self.assertEqual(loaded_vocab.to_dict(), vocabulary.to_dict())
         self.assertEqual(loaded_encoder.to_dict(), feature_encoder.to_dict())
 
@@ -491,7 +589,7 @@ class ModelTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "model.pth")
             torch.save({"format_version": 3}, path)
-            with self.assertRaisesRegex(ValueError, "legacy single-act value target"):
+            with self.assertRaisesRegex(ValueError, "bucket hazard model"):
                 load_checkpoint(path)
 
     def test_incompatible_feature_order_is_rejected(self):
