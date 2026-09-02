@@ -78,6 +78,30 @@ public class EventStateExtractorTest {
         assertEquals("UPGRADE_CARD", choices.get(2).get("kind"));
     }
 
+    @Test
+    public void libraryDeclaresItsGeneratedCardGridFollowup() {
+        Map<String, Object> result = EventStateExtractor.extract(
+            new TheLibrary(), buttons("read", "sleep"));
+        assertEquals("KNOWN", result.get("semantics_status"));
+        List<Map<String, Object>> choices = (List<Map<String, Object>>) result.get("choices");
+        assertEquals("GENERATED_CARD_GRID", choices.get(0).get("followup"));
+    }
+
+    @Test
+    public void cursedTomeIntroExposesCommitDecisionMetadata() {
+        Map<String, Object> result = EventStateExtractor.extract(
+            new CursedTome(), buttons("read", "leave"));
+        assertEquals("KNOWN", result.get("semantics_status"));
+        List<Map<String, Object>> choices = (List<Map<String, Object>>) result.get("choices");
+        Map<String, Object> outcome = (Map<String, Object>) ((List<?>) choices.get(0).get("outcomes")).get(0);
+        Map<String, Object> effect = (Map<String, Object>) ((List<?>) outcome.get("effects")).get(0);
+        assertEquals("commit_reading", effect.get("type"));
+        assertEquals(6, ((Number) effect.get("unavoidable_hp_loss")).intValue());
+        assertEquals(15, ((Number) effect.get("final_dmg")).intValue());
+        assertTrue(effect.containsKey("book_relics"));
+        assertTrue(effect.get("book_relics") instanceof List);
+    }
+
     private static ArrayList<LargeDialogOptionButton> buttons(String... labels) {
         ArrayList<LargeDialogOptionButton> result = new ArrayList<>();
         for (int i = 0; i < labels.length; i++) result.add(new LargeDialogOptionButton(i, labels[i]));
@@ -95,6 +119,19 @@ public class EventStateExtractorTest {
 
     private static class LivingWall extends AbstractEvent {
         @SuppressWarnings("unused") private String screen = "INTRO";
+        @Override protected void buttonEffect(int buttonPressed) {}
+    }
+
+
+    private static class TheLibrary extends AbstractEvent {
+        @SuppressWarnings("unused") private int screenNum = 0;
+        @SuppressWarnings("unused") private int healAmt = 20;
+        @Override protected void buttonEffect(int buttonPressed) {}
+    }
+
+    private static class CursedTome extends AbstractEvent {
+        @SuppressWarnings("unused") private String screen = "INTRO";
+        @SuppressWarnings("unused") private int finalDmg = 15;
         @Override protected void buttonEffect(int buttonPressed) {}
     }
 }

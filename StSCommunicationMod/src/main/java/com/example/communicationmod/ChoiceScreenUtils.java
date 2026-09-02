@@ -611,10 +611,16 @@ public class ChoiceScreenUtils {
         }
         Object item = items.get(index);
         if (item instanceof String) {
-            // Purge
+            // ShopScreen has no purge Hitbox field.  Its normal UI path enters
+            // the GRID screen through this private method.
             ShopScreen screen = AbstractDungeon.shopScreen;
-            Hitbox purgeHb = (Hitbox) ReflectionHacks.getPrivate(screen, ShopScreen.class, "purgeHb");
-            purgeHb.clicked = true;
+            try {
+                Method purchasePurge = ShopScreen.class.getDeclaredMethod("purchasePurge");
+                purchasePurge.setAccessible(true);
+                purchasePurge.invoke(screen);
+            } catch (ReflectiveOperationException e) {
+                throw new IllegalStateException("Unable to open the shop purge selection", e);
+            }
         } else if (item instanceof AbstractCard) {
             ShopScreenPatch.doHover = true;
             ShopScreenPatch.hoverCard = (AbstractCard)item;
@@ -633,7 +639,13 @@ public class ChoiceScreenUtils {
 
     public static boolean isConfirmButtonAvailable() {
         if (AbstractDungeon.screen == AbstractDungeon.CurrentScreen.GRID) {
-            return !AbstractDungeon.gridSelectScreen.confirmButton.isDisabled;
+            GridCardSelectScreen screen = AbstractDungeon.gridSelectScreen;
+            return isGridConfirmAvailable(
+                screen.confirmScreenUp,
+                screen.isJustForConfirming,
+                screen.anyNumber,
+                screen.forClarity,
+                screen.confirmButton.isDisabled);
         } 
         if (AbstractDungeon.screen == AbstractDungeon.CurrentScreen.HAND_SELECT) {
             return !AbstractDungeon.handCardSelectScreen.button.isDisabled;
@@ -644,10 +656,19 @@ public class ChoiceScreenUtils {
         return !isHidden;
     }
 
+    static boolean isGridConfirmAvailable(boolean confirmScreenUp,
+                                          boolean isJustForConfirming,
+                                          boolean anyNumber,
+                                          boolean forClarity,
+                                          boolean confirmButtonDisabled) {
+        boolean gridModeUsesConfirm = confirmScreenUp || isJustForConfirming || anyNumber || forClarity;
+        return gridModeUsesConfirm && !confirmButtonDisabled;
+    }
+
     public static boolean isCancelButtonAvailable() {
-        // BossRelicScreen always has a skip button
+        // Boss relic selection must choose a relic; do not advertise its UI skip button.
         if (AbstractDungeon.screen == AbstractDungeon.CurrentScreen.BOSS_REWARD) {
-            return true;
+            return isBossRewardCancelable();
         }
         // Check Cancel Button
         boolean isHidden = (boolean) ReflectionHacks.getPrivate(AbstractDungeon.overlayMenu.cancelButton, CancelButton.class, "isHidden");
@@ -657,6 +678,10 @@ public class ChoiceScreenUtils {
             return AbstractDungeon.dungeonMapScreen.dismissable;
         }
         
+        return false;
+    }
+
+    static boolean isBossRewardCancelable() {
         return false;
     }
     
@@ -695,12 +720,6 @@ public class ChoiceScreenUtils {
         } else if (AbstractDungeon.screen == AbstractDungeon.CurrentScreen.COMBAT_REWARD) {
              AbstractDungeon.overlayMenu.cancelButton.hb.clicked = true;
              AbstractDungeon.closeCurrentScreen();
-        } else if (AbstractDungeon.screen == AbstractDungeon.CurrentScreen.BOSS_REWARD) {
-            com.megacrit.cardcrawl.screens.mainMenu.MenuCancelButton cancelBtn = (com.megacrit.cardcrawl.screens.mainMenu.MenuCancelButton) ReflectionHacks.getPrivate(
-                AbstractDungeon.bossRelicScreen,
-                com.megacrit.cardcrawl.screens.select.BossRelicSelectScreen.class,
-                "cancelButton");
-            cancelBtn.hb.clicked = true;
         }
     }
 

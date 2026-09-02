@@ -5,6 +5,7 @@ import com.google.gson.GsonBuilder;
 import com.megacrit.cardcrawl.cards.AbstractCard;
 import com.megacrit.cardcrawl.core.AbstractCreature;
 import com.megacrit.cardcrawl.core.CardCrawlGame;
+import com.megacrit.cardcrawl.core.Settings;
 import com.megacrit.cardcrawl.dungeons.AbstractDungeon;
 import com.megacrit.cardcrawl.helpers.CardLibrary;
 import com.megacrit.cardcrawl.monsters.AbstractMonster;
@@ -15,6 +16,7 @@ import com.megacrit.cardcrawl.potions.AbstractPotion;
 import com.megacrit.cardcrawl.potions.PotionSlot;
 import com.megacrit.cardcrawl.powers.AbstractPower;
 import com.megacrit.cardcrawl.relics.AbstractRelic;
+import com.megacrit.cardcrawl.rewards.RewardItem;
 import com.megacrit.cardcrawl.rooms.AbstractRoom;
 import com.megacrit.cardcrawl.rooms.MonsterRoomBoss;
 import com.megacrit.cardcrawl.rooms.TreasureRoomBoss;
@@ -27,6 +29,7 @@ import basemod.ReflectionHacks;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -109,6 +112,11 @@ public class GameStateConverter {
         state.put("choice_list", ChoiceScreenUtils.getCurrentChoiceList());
         state.put("can_proceed", ChoiceScreenUtils.isConfirmButtonAvailable());
         state.put("can_cancel", ChoiceScreenUtils.isCancelButtonAvailable());
+        Map<String, Object> keys = new LinkedHashMap<>();
+        keys.put("ruby", Settings.hasRubyKey);
+        keys.put("emerald", Settings.hasEmeraldKey);
+        keys.put("sapphire", Settings.hasSapphireKey);
+        state.put("keys", keys);
 
         // Card-reward choices need structured, language-independent card data.
         // `choice_list` remains a human-readable display field; clients that make
@@ -151,6 +159,9 @@ public class GameStateConverter {
                 purpose = "upgrade";
             } else if (forTransform) {
                 purpose = "transform";
+            } else if (AbstractDungeon.getCurrRoom().event != null
+                    && "TheLibrary".equals(AbstractDungeon.getCurrRoom().event.getClass().getSimpleName())) {
+                purpose = "generated_card_reward";
             } else {
                 String confirmText = (String) ReflectionHacks.getPrivate(
                     grid.confirmButton, GridSelectConfirmButton.class, "buttonText");
@@ -172,6 +183,11 @@ public class GameStateConverter {
                 }
             }
             state.put("grid_purpose", purpose);
+            state.put("grid_cards", convertGridCardsToJson(grid));
+        }
+
+        if (currentChoiceType == ChoiceScreenUtils.ChoiceType.COMBAT_REWARD) {
+            state.put("reward_choices", convertCombatRewardsToJson());
         }
 
         if (currentChoiceType == ChoiceScreenUtils.ChoiceType.CARD_REWARD && AbstractDungeon.cardRewardScreen != null) {
@@ -250,6 +266,55 @@ public class GameStateConverter {
             completedBossRoom,
             AbstractDungeon.bossKey
         );
+    }
+
+    private static List<Map<String, Object>> convertGridCardsToJson(GridCardSelectScreen grid) {
+        List<Map<String, Object>> cards = new ArrayList<>();
+        int choiceOffset = ChoiceScreenUtils.isConfirmButtonAvailable() ? 1 : 0;
+        for (int i = 0; i < grid.targetGroup.group.size(); i++) {
+            Map<String, Object> card = new LinkedHashMap<>(convertCardToJson(grid.targetGroup.group.get(i), i));
+            card.put("choice_index", i + choiceOffset);
+            cards.add(card);
+        }
+        return cards;
+    }
+
+    private static List<Map<String, Object>> convertCombatRewardsToJson() {
+        List<Map<String, Object>> choices = new ArrayList<>();
+        ArrayList<RewardItem> rewards = AbstractDungeon.combatRewardScreen.rewards;
+        for (int i = 0; i < rewards.size(); i++) {
+            RewardItem reward = rewards.get(i);
+            choices.add(combatRewardMetadataFor(reward, i, rewards));
+        }
+        return choices;
+    }
+
+    /**
+     * Stable reward metadata for clients which must distinguish keys from their
+     * linked normal reward.  Kept package-visible to allow a no-game-runtime test.
+     */
+    static Map<String, Object> combatRewardMetadataFor(
+            RewardItem reward, int choiceIndex, List<RewardItem> rewards) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("choice_index", choiceIndex);
+        result.put("type", reward.type.name());
+        if (reward.relic != null) {
+            result.put("relic_id", reward.relic.relicId);
+        }
+        if (reward.type == RewardItem.RewardType.EMERALD_KEY) {
+            result.put("key_type", "emerald");
+        } else if (reward.type == RewardItem.RewardType.SAPPHIRE_KEY) {
+            result.put("key_type", "sapphire");
+        }
+        if (reward.relicLink != null) {
+            for (int i = 0; i < rewards.size(); i++) {
+                if (rewards.get(i) == reward.relicLink) {
+                    result.put("linked_reward_index", i);
+                    break;
+                }
+            }
+        }
+        return result;
     }
 
     private static List<Map<String, Object>> convertCardGroup(ArrayList<AbstractCard> cards) {

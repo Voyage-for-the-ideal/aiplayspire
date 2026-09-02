@@ -2,8 +2,8 @@
   "modid": "CommunicationMod",
   "name": "Communication Mod",
   "author_list": ["YourName"],
-  "description": "Exposes game state, visible current-boss context, and structured card-reward IDs for external non-combat decisions.",
-  "version": "1.2.0",
+  "description": "Provides structured event semantics and local non-LLM flow for multi-step Cursed Tome handling (including intro/read decision and final-page continuation).",
+  "version": "1.3.2",
   "dependencies": ["basemod"],
   "entry_point": "com.example.communicationmod.CommunicationMod",
   "credits": ""

@@ -367,7 +367,7 @@ public final class EventStateExtractor {
                 break;
             case "TheJoust": describeJoust(phase,c); break;
             case "TheLibrary":
-                if ("0".equals(phase)) { complex(c,0,"CARD_REWARD","CARD_REWARD",effect("choose_generated_card","count",1)); deterministic(c,1,"EFFECT","NONE",gainHp(intField(event,"healAmt"))); }
+                if ("0".equals(phase)) { complex(c,0,"CARD_REWARD","GENERATED_CARD_GRID",effect("choose_generated_card","count",1)); deterministic(c,1,"EFFECT","NONE",gainHp(intField(event,"healAmt"))); }
                 break;
             case "TheMausoleum":
                 if (start) { double cursed=intField(event,"percent")/100.0D; stochastic(c,0,"STOCHASTIC","NONE",outcome(cursed,addCard("Writhe",1),randomRelic("ANY")),outcome(1.0D-cursed,randomRelic("ANY"))); leave(c,1); }
@@ -417,11 +417,13 @@ public final class EventStateExtractor {
     }
 
     private static void describeCursedTome(AbstractEvent e, String phase, List<Map<String,Object>> c) {
-        if ("INTRO".equals(phase)) { complex(c,0,"COMMIT","EVENT",effect("commit_reading","unavoidable_hp_loss",6)); leave(c,1); }
+        int finalDmg = cursedTomeFinalDmg(e);
+        List<String> bookRelics = cursedTomeBookRelics();
+        if ("INTRO".equals(phase)) { complex(c,0,"COMMIT","EVENT",effect("commit_reading","unavoidable_hp_loss",6,"final_dmg",finalDmg,"book_relics",bookRelics)); leave(c,1); }
         else if ("PAGE_1".equals(phase)) deterministic(c,0,"CONTINUE","EVENT",loseHp(1));
         else if ("PAGE_2".equals(phase)) deterministic(c,0,"CONTINUE","EVENT",loseHp(2));
         else if ("PAGE_3".equals(phase)) deterministic(c,0,"CONTINUE","EVENT",loseHp(3));
-        else if ("LAST_PAGE".equals(phase)) { complex(c,0,"RANDOM_REWARD","NONE",loseHp(intField(e,"finalDmg")),randomRelic("BOOK")); deterministic(c,1,"LEAVE","NONE",loseHp(3)); }
+        else if ("LAST_PAGE".equals(phase)) { complex(c,0,"RANDOM_REWARD","NONE",loseHp(finalDmg),randomRelic("BOOK")); deterministic(c,1,"LEAVE","NONE",loseHp(3)); }
         else continueChoice(c,0,"MAP");
     }
 
@@ -611,5 +613,30 @@ public final class EventStateExtractor {
         Class<?> type=target.getClass();
         while(type!=null){try{java.lang.reflect.Method method=type.getDeclaredMethod(name);method.setAccessible(true);return String.valueOf(method.invoke(target));}catch(Exception ignored){type=type.getSuperclass();}}
         throw new IllegalStateException("missing method "+name);
+    }
+    private static int cursedTomeFinalDmg(AbstractEvent event){
+        try {
+            return intField(event,"finalDmg");
+        } catch (RuntimeException ex) {
+            return 10;
+        }
+    }
+    private static List<String> cursedTomeBookRelics() {
+        ArrayList<String> books = new ArrayList<>();
+        try {
+            if (AbstractDungeon.player == null) return books;
+            if (!AbstractDungeon.player.hasRelic("Necronomicon")) books.add("Necronomicon");
+            if (!AbstractDungeon.player.hasRelic("Enchiridion")) books.add("Enchiridion");
+            if (!AbstractDungeon.player.hasRelic("Nilry's Codex")) books.add("Nilry's Codex");
+            if (books.isEmpty()) books.add("Circlet");
+            return books;
+        } catch (Throwable ignored) {
+            books.clear();
+            books.add("Necronomicon");
+            books.add("Enchiridion");
+            books.add("Nilry's Codex");
+            books.add("Circlet");
+            return books;
+        }
     }
 }
