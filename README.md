@@ -1,253 +1,178 @@
-# aiplayspire — Slay the Spire AI Bot
+# AIPlaySpire
 
-一个完整的《杀戮尖塔》(Slay the Spire) AI 代理系统,结合大语言模型(LLM)、本地价值网络和战斗树搜索,自动游玩游戏。
+**English · [简体中文](README.zh-CN.md)**
 
-## 项目组成
+An end-to-end AI agent that plays complete runs of **Slay the Spire** — combining a learned, permutation-invariant state-value model, an LLM, and a combat tree-search engine to make every in-run decision.
 
-```
-StSCommunicationMod/     ← Java 游戏 Mod,通过 HTTP 暴露游戏状态和控制接口
-sts_ai_framework/        ← Python AI 主客户端,轮询状态 → 决策 → 提交动作
-selectcard/              ← Python 深度学习项目,训练 Set Transformer 生存价值网络
-STSStateSaver/           ← Java Mod,完整战斗状态序列化(JSON)
-LudicrousSpeed/          ← Java Mod,快速战斗模拟引擎
-scumthespire/            ← Java Mod,战斗 AI 树搜索(BattleAiMod)
-cardcrawl/               ← 反编译的游戏源码(只读参考,~2000 个 Java 文件)
-```
+> **Ascension-10 evaluation (n = 20 randomly seeded runs):** AIPlaySpire **reached the final boss in 90% of runs** and posted **~2× the average floor progression** of an LLM-only agent on the *identical seeds*.
+>
+> _Reaching the final boss is not a win rate — see [Evaluation](#evaluation)._
 
-六个子系统协同工作:
+---
 
-1. **StSCommunicationMod** 注入游戏进程,在 `localhost:5000` 启动 HTTP 服务,提供 `/state`、`/action`、`/card_info` 三个端点
-2. **sts_ai_framework** 循环轮询游戏状态,根据当前场景(战斗/事件/商店/选卡等)调用 LLM 或本地价值网络做决策,然后通过 HTTP 向游戏提交动作
-3. **selectcard** 从数十万局历史对局数据中训练出一个 Set Transformer 模型,用于评估卡牌、遗物、事件、商店决策的期望价值
-4. **STSStateSaver** 序列化完整战斗状态(玩家、怪物、能力、遗物、充能球、动作队列、选择界面)到 JSON,支持存档/读档
-5. **LudicrousSpeed** 快速模拟引擎,用阻塞式模拟替代正常游戏动作循环,提供 Command 模式(打牌、药水、界面选择)以加速批量推演
-6. **scumthespire** 战斗 AI (BattleAiMod),采用服务端/客户端架构 — AI 服务端无头运行,客户端发送战斗状态,服务端通过 `BattleAiController` 树搜索最优出牌序列
+## Evaluation
 
-自动战斗功能由 **STSStateSaver + LudicrousSpeed + scumthespire** 组成。完整模块说明、架构设计、协作流程和扩展建议见 [AUTOFIGHT.md](AUTOFIGHT.md)。
-
-## 快速开始
-
-### 前置条件
-
-- Java 运行环境(JRE)
-- **ModTheSpire** + **BaseMod** (Steam 创意工坊安装)
-- Python 3.10+
-- Slay the Spire 游戏本体
-
-### 1. 构建并安装 Mod
-
-```bash
-# 使用 Maven
-cd StSCommunicationMod && mvn package
-
-# 或使用自带构建脚本(无需 Maven)
-javac Build.java && java Build
-```
-
-将生成的 `target/CommunicationMod.jar` 复制到游戏 `mods/` 目录,启动 ModTheSpire 并勾选 BaseMod + Communication Mod。
-
-### 2. 安装 Python 依赖
-
-```bash
-# 推荐使用 conda 的 spire 环境 (Python 3.10+)
-conda activate spire
-pip install -r sts_ai_framework/requirements.txt
-```
-
-### 3. 配置
-
-编辑 `sts_ai_framework/.env`:
-
-```env
-STS_API_BASE_URL=http://localhost:5000
-LLM_MODEL=deepseek-v4-flash
-DEEPSEEK_API_KEY=your_api_key_here
-
-# 可选:Prompt 调试文件与运行日志目录(默认值已指向 debug/)
-DEBUG_PROMPT_FILE=debug/latest_prompt.txt
-RUN_LOG_DIR=debug
-```
-
-### 4. 构建 Battle AI Mod (可选)
-
-这三个 Mod 构成战斗树搜索流水线: **STSStateSaver** 序列化状态 → **LudicrousSpeed** 快速模拟 → **scumthespire** 树搜索最优出牌。
-
-首次需建立依赖目录:
-
-```bash
-mkdir -p lib _ModTheSpire/mods
-cp "D:/Program Files/Slay the Spire/desktop-1.0.jar" lib/
-cp "D:/Program Files/Slay the Spire/ModTheSpire.jar" lib/
-cp "D:/Program Files/Slay the Spire/mods/BaseMod.jar" _ModTheSpire/mods/
-cp "D:/Program Files/Slay the Spire/mods/StSLib.jar" _ModTheSpire/mods/
-```
-
-按依赖顺序构建:
-
-```bash
-cd STSStateSaver && mvn package      # → ../_ModTheSpire/mods/SaveStateMod.jar
-cd LudicrousSpeed && mvn package     # → ../_ModTheSpire/mods/LudicrousSpeed.jar
-cd StSCommunicationMod && mvn package # → ../_ModTheSpire/mods/CommunicationMod.jar
-cd scumthespire && mvn package       # → ../_ModTheSpire/mods/BattleAiMod.jar
-```
-
-或将所有四个 Java Mod 一并构建:
-
-```bash
-./build_all.sh
-```
-
-### 运行 Battle AI
-
-1. 创建 `savestates` 和 `startstates` 空目录在游戏根目录
-2. 启动服务端(无头模式): `java -DisServer=true -jar ModTheSpire.jar`
-3. 启动客户端,正常开始一局,进入战斗后点击 "Start Steve" 按钮
-
-### 5. 启动 LLM AI
-
-```bash
-# 先启动游戏并进入一局
-python -m sts_ai_framework --model deepseek-v4-flash --interval 2.0
-```
-
-可用参数:
-
-- `--model`: 覆盖 `.env` 的 `LLM_MODEL` (默认 `deepseek-v4-flash`)
-- `--interval`: 轮询与行动间隔(秒)
-- `--debug-prompt-file`: 将最新 Prompt 持续写入指定文件,便于调试
-
-每次运行会自动生成 `debug/run_YYYYMMDD_HHMMSS.log`,包含终端输出与结构化决策事件(见下文"主要特性"的"运行日志")。
-
-## 决策架构
-
-AI 根据 `screen_type` 选择不同的决策路径:
-
-| screen_type | 决策方式 | 说明 |
+| Method | Final-boss reach rate (A10) | Avg floor progression (same seeds) |
 |---|---|---|
-| `NONE` (战斗) | LLM | 由大模型选择打牌 / 结束回合 |
-| `EVENT` | 本地价值网络 | 正则解析事件选项效果,模型评估 |
-| `SHOP_SCREEN` | 本地价值网络 | 贪心搜索最优购买组合 |
-| `CARD_REWARD` | 本地价值网络 | 评估每张候选卡的价值 |
-| `REST` (营火) | 本地价值网络 | 评估休息/锻造/挖掘/回忆等选项 |
-| `GRID` | 本地价值网络 | 统一拦截删牌/强化/变换/复制选择 |
-| `BOSS_REWARD` | 本地价值网络 | 评估 Boss 遗物 |
-| `CHEST` | 硬编码 | 自动打开宝箱 |
-| `COMBAT_REWARD` | 硬编码 | 优先级:遗物 > 金币 > 药水 > 卡牌 |
-| `GAME_OVER` | 硬编码 | 自动前进 |
-| `MAP` | LLM | BFS 距离辅助 LLM 选路 |
-| `HAND_SELECT` | LLM | 卡牌选择类事件 |
+| **AIPlaySpire** | **90%** | **~2.0×** (LLM-only baseline) |
+| LLM-only baseline | — | 1.0× |
 
-## 主要特性
+Protocol:
 
-- **DeepSeek 直连**: 通过 OpenAI 兼容 SDK 直连 DeepSeek API(默认模型 `deepseek-v4-flash`),无需 litellm
-- **本地价值网络**: 自动加载 `selectcard/checkpoints/` 中的 v2 模型,覆盖商店/选卡/事件/营火/Boss 遗物等场景;Boss 战后奖励按下一幕楼层估值,模型返回非法选择时自动回退
-- **动作生效检测**: 提交动作后轮询状态变化,自动重试或回退
-- **安全回退链**: LLM 失败时依次尝试选项映射 → 前进/取消 → 战斗合法出牌 → 等待
-- **运行日志**: 每次运行自动保存 `debug/run_YYYYMMDD_HHMMSS.log` — 终端输出双写(去 ANSI、进度刷新转完整行),决策事件以 `EVENT key=value` 结构化行记录(含提交前后状态、是否生效)
-- **地图分析**: BFS 从当前节点计算到最近营火/商店/精英的距离,辅助 LLM 决策
-- **Omamori 感知**: 事件决策时自动检测是否持有驱魔护符,避免错估诅咒
-- **Set Transformer 价值网络**: 排列不变性的牌组编码,无需位置信息
+- **Difficulty:** Ascension 10 (A10). **20 runs** with randomly drawn seeds.
+- **Paired comparison:** the LLM-only baseline plays the same 20 seeds, so each pair shares identical game RNG.
+- **"Reached the final boss"** is defined as reaching the Act 3 boss room, or the Corrupt Heart on runs that take the Heart route. It measures survival/progression — *not* victory rate.
+- **n = 20** is a small sample; treat the results as directional evidence. The baseline reach rate is not yet recorded, hence "—".
 
-## 训练价值网络 (selectcard)
+Because both agents run the identical seeds, the floor-progression gap is a paired measurement, not seed luck. The project's core thesis is that long-horizon decisions need a learned value function rather than text generation; the paired protocol exists to test that claim, and the sample size will grow as more evaluation runs are recorded.
+
+## Overview
+
+AIPlaySpire is a hybrid agent that plays a whole run on its own: it routes the map, chooses cards and relics, buys from shops, resolves events, rests at campfires, collects the keys that unlock Act 4, and plays every combat — no human input after the run starts.
+
+Plain LLM prompting is a poor fit for Slay the Spire's decision structure, so the agent splits decisions into three regimes:
+
+1. **Long-horizon, enumerable decisions** — card rewards, purchases, removals, upgrades, boss relics, event branches. Each candidate can be applied to the current state and scored, but its true value only shows up acts later. A **learned value function** V(S) — trained on ~157M decision states replayed from 13.4M validated recorded runs — provides the long-horizon comparison; candidates are evaluated as hypothetical next-states (enumerate → simulate → argmax V).
+2. **Combat** — exact, deterministic, and cheap to run once game state is serialized. A **best-first tree search** explores card-play/targeting/potion sequences on an accelerated copy of the real game engine, with budgets up to 50k branch expansions per turn.
+3. **Everything unstructured** — rare screens, legacy payloads, novel situations. An **LLM** with a structured-output contract acts as the general reasoning fallback, and deterministic rules handle the few decisions that have a provably correct answer (opening chests, claiming key relics).
+
+## System Architecture
+
+![AIPlaySpire system architecture](docs/images/system-architecture.png)
+
+*End-to-end system architecture: game-side Java mods, the Python agent, the learned value model, and the combat search pipeline.*
+
+```mermaid
+flowchart TB
+    Game["Slay the Spire + CommunicationMod (in-game HTTP server, :5000)"] -->|state JSON| Agent
+    Agent -->|actions| Game
+    subgraph Agent["Python agent (sts_ai_framework)"]
+        V["Learned value network V(S)"] --> D{"Decision"}
+        LLM["LLM"] --> D
+        R["Map router + hard rules"] --> D
+    end
+    D -->|non-combat choices| Game
+    D -->|combat detected| Combat["BattleAiMod tree search<br/>(headless 2nd game instance, :5125)"]
+    Combat -->|winning command list| Game
+```
+
+Components:
+
+- **CommunicationMod** (`StSCommunicationMod/`) — Java mod that exposes the live game over HTTP (`/state`, `/action`, `/card_info`): full state JSON with structured event semantics (~50 vanilla events classified as forced/deterministic/complex), grid and reward metadata, and executable actions submitted through the real game UI.
+- **sts_ai_framework/** — Python agent loop: polls state, classifies the screen, picks a decision path, submits one action, and verifies it actually took effect (retry / fallback otherwise).
+- **BattleAiMod** (`scumthespire/`) — combat AI owned by a separate headless game instance, coordinated with the visible client through `STSStateSaver` (full combat-state serialization incl. RNG) and `LudicrousSpeed` (blocking, animation-free engine execution). The combat mods in this repo are forked from [boardengineer](https://github.com/boardengineer)'s open-source mods and substantially extended here (tactical turn evaluation, search budgets, replay verification); see [AUTOFIGHT.md](AUTOFIGHT.md) for the full design.
+
+## Learned Value Model
+
+The core of the project is **STSValueNetwork** (`selectcard/`) — a ~0.7M-parameter Set Transformer that predicts how far a run will go from any non-combat state.
+
+**Input — an unordered set of deck cards and relics.** Each unique item (card/relic ID, upgrade level) becomes one token by summing an ID embedding, an upgrade embedding, and a count embedding; identical cards are aggregated, so a 5× Strike is one token with count 5.
+
+```
+[CLS] + [GLOBAL] + [BOSS] + item_1 ... item_n
+```
+
+- **[CLS]** — pooled at the output for prediction.
+- **[GLOBAL]** — engineered features (act one-hot + progress, HP ratio/absolute, gold, ascension) through an MLP.
+- **[BOSS]** — embedding of the *visible* boss of the current act (public info once the map is revealed), added to a learned boss-context token.
+- **No positional encoding.** Decks and relics are sets — permutation invariance is deliberate, not an omission. Pre-LayerNorm transformer blocks follow, then CLS pooling into the prediction head.
+
+**Output — a stopping-hazard distribution, not a single survival label.** The head emits 20 logits, one per floor bucket (~every 2–3 floors from floor 3 to 57), each the conditional risk that the run *stops before* that endpoint, plus one conditional logit for winning the Heart fight. The survival curve is the cumulative product of (1 − hazard), which makes monotone long-horizon survival a built-in structural constraint:
+
+```
+hazard composition → survival S(F) → E[terminal floor] + β·P(Heart)   (β = 3 floor-equivalents, normalized by 57 + β)
+```
+
+The result is a single scalar **V(S)** used for action comparison. Trained on censored as well as completed runs (a run that dies at floor 40 labels only the buckets it actually reached), with per-bucket hazard targets and ascension-band-balanced weighting, so A0–A20 all contribute equally.
+
+**How it decides:** for every candidate (pick this card, buy this relic, remove that card, smith that card, take this event branch), the agent applies the change to the current state, re-encodes, and scores V — the best-scoring hypothetical state wins. This is why the model is invoked in-process at decision time rather than as an offline predictor.
+
+**Offline validation** (held-out test split, from `selectcard/checkpoints/` test logs):
+
+- Trained on ~126M train states, sampled from a 20.3M-run corpus of recorded vanilla runs of which 13.4M passed replay-based validation (exact deck/relic reconstruction against the end-of-run log; content cross-checked against a decompiled vanilla catalog).
+- Expected-terminal-floor MAE of **~8.4 floors** vs ~9.9 for a constant-hazard baseline, on test states with fully observed outcomes.
+- Heart-win prediction AUROC ≈ **0.89** on the same test states.
+
+## Decision Pipeline
+
+Every decision in a run is owned by exactly one mechanism:
+
+| Decision | Mechanism |
+|---|---|
+| Card rewards, generated-card grids (pick / skip) | Value network (per-candidate V(S)) |
+| Shop purchases | Value network (evaluates each purchasable item; buys while V improves) |
+| Campfire: rest / smith / dig / lift | Value network, incl. per-card ranking of the smith target; Act-3 Ruby-key rule overrides |
+| Events (structured semantics) | Value network for deterministic-effect branches; conservative rules for high HP-risk events; dedicated multi-step flow for the Cursed Tome |
+| Card remove / upgrade / transform / duplicate grids | Value network ranks target cards (curse-aware for transforms) |
+| Boss relics | Value network |
+| Combat rewards | Fixed priority (relic > gold > potion > card) + structured Emerald/Sapphire key claims with value-based key-vs-relic tradeoff |
+| Chests | Auto-open |
+| **Map routing** | **Deterministic HP-aware router** — room-value scoring, rest-vs-elite risk vs current HP, 1-step lookahead, Act-2 elite HP buffer; LLM only as fallback on partial payloads |
+| **Combat** (card plays, targeting, potions, end-turn, in-combat selections) | **BattleAiMod best-first tree search** on the real (fast-forwarded) engine; turn nodes prioritized by a hand-tuned tactical evaluator (threat, survival bands, lethal breakpoints); budgets 5k–50k expansions; result replayed command-by-command with per-step state-diff verification |
+| Novel / unstructured screens | LLM with JSON-output contract + safe-action fallback chain |
+
+The design rule of thumb: **if a decision can be enumerated and needs long-horizon value → value network; if it is exact and reversible → search; if it is ambiguous or new → LLM.** The LLM is the last resort, not the default brain.
+
+## Repository Structure
+
+| Directory | Role |
+|---|---|
+| `sts_ai_framework/` | Python agent: state polling, decision dispatch, LLM client, run logging ([README](sts_ai_framework/README.md)) |
+| `selectcard/` | PyTorch project for the Set Transformer value network: replay-based data pipeline, training, inference engine ([README](selectcard/README.md)) |
+| `StSCommunicationMod/` | Java mod: in-game HTTP bridge exposing state JSON and executing actions |
+| `STSStateSaver/` | Java mod: full combat-state serialization/restore (incl. RNG) — the search rewind primitive |
+| `LudicrousSpeed/` | Java mod: animation-free, blocking execution of the real game engine + command interface |
+| `scumthespire/` | Java mod ("Battle Ai Mod"): combat tree search, tactical evaluator, client/server networking |
+| `cardcrawl/` | Decompiled vanilla game source — used as the read-only content catalog for data validation |
+
+Architecture and run instructions for the combat pipeline (two game instances, search budgets, mod build order via `./build_all.sh`) are documented in [AUTOFIGHT.md](AUTOFIGHT.md). Note: a few repository docs are in Chinese.
+
+## Training the Value Network
 
 ```bash
 cd selectcard
 
-# 数据预处理:原始 JSON → Parquet 训练样本
+# 1. Process raw run archives (JSON) into labeled Parquet states (replay + validation)
 python src/data_pipeline.py
 
-# 训练模型
+# 2. Train (v2-style checkpoint embeds config, vocabulary, and normalization)
 python src/train.py
 
-# 启动推理 API
-uvicorn src.api:app --reload
+# 3. Evaluate the best checkpoint on the held-out test split
+python src/train.py --test-only
+
+# 4. Optional: serve the same engine over HTTP for external callers
+uvicorn src.api:app --reload      # POST /recommend/choice, /recommend/shop
 ```
 
-模型输入: 牌组(卡牌 ID + 升级等级 + 数量)、遗物、楼层、HP、金币、进阶等级
-模型输出: 当前阶段存活的概率 (Act 1 / Act 2 / Act 3 分段标签)
+Model unit tests: `python -m unittest test_value_network_v2.py` (from `selectcard/src/`).
 
-## 项目文件说明
+## Quick Start
 
+**Prerequisites:** Slay the Spire, ModTheSpire + BaseMod, Java 8+, Python 3.10+ (PyTorch for the model), and a DeepSeek/OpenAI-compatible API key for the LLM fallback.
+
+```bash
+# 1. Build the game mods (Maven) — full build order in AUTOFIGHT.md / build_all.sh
+./build_all.sh        # → jars in _ModTheSpire/mods/
+
+# 2. Launch the game via ModTheSpire with BaseMod + CommunicationMod (+ combat mods)
+#    → the mod starts its HTTP bridge on localhost:5000
+
+# 3. Python agent
+pip install -r sts_ai_framework/requirements.txt   # + PyTorch/pandas/fastapi for selectcard (see its README)
+# create sts_ai_framework/.env with: STS_API_BASE_URL=http://localhost:5000
+#   LLM_MODEL=<model>  DEEPSEEK_API_KEY=<key>   (key list in sts_ai_framework/README.md)
+python -m sts_ai_framework --interval 2.0
 ```
-aiplayspire/
-├── README.md                          ← 本文件
-├── AUTOFIGHT.md                       ← 自动战斗模块说明与架构文档
-├── CLAUDE.md                          ← Claude Code 项目指引
-├── TODO.md                            ← 当前开发任务清单
-├── .gitignore
-├── StSCommunicationMod/               ← Java Mod
-│   ├── src/main/java/                 ← Mod 源码
-│   ├── pom.xml                        ← Maven 配置
-│   ├── Build.java                     ← 无 Maven 构建脚本
-│   └── build.ps1                      ← PowerShell 构建
-├── sts_ai_framework/                  ← AI 客户端
-│   ├── __main__.py                    ← CLI 入口与主循环(动作生效检测、运行日志安装)
-│   ├── models.py                      ← Pydantic 状态/动作模型
-│   ├── game_client.py                 ← HTTP 通信
-│   ├── knowledge_base.py              ← 怪物 AI 模式 / 卡牌知识
-│   ├── agent_base.py                  ← Agent 抽象基类
-│   ├── llm_agent.py                   ← LLMAgent 组装(DeepSeek 客户端 + 本地价值网络)
-│   ├── llm_agent_parts/               ← Mixin 决策组件(按职责拆分)
-│   │   ├── action_mixin.py            ← choose_action 主流程与状态流转
-│   │   ├── choice_mixin.py            ← 统一选项列表 / 按钮处理 / 战斗回退
-│   │   ├── decision_mixin.py          ← 本地价值网络决策(商店/选卡/事件/Boss遗物)
-│   │   └── info_prompt_mixin.py       ← 卡牌解析、地图摘要、Prompt 构建
-│   ├── run_log.py                     ← 运行日志(终端双写 + EVENT 结构化事件)
-│   ├── config.py                      ← 配置加载
-│   ├── tests/                         ← 单元测试(test_run_log / test_structured_events)
-│   ├── requirements.txt
-│   └── .env                           ← API Key 等敏感配置
-├── selectcard/                        ← 深度学习项目
-│   ├── src/
-│   │   ├── data_pipeline.py           ← 数据流水线(→ processed_data_v2/)
-│   │   ├── reconstructor.py           ← 状态重建器
-│   │   ├── model.py                   ← Set Transformer 模型
-│   │   ├── config.py                  ← 模型配置(架构消融开关 GLOBAL_CONDITIONING / NORM_POSITION)
-│   │   ├── dataset.py                 ← 数据集 / 分词器
-│   │   ├── checkpointing.py           ← 检查点保存(v2 检查点内嵌配置与词汇表)
-│   │   ├── data_contract.py           ← 训练数据契约
-│   │   ├── train.py                   ← 训练脚本
-│   │   ├── inference.py               ← 推理引擎(STSInferenceEngine)
-│   │   └── api.py                     ← FastAPI 推理服务
-│   ├── checkpoints/                   ← 模型权重(v2 检查点内嵌配置,与旧版不兼容)
-│   └── processed_data_v2/             ← Parquet 训练数据(生成物,不提交)
-├── STSStateSaver/                     ← 战斗状态序列化 Mod
-│   └── src/main/java/savestate/
-│       ├── SaveState.java             ← 根状态对象,完整战斗状态序列化
-│       ├── PlayerState.java           ← 玩家状态
-│       ├── monsters/                  ← 怪物状态(exordium/city/beyond/ending)
-│       ├── powers/                    ← 能力效果状态(按角色/怪物分类)
-│       ├── relics/                    ← 遗物状态
-│       ├── orbs/                      ← 充能球状态
-│       ├── actions/                   ← 动作队列状态
-│       └── selectscreen/             ← 选择界面状态
-├── LudicrousSpeed/                    ← 快速战斗模拟引擎
-│   └── src/main/java/ludicrousspeed/
-│       ├── simulator/
-│       │   ├── ActionSimulator.java   ← 阻塞式模拟主循环
-│       │   ├── commands/              ← Command 模式(打牌/药水/选择)
-│       │   └── patches/               ← 游戏行为覆写(加速/跳过渲染)
-│       └── Controller.java            ← 控制器接口
-├── scumthespire/                      ← 战斗 AI 树搜索
-│   └── src/main/java/battleaimod/
-│       ├── BattleAiMod.java           ← Mod 入口
-│       ├── battleai/
-│       │   ├── BattleAiController.java ← 树搜索控制器
-│       │   ├── TurnNode.java          ← 回合节点(按价值排序)
-│       │   ├── StateNode.java         ← 单次动作状态快照
-│       │   └── playorder/             ← 各角色出牌启发式排序
-│       ├── networking/
-│       │   ├── AiServer.java          ← AI 服务端(端口5125)
-│       │   └── AiClient.java          ← AI 客户端
-│       └── ValueFunctions.java        ← 状态价值评估函数
-├── build_all.sh                       ← 一键构建所有 Java Mod
-└── cardcrawl/                         ← 反编译游戏源码(只读)
-    ├── cards/                         ← 卡牌类 (~300+)
-    ├── relics/                        ← 遗物类 (~170)
-    ├── powers/                        ← 能力效果类
-    ├── monsters/                      ← 怪物类
-    ├── actions/                       ← 动作队列类
-    ├── rooms/                         ← 房间类型
-    ├── events/                        ← 事件类
-    └── ...
-```
+
+For the combat pipeline (headless search instance, save-state dirs, BattleAiMod activation in fights) follow [AUTOFIGHT.md](AUTOFIGHT.md).
+
+## Tech Stack
+
+**Python** — agent loop, HTTP client, JSON state models · **PyTorch** — Set Transformer value network, replay data pipeline (pandas/Parquet) · **Transformers** — custom permutation-invariant Set Attention blocks, Pre-LN, no positional encoding · **FastAPI** — optional inference server · **LLM API** — OpenAI-compatible chat completions (DeepSeek), JSON-output prompting, used as reasoning fallback · **Java** — four game mods (Maven), in-game HTTP server (JDK `HttpServer`) · **Tree search** — best-first over turn nodes with expansion budgets, executed on the real game engine · **Custom game modding** — ModTheSpire/BaseMod patching, UI event simulation, state serialization.
+
+## Project Status
+
+Experimental research-engineering project under active iteration; event coverage, combat-search robustness, and value-model quality are the main work areas.
+
+**Attribution and disclaimers:** Slay the Spire is a game by Mega Crit — this project is an unofficial research effort, unaffiliated with Mega Crit. The combat-search mods (`STSStateSaver`, `LudicrousSpeed`, `scumthespire`) are derived from [boardengineer](https://github.com/boardengineer)'s open-source mods of the same names and have been extended here (tactical evaluator, search-budget profiles, replay/state-diff verification, server auto-spawn, recall support).
