@@ -4,28 +4,6 @@
 
 An end-to-end AI agent that plays complete runs of **Slay the Spire** — combining a learned, permutation-invariant state-value model, an LLM, and a combat tree-search engine to make every in-run decision.
 
-> **Ascension-10 evaluation (n = 20 randomly seeded runs):** AIPlaySpire **reached the final boss in 90% of runs** and posted **~2× the average floor progression** of an LLM-only agent on the *identical seeds*.
->
-> _Reaching the final boss is not a win rate — see [Evaluation](#evaluation)._
-
----
-
-## Evaluation
-
-| Method | Final-boss reach rate (A10) | Avg floor progression (same seeds) |
-|---|---|---|
-| **AIPlaySpire** | **90%** | **~2.0×** (LLM-only baseline) |
-| LLM-only baseline | — | 1.0× |
-
-Protocol:
-
-- **Difficulty:** Ascension 10 (A10). **20 runs** with randomly drawn seeds.
-- **Paired comparison:** the LLM-only baseline plays the same 20 seeds, so each pair shares identical game RNG.
-- **"Reached the final boss"** is defined as reaching the Act 3 boss room, or the Corrupt Heart on runs that take the Heart route. It measures survival/progression — *not* victory rate.
-- **n = 20** is a small sample; treat the results as directional evidence. The baseline reach rate is not yet recorded, hence "—".
-
-Because both agents run the identical seeds, the floor-progression gap is a paired measurement, not seed luck. The project's core thesis is that long-horizon decisions need a learned value function rather than text generation; the paired protocol exists to test that claim, and the sample size will grow as more evaluation runs are recorded.
-
 ## Overview
 
 AIPlaySpire is a hybrid agent that plays a whole run on its own: it routes the map, chooses cards and relics, buys from shops, resolves events, rests at campfires, collects the keys that unlock Act 4, and plays every combat — no human input after the run starts.
