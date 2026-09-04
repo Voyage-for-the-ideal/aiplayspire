@@ -18,6 +18,7 @@ sts_ai_framework/
   config.py                       # .env 配置加载
   game_client.py                  # /state /action /card_info HTTP 客户端
   models.py                       # Pydantic 状态与动作模型
+  run_lifecycle.py                # 对局生命周期状态机：结束→主菜单→选角/难度→下一局
   knowledge_base.py               # 怪物/卡牌知识
   agent_base.py                   # Agent 抽象基类
   llm_agent.py                    # LLMAgent 组装与初始化（DeepSeek 客户端 + 本地价值网络）
@@ -29,6 +30,8 @@ sts_ai_framework/
     decision_mixin.py             # 本地 value model 决策（商店/选卡/事件/Boss遗物）
     info_prompt_mixin.py          # 卡牌解析、地图摘要、Prompt 构建
   tests/
+    test_main_loop.py             # 战斗接管判定回归测试
+    test_run_lifecycle.py         # 生命周期状态机回归测试
     test_run_log.py               # 运行日志 Tee/ANSI/事件格式测试
     test_structured_events.py     # 结构化事件与动作生效检测测试
   requirements.txt
@@ -70,7 +73,20 @@ DEBUG_PROMPT_FILE=debug/latest_prompt.txt
 # DeepSeek API (OpenAI 兼容格式)
 DEEPSEEK_API_KEY=sk-...
 # DEEPSEEK_BASE_URL=https://api.deepseek.com
+
+# 自动重开（对局结束后自动开始下一局，需要 CommunicationMod >= 1.4.0）
+AUTO_RESTART=true
+CHARACTER=IRONCLAD      # IRONCLAD / SILENT / DEFECT / WATCHER
+ASCENSION=15            # 进阶等级，0 = 普通难度
+RESTART_DELAY=2.0       # 对局结束/开局提交后的额外等待（秒）
 ```
+
+## 自动重开
+
+对局结束（死亡/胜利/解锁界面）后，框架会自动：返回主菜单 → 按配置选择角色与进阶等级 → 开始下一局 → Neow 祝福走现有 LLM 决策链路。期间 `run_log` 会记录 `run_end` / `run_start` 结构化事件（含原因、角色、难度）。若主菜单存在残留存档，会先按游戏原生逻辑放弃该存档再开新局。
+
+- 需要 CommunicationMod 1.4.0+（旧版 mod 下主菜单不可见，框架会照旧重试后退出）。
+- 关闭自动重开：`.env` 设 `AUTO_RESTART=false` 或命令行 `--no-auto-restart`（对局结束停在结算界面等待人工处理）。
 
 ## 启动
 
@@ -86,6 +102,10 @@ python -m sts_ai_framework --model deepseek-v4-flash --interval 2.0
 1. --model：覆盖 .env 的 LLM_MODEL。
 2. --interval：轮询与行动间隔（秒）。
 3. --debug-prompt-file：将最新 Prompt 持续写入指定文件。
+4. --character：自动重开角色（默认取 .env 的 CHARACTER，IRONCLAD/SILENT/DEFECT/WATCHER）。
+5. --ascension：自动重开进阶等级（默认取 .env 的 ASCENSION，0 = 普通）。
+6. --no-auto-restart：关闭自动重开。
+7. --restart-delay：对局结束/开局提交后的额外等待（秒）。
 
 ## 通信与动作协议
 
@@ -106,6 +126,7 @@ Mod 接口：
 7. confirm
 8. skip
 9. cancel
+10. set_ascension（生命周期：设置角色选择界面的进阶等级，0 关闭进阶模式）
 
 ## 行为策略概览
 

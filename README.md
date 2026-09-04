@@ -143,6 +143,8 @@ pip install -r sts_ai_framework/requirements.txt   # + PyTorch/pandas/fastapi fo
 python -m sts_ai_framework --interval 2.0
 ```
 
+Runs restart automatically: when a run ends (death/victory), the agent returns to the main menu, re-picks the configured character (`CHARACTER`, default IRONCLAD) and ascension level (`ASCENSION`, default 15), and starts the next run — see the option list in [sts_ai_framework/README.md](sts_ai_framework/README.md) (needs CommunicationMod 1.4.0+).
+
 For the combat pipeline (headless search instance, save-state dirs, BattleAiMod activation in fights) follow [AUTOFIGHT.md](AUTOFIGHT.md).
 
 ## Tech Stack

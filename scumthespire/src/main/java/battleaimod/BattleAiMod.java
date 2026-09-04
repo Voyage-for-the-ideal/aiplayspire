@@ -9,6 +9,7 @@ import basemod.patches.com.megacrit.cardcrawl.helpers.PotionLibrary.PotionHelper
 import battleaimod.battleai.BattleAiController;
 import battleaimod.battleai.CommandRunnerController;
 import battleaimod.battleai.playorder.*;
+import battleaimod.evaluation.TacticalEvaluator;
 import battleaimod.networking.AiClient;
 import battleaimod.networking.AiServer;
 import battleaimod.networking.BattleClientController;
@@ -62,6 +63,7 @@ import ludicrousspeed.LudicrousSpeedMod;
 import ludicrousspeed.simulator.commands.HandSelectCommand;
 import ludicrousspeed.simulator.commands.HandSelectConfirmCommand;
 import org.lwjgl.opengl.Display;
+import savestate.CardState;
 import savestate.PotionState;
 import savestate.SaveState;
 import savestate.SaveStateMod;
@@ -278,6 +280,9 @@ public class BattleAiMod implements PostInitializeSubscriber, PostUpdateSubscrib
             Gdx.app.exit();
             return;
         }
+        if (!isServer) {
+            handleRunBoundary();
+        }
         if (steveMessage != null) {
             String messageToDisplay = String.format(" %s... NL %s", MESSAGE_WORDS
                     .getOrDefault(AbstractDungeon.player.chosenClass, "Processing"), steveMessage);
@@ -367,6 +372,50 @@ public class BattleAiMod implements PostInitializeSubscriber, PostUpdateSubscrib
         if (autoStartAi) {
             shouldStartClient = true;
         }
+    }
+
+    private static boolean wasInRun = false;
+
+    /**
+     * Client-side run-boundary detection: on the falling edge of
+     * CardCrawlGame.isInARun() (death/victory -> menu), drop every per-run
+     * controller and counter so the next run — possibly a different character
+     * or ascension started by the framework — begins from a clean slate.
+     * The server instance lives in a permanent synthetic run (GameStartupPatch)
+     * and is excluded by the caller.
+     */
+    private void handleRunBoundary() {
+        boolean inRun = CardCrawlGame.isInARun();
+        if (wasInRun && !inRun) {
+            resetRunState();
+        }
+        wasInRun = inRun;
+    }
+
+    private static void resetRunState() {
+        System.out.println("BattleAiMod: run ended, resetting per-run state.");
+        if (rerunController != null) {
+            rerunController.cancel();
+            rerunController = null;
+        }
+        battleAiController = null;
+        replayController = null;
+        saveState = null;
+        replayStartState = null;
+        replayCommands = null;
+        shouldStartAiFromServer = false;
+        shouldStartReplay = false;
+        shouldStartClient = false;
+        controller = null;
+        AiClient.fileIndex = 0;
+        AiClient.waiting = false;
+        AiClient.autoReplanPending = false;
+        AiClient.preferredCommandFilename = null;
+        AiClient.preferredStartFilename = null;
+        BattleClientController.resetReplayRecovery();
+        TacticalEvaluator.evaluationCount = 0;
+        TacticalEvaluator.evaluationNanos = 0;
+        CardState.resetFreeCards();
     }
 
     @Override

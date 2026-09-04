@@ -168,21 +168,23 @@ class EventState(BaseModel):
     choices: List[EventChoiceState] = Field(default_factory=list)
 
 class GameState(BaseModel):
-    player: PlayerState
+    # In-run fields. Menu states (MAIN_MENU/CHAR_SELECT) omit them, so every
+    # field must stay optional with a safe default.
+    player: Optional[PlayerState] = None
     deck: List[Card] = []
     relics: List[RelicState] = []
-    hand: List[Card]
+    hand: List[Card] = []
     draw_pile: List[Card] = []
     discard_pile: List[Card] = []
     exhaust_pile: List[Card] = []
-    draw_pile_size: int
-    discard_pile_size: int
-    exhaust_pile_size: int
-    monsters: List[MonsterState]
+    draw_pile_size: int = 0
+    discard_pile_size: int = 0
+    exhaust_pile_size: int = 0
+    monsters: List[MonsterState] = []
     potions: List[PotionState] = []
-    floor: int
-    act: int
-    room_phase: str
+    floor: Optional[int] = None
+    act: Optional[int] = None
+    room_phase: Optional[str] = None
     first_room_chosen: bool = False
     map_ascii: str = ""
     map_position: Optional[MapPositionState] = None
@@ -205,6 +207,15 @@ class GameState(BaseModel):
     next_boss: str = "UNKNOWN"
     is_end_turn_button_enabled: bool = False
     event: Optional[EventState] = None
+    # Run identity (in-run states)
+    character: Optional[str] = None
+    # Run-lifecycle fields: game_over_reason on GAME_OVER (defeat/victory/unlock),
+    # the rest on CHAR_SELECT.
+    game_over_reason: Optional[str] = None
+    selected_character: Optional[str] = None
+    ascension_mode: Optional[bool] = None
+    ascension_level: Optional[int] = None
+    ascension_max: Optional[int] = None
 
 class ActionType(str, Enum):
     PLAY = "play"
@@ -215,6 +226,7 @@ class ActionType(str, Enum):
     CHOOSE = "choose"
     SKIP = "skip"
     CANCEL = "cancel"
+    SET_ASCENSION = "set_ascension"
 
 class GameAction(BaseModel):
     type: ActionType
@@ -222,7 +234,8 @@ class GameAction(BaseModel):
     potion_index: Optional[int] = Field(None, description="Index of the potion slot to use (0-based)")
     target_index: Optional[int] = Field(None, description="Index of the target monster (0-based)")
     choice_index: Optional[int] = Field(None, description="Index of the choice to make (0-based)")
-    
+    level: Optional[int] = Field(None, description="Ascension level for set_ascension (0 disables ascension mode)")
+
     def to_api_payload(self) -> Dict[str, Any]:
         payload = {"type": self.type.value}
         if self.card_index is not None:
@@ -235,6 +248,8 @@ class GameAction(BaseModel):
             payload["target"] = self.target_index
         if self.choice_index is not None:
             payload["choice_index"] = self.choice_index
+        if self.level is not None:
+            payload["level"] = self.level
         return payload
 
 

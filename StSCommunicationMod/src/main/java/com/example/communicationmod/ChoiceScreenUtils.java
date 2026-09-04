@@ -18,6 +18,7 @@ import com.megacrit.cardcrawl.screens.select.HandCardSelectScreen;
 import com.megacrit.cardcrawl.shop.ShopScreen;
 import com.megacrit.cardcrawl.shop.StorePotion;
 import com.megacrit.cardcrawl.shop.StoreRelic;
+import com.megacrit.cardcrawl.screens.mainMenu.MainMenuScreen;
 import com.megacrit.cardcrawl.ui.buttons.*;
 import com.megacrit.cardcrawl.ui.campfire.AbstractCampfireOption;
 import com.example.communicationmod.patches.CardRewardScreenPatch;
@@ -46,6 +47,8 @@ public class ChoiceScreenUtils {
         HAND_SELECT,
         GAME_OVER,
         COMPLETE,
+        MAIN_MENU,
+        CHAR_SELECT,
         NONE
     }
 
@@ -75,6 +78,20 @@ public class ChoiceScreenUtils {
     }
 
     public static ChoiceType getCurrentChoiceType() {
+        // Out-of-run screens must be classified before any AbstractDungeon
+        // dereference (the dungeon is already disposed at the menu).
+        if (!CardCrawlGame.isInARun()) {
+            if (RunSetupUtils.isMenuAvailable()) {
+                switch (CardCrawlGame.mainMenuScreen.screen) {
+                    case CHAR_SELECT:
+                        return ChoiceType.CHAR_SELECT;
+                    default:
+                        return ChoiceType.MAIN_MENU;
+                }
+            }
+            return ChoiceType.NONE;
+        }
+
         if (!AbstractDungeon.isScreenUp) {
             if (AbstractDungeon.getCurrRoom().phase == AbstractRoom.RoomPhase.EVENT || (AbstractDungeon.getCurrRoom().event != null && AbstractDungeon.getCurrRoom().phase == AbstractRoom.RoomPhase.COMPLETE)) {
                 return ChoiceType.EVENT;
@@ -144,6 +161,24 @@ public class ChoiceScreenUtils {
                     choices.add(card.name.toLowerCase());
                 }
                 break;
+            case GAME_OVER:
+                // Death/victory screens offer "return to menu"; the unlock
+                // screens that appear during the same return flow offer confirm.
+                if (AbstractDungeon.screen == AbstractDungeon.CurrentScreen.UNLOCK
+                        || AbstractDungeon.screen == AbstractDungeon.CurrentScreen.NEOW_UNLOCK) {
+                    choices.add("confirm");
+                } else {
+                    choices.add("return_to_menu");
+                }
+                break;
+            case MAIN_MENU:
+                if (CardCrawlGame.mainMenuScreen != null
+                        && CardCrawlGame.mainMenuScreen.screen == MainMenuScreen.CurScreen.MAIN_MENU) {
+                    choices.add("play");
+                }
+                break;
+            case CHAR_SELECT:
+                return RunSetupUtils.getCharSelectChoices();
         }
         return choices;
     }
@@ -210,6 +245,15 @@ public class ChoiceScreenUtils {
                     m.setAccessible(true);
                     m.invoke(AbstractDungeon.handCardSelectScreen);
                 } catch (Exception e) { e.printStackTrace(); }
+                break;
+            case GAME_OVER:
+                RunSetupUtils.makeGameOverChoice();
+                break;
+            case MAIN_MENU:
+                RunSetupUtils.openCharSelectFromMenu();
+                break;
+            case CHAR_SELECT:
+                RunSetupUtils.selectCharacter(choice_index);
                 break;
         }
     }
@@ -686,6 +730,15 @@ public class ChoiceScreenUtils {
     }
     
     public static void pressConfirmButton() {
+        if (!CardCrawlGame.isInARun()) {
+            if (getCurrentChoiceType() == ChoiceType.CHAR_SELECT) {
+                RunSetupUtils.confirmCharacterSelect();
+            }
+            return;
+        }
+        if (AbstractDungeon.getCurrRoom() == null) {
+            return;
+        }
         if (AbstractDungeon.screen == AbstractDungeon.CurrentScreen.GRID) {
             AbstractDungeon.gridSelectScreen.confirmButton.hb.clicked = true;
         } else if (AbstractDungeon.screen == AbstractDungeon.CurrentScreen.HAND_SELECT) {
@@ -706,6 +759,9 @@ public class ChoiceScreenUtils {
     }
     
     public static void pressCancelButton() {
+        if (!CardCrawlGame.isInARun()) {
+            return;
+        }
         if (AbstractDungeon.screen == AbstractDungeon.CurrentScreen.MAP) {
             if (AbstractDungeon.dungeonMapScreen.dismissable) {
                 AbstractDungeon.dungeonMapScreen.clicked = true; // Logic might be more complex to dismiss

@@ -5,6 +5,7 @@ import com.google.gson.JsonObject;
 import com.megacrit.cardcrawl.actions.common.EndTurnAction;
 import com.megacrit.cardcrawl.cards.AbstractCard;
 import com.megacrit.cardcrawl.cards.CardQueueItem;
+import com.megacrit.cardcrawl.core.CardCrawlGame;
 import com.megacrit.cardcrawl.dungeons.AbstractDungeon;
 import com.megacrit.cardcrawl.monsters.AbstractMonster;
 import com.megacrit.cardcrawl.potions.AbstractPotion;
@@ -31,13 +32,18 @@ public class ActionController {
             JsonObject command = gson.fromJson(jsonCommand, JsonObject.class);
             String type = command.get("type").getAsString();
 
-            if (AbstractDungeon.player == null || AbstractDungeon.getCurrRoom() == null) {
-                System.err.println("Cannot execute command: Game not ready.");
-                return;
-            }
+            // Run-lifecycle commands (choose/proceed/skip/set_ascension/wait)
+            // must also work outside a run (menu, char select, death screen).
+            // Only the combat commands require an active room.
+            boolean inRun = CardCrawlGame.isInARun()
+                    && AbstractDungeon.player != null && AbstractDungeon.getCurrRoom() != null;
 
             switch (type) {
                 case "play":
+                    if (!inRun) {
+                        System.err.println("Cannot play cards outside of a run.");
+                        break;
+                    }
                     if (AbstractDungeon.getCurrRoom().phase != AbstractRoom.RoomPhase.COMBAT) {
                         System.err.println("Cannot play cards outside of combat.");
                         break;
@@ -48,6 +54,10 @@ public class ActionController {
                     playCard(cardIndex, targetIndex);
                     break;
                 case "end_turn":
+                    if (!inRun) {
+                        System.err.println("Cannot end turn outside of a run.");
+                        break;
+                    }
                     if (AbstractDungeon.getCurrRoom().phase != AbstractRoom.RoomPhase.COMBAT) {
                         System.err.println("Cannot end turn outside of combat.");
                         break;
@@ -71,6 +81,10 @@ public class ActionController {
                     ChoiceScreenUtils.pressCancelButton();
                     break;
                 case "potion":
+                    if (!inRun) {
+                        System.err.println("Cannot use potions outside of a run.");
+                        break;
+                    }
                     if (AbstractDungeon.getCurrRoom().phase != AbstractRoom.RoomPhase.COMBAT) {
                         System.err.println("Cannot use potion outside of combat.");
                         break;
@@ -83,6 +97,13 @@ public class ActionController {
                     int potionTargetIndex = command.has("target_index") ? command.get("target_index").getAsInt() : -1;
                     System.out.println("Executing Potion Command: potionIndex=" + potionIndex + ", targetIndex=" + potionTargetIndex);
                     usePotion(potionIndex, potionTargetIndex);
+                    break;
+                case "set_ascension":
+                    if (!command.has("level")) {
+                        System.err.println("set_ascension command missing level.");
+                        break;
+                    }
+                    RunSetupUtils.setAscension(command.get("level").getAsInt());
                     break;
                 case "wait":
                     // Do nothing, just wait

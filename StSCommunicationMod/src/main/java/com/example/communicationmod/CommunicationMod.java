@@ -35,14 +35,13 @@ public class CommunicationMod implements PostInitializeSubscriber, PostUpdateSub
     public void receivePostUpdate() {
         // Update state if requested (this runs on game thread)
         StateController.updateState();
-        
+
         // Process card info requests
         CardInfoController.processRequests();
 
-        // Only process actions if we are in a valid game state (e.g., in combat)
-        if (CardCrawlGame.isInARun() && AbstractDungeon.player != null && AbstractDungeon.currMapNode != null && AbstractDungeon.getCurrRoom() != null) {
-            // Allow processing actions in any phase, not just combat (needed for rewards, events, shops, etc.)
-            ActionController.processQueue();
-        }
+        // Drain the queue unconditionally: run-lifecycle commands (menu,
+        // character select, game over) arrive outside a run. Per-command
+        // in-run guards live in ActionController.executeCommand.
+        ActionController.processQueue();
     }
 }

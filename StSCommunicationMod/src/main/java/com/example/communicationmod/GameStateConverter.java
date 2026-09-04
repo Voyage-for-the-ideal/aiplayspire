@@ -20,6 +20,7 @@ import com.megacrit.cardcrawl.rewards.RewardItem;
 import com.megacrit.cardcrawl.rooms.AbstractRoom;
 import com.megacrit.cardcrawl.rooms.MonsterRoomBoss;
 import com.megacrit.cardcrawl.rooms.TreasureRoomBoss;
+import com.megacrit.cardcrawl.screens.mainMenu.MainMenuScreen;
 import com.megacrit.cardcrawl.screens.select.GridCardSelectScreen;
 import com.megacrit.cardcrawl.ui.buttons.GridSelectConfirmButton;
 import com.megacrit.cardcrawl.ui.buttons.EndTurnButton;
@@ -47,7 +48,13 @@ public class GameStateConverter {
     }
 
     public static String getGameStateJson() {
-        if (!CardCrawlGame.isInARun() || AbstractDungeon.player == null || AbstractDungeon.currMapNode == null || AbstractDungeon.getCurrRoom() == null) {
+        // Out-of-run is a controllable state now (auto next run): report the
+        // menu/char-select instead of an error. Remaining in-run transient
+        // moments (loading, act transitions) still report the error below.
+        if (!CardCrawlGame.isInARun()) {
+            return buildOutOfRunStateJson();
+        }
+        if (AbstractDungeon.player == null || AbstractDungeon.currMapNode == null || AbstractDungeon.getCurrRoom() == null) {
             return "{\"error\": \"Game not running or player not initialized\"}";
         }
 
@@ -104,11 +111,16 @@ public class GameStateConverter {
         state.put("act", AbstractDungeon.actNum);
         state.put("next_boss", AbstractDungeon.bossKey == null ? "UNKNOWN" : AbstractDungeon.bossKey);
         state.put("room_phase", AbstractDungeon.getCurrRoom().phase.name());
+        state.put("character", AbstractDungeon.player.chosenClass.name());
+        state.put("ascension_level", AbstractDungeon.ascensionLevel);
 
         // Screen Info
         ChoiceScreenUtils.ChoiceType currentChoiceType = ChoiceScreenUtils.getCurrentChoiceType();
         state.put("visible_boss", getVisibleBoss());
         state.put("screen_type", currentChoiceType.name());
+        if (currentChoiceType == ChoiceScreenUtils.ChoiceType.GAME_OVER) {
+            state.put("game_over_reason", getGameOverReason());
+        }
         state.put("choice_list", ChoiceScreenUtils.getCurrentChoiceList());
         state.put("can_proceed", ChoiceScreenUtils.isConfirmButtonAvailable());
         state.put("can_cancel", ChoiceScreenUtils.isCancelButtonAvailable());
@@ -220,9 +232,58 @@ public class GameStateConverter {
 
         String json = gson.toJson(state);
         // System.out.println("Generated Game State: " + json); // Too verbose, maybe just summary
-        System.out.println("State Summary: Floor=" + AbstractDungeon.floorNum + ", HP=" + AbstractDungeon.player.currentHealth + 
+        System.out.println("State Summary: Floor=" + AbstractDungeon.floorNum + ", HP=" + AbstractDungeon.player.currentHealth +
                            ", Screen=" + state.get("screen_type") + ", EndTurnEnabled=" + isEndTurnButtonEnabled);
         return json;
+    }
+
+    /**
+     * Out-of-run state for the auto-next-run flow. Only the controllable menu
+     * surfaces are reported; any other menu screen (settings, door cutscene,
+     * splash, act transitions, ...) keeps the legacy error JSON so clients
+     * treat it as transient and retry.
+     */
+    private static String buildOutOfRunStateJson() {
+        if (!RunSetupUtils.isMenuAvailable()) {
+            return "{\"error\": \"Game not running or player not initialized\"}";
+        }
+        Map<String, Object> state = new HashMap<>();
+        if (CardCrawlGame.mainMenuScreen.screen == MainMenuScreen.CurScreen.CHAR_SELECT) {
+            state.put("screen_type", "CHAR_SELECT");
+            state.put("choice_list", RunSetupUtils.getCharSelectChoices());
+            state.put("selected_character", RunSetupUtils.getSelectedCharacterName());
+            state.put("ascension_level", RunSetupUtils.charSelect().ascensionLevel);
+            state.put("ascension_mode", RunSetupUtils.charSelect().isAscensionMode);
+            Integer maxAscension = RunSetupUtils.getSelectedMaxAscension();
+            if (maxAscension != null) {
+                state.put("ascension_max", maxAscension);
+            }
+            state.put("can_proceed", RunSetupUtils.isCharSelected() && !CardCrawlGame.mainMenuScreen.isFadingOut);
+        } else {
+            state.put("screen_type", "MAIN_MENU");
+            ArrayList<String> choices = new ArrayList<>();
+            if (CardCrawlGame.mainMenuScreen.screen == MainMenuScreen.CurScreen.MAIN_MENU) {
+                choices.add("play");
+            }
+            state.put("choice_list", choices);
+            state.put("can_proceed", false);
+        }
+        state.put("can_cancel", false);
+        return gson.toJson(state);
+    }
+
+    private static String getGameOverReason() {
+        if (AbstractDungeon.screen == null) {
+            return "unknown";
+        }
+        switch (AbstractDungeon.screen) {
+            case DEATH:
+                return "defeat";
+            case VICTORY:
+                return "victory";
+            default:
+                return "unlock";
+        }
     }
 
     /**

@@ -9,17 +9,21 @@ from colorama import init, Fore, Style
 # Try importing from package, otherwise fall back to local (if user runs script directly inside folder, though discouraged)
 try:
     from .config import STS_API_BASE_URL, LLM_MODEL, DEBUG_PROMPT_FILE, RUN_LOG_DIR
+    from .config import AUTO_RESTART, CHARACTER, ASCENSION, RESTART_DELAY
     from .game_client import GameClient
     from .llm_agent import LLMAgent
     from .models import ActionType
+    from .run_lifecycle import LIFECYCLE_SCREENS, get_lifecycle_action, is_lifecycle_state
     from .run_log import setup_run_log, log_event, install_stdout_tee
 except ImportError:
     # Hack to allow running python sts_ai_framework/__main__.py
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from sts_ai_framework.config import STS_API_BASE_URL, LLM_MODEL, DEBUG_PROMPT_FILE, RUN_LOG_DIR
+    from sts_ai_framework.config import AUTO_RESTART, CHARACTER, ASCENSION, RESTART_DELAY
     from sts_ai_framework.game_client import GameClient
     from sts_ai_framework.llm_agent import LLMAgent
     from sts_ai_framework.models import ActionType
+    from sts_ai_framework.run_lifecycle import LIFECYCLE_SCREENS, get_lifecycle_action, is_lifecycle_state
     from sts_ai_framework.run_log import setup_run_log, log_event, install_stdout_tee
 
 # Initialize colorama
@@ -61,6 +65,14 @@ def _is_action_effective(prev_state, next_state, action) -> bool:
         return True
     if next_state.choice_list != prev_state.choice_list:
         return True
+    # 角色选择界面的字段变化（选角/难度调整不改变屏幕与选项列表）
+    if getattr(next_state, "selected_character", None) != getattr(prev_state, "selected_character", None):
+        return True
+    if action.type == ActionType.SET_ASCENSION:
+        if getattr(next_state, "ascension_mode", None) != getattr(prev_state, "ascension_mode", None):
+            return True
+        if getattr(next_state, "ascension_level", None) != getattr(prev_state, "ascension_level", None):
+            return True
     prev_event = getattr(prev_state, "event", None)
     next_event = getattr(next_state, "event", None)
     if prev_event != next_event:
@@ -85,6 +97,15 @@ def main():
     parser.add_argument("--model", type=str, default=LLM_MODEL, help="使用的 DeepSeek 模型 (例如 deepseek-v4-flash)")
     parser.add_argument("--interval", type=float, default=2.0, help="行动间隔时间 (秒)")
     parser.add_argument("--debug-prompt-file", type=str, default=DEBUG_PROMPT_FILE, help="将最新 Prompt 持续写入到指定文件，便于调试")
+    parser.add_argument("--character", type=str, default=CHARACTER,
+                        help="自动重开时选择的角色 (IRONCLAD/SILENT/DEFECT/WATCHER)")
+    parser.add_argument("--ascension", type=int, default=ASCENSION,
+                        help="自动重开时的进阶等级 (0 = 普通难度)")
+    parser.add_argument("--no-auto-restart", dest="auto_restart", action="store_false",
+                        help="对局结束后不自动开始下一局（保持旧行为，等待人工处理）")
+    parser.set_defaults(auto_restart=AUTO_RESTART)
+    parser.add_argument("--restart-delay", type=float, default=RESTART_DELAY,
+                        help="对局结束/开局提交后的额外等待时间 (秒)")
     args = parser.parse_args()
 
     # 安装运行日志:此后所有终端输出同时写入 debug/run_YYYYMMDD_HHMMSS.log
@@ -94,6 +115,10 @@ def main():
     print(Fore.YELLOW + "正在启动杀戮尖塔 AI 框架..." + Style.RESET_ALL)
     print(f"模型: {args.model}")
     print(f"连接到 Mod 地址: {STS_API_BASE_URL}")
+    if args.auto_restart:
+        print(f"自动重开: 开启 (角色: {args.character}, 进阶: A{args.ascension})")
+    else:
+        print("自动重开: 关闭")
     if args.debug_prompt_file:
         print(f"Prompt 调试文件: {args.debug_prompt_file}")
     print(f"运行日志: {run_log_path}")
@@ -123,6 +148,7 @@ def main():
     max_retries = 10 # 增加重试次数，因为动画可能很长
     pending_submission = None
     pending_submission_timeout = 15.0
+    prev_state = None
 
     try:
         while True:
@@ -132,17 +158,30 @@ def main():
                 if retry_count > max_retries:
                     print(Fore.RED + "\n连接丢失或游戏结束 (连续多次获取状态失败)。" + Style.RESET_ALL)
                     break
-                
+
                 # 在同一行显示重试状态，避免刷屏
                 sys.stdout.write(f"\r{Fore.YELLOW}无法获取状态 (Mod忙碌或动画中)，正在重试 ({retry_count}/{max_retries})...{Style.RESET_ALL}")
                 sys.stdout.flush()
                 time.sleep(1)
                 continue
-            
+
             # 如果成功获取状态，重置计数器并清除之前的重试消息
             if retry_count > 0:
                 sys.stdout.write("\n") # 换行
                 retry_count = 0
+
+            # 对局边界日志:进入 GAME_OVER 记 run_end；从生命周期界面回到对局内记 run_start
+            if prev_state is not None:
+                prev_screen = prev_state.screen_type
+                if prev_screen != "GAME_OVER" and state.screen_type == "GAME_OVER":
+                    log_event(event="run_end", reason=state.game_over_reason,
+                              ts=time.strftime("%H:%M:%S"), floor=state.floor, act=state.act,
+                              character=state.character, ascension=state.ascension_level,
+                              hp=f"{state.player.current_hp}/{state.player.max_hp}" if state.player else None)
+                if prev_screen in LIFECYCLE_SCREENS and state.screen_type not in LIFECYCLE_SCREENS and state.character:
+                    log_event(event="run_start", character=state.character,
+                              ascension=state.ascension_level, ts=time.strftime("%H:%M:%S"))
+            prev_state = state
 
             # The Mod acknowledges actions when they enter its queue, before the
             # game necessarily consumes them.  Do not enqueue the same choice on
@@ -157,6 +196,61 @@ def main():
                 else:
                     print(Fore.YELLOW + "排队动作超时且状态未变化，允许重新决策。" + Style.RESET_ALL)
                     pending_submission = None
+
+            # Run lifecycle: game over / main menu / character select.
+            # Must be checked BEFORE the battle-owned branch: the death screen
+            # still reports room_phase COMBAT, but combat is over.
+            if is_lifecycle_state(state):
+                action = get_lifecycle_action(
+                    state,
+                    character=args.character,
+                    ascension=args.ascension,
+                    auto_restart=args.auto_restart,
+                )
+
+                if action is None or action.type == ActionType.WAIT:
+                    if state.screen_type == "GAME_OVER":
+                        if args.auto_restart:
+                            sys.stdout.write(f"\r{Fore.YELLOW}对局结束 (原因: {state.game_over_reason or '未知'})，正在返回主菜单...   {Style.RESET_ALL}")
+                        else:
+                            sys.stdout.write(f"\r{Fore.YELLOW}对局结束 (原因: {state.game_over_reason or '未知'})，自动重开已关闭，等待人工处理...   {Style.RESET_ALL}")
+                    else:
+                        sys.stdout.write(f"\r{Fore.YELLOW}位于主菜单 (自动重开{'开启' if args.auto_restart else '关闭'})...   {Style.RESET_ALL}")
+                    sys.stdout.flush()
+                    time.sleep(args.interval)
+                    continue
+
+                print(Fore.BLUE + f"\n--- 生命周期操作 (屏幕: {state.screen_type}) ---" + Style.RESET_ALL)
+                msg = f"行动: {action.type}"
+                if action.type == ActionType.CHOOSE:
+                    msg += f" 选择索引: {action.choice_index} ({(state.choice_list or [''])[action.choice_index] if action.choice_index is not None and action.choice_index < len(state.choice_list or []) else '?'})"
+                elif action.type == ActionType.SET_ASCENSION:
+                    msg += f" 难度: A{action.level}"
+                print(msg)
+
+                log_event(action=action.type.value, choice=action.choice_index, level=action.level,
+                          ts=time.strftime("%H:%M:%S"), screen=state.screen_type,
+                          selected=state.selected_character, ascension=state.ascension_level)
+                submitted, server_resp, error_msg = client.submit_action(action)
+                effective = False
+                post_state = None
+                if submitted:
+                    post_state = _fetch_post_action_state(client)
+                    effective = _is_action_effective(state, post_state, action)
+                    if effective:
+                        print(Fore.GREEN + "生命周期操作已生效。" + Style.RESET_ALL)
+                    else:
+                        print(Fore.YELLOW + "生命周期操作已提交，暂未观察到状态变化（界面过渡中）。" + Style.RESET_ALL)
+                        pending_submission = (state, action, time.monotonic())
+                else:
+                    print(Fore.RED + f"生命周期操作提交失败: {error_msg}" + Style.RESET_ALL)
+                log_event(result=action.type.value, submitted=submitted, effective=effective,
+                          error=error_msg if not submitted else None, ts=time.strftime("%H:%M:%S"),
+                          post_screen=post_state.screen_type if submitted and post_state else None)
+
+                # 开局提交后多等一拍，让菜单淡出/地图生成完成
+                time.sleep(args.restart_delay if action.type == ActionType.PROCEED else args.interval)
+                continue
 
             # COMBAT: BattleAiMod handles all combat-time decision screens,
             # including HAND_SELECT/GRID/CARD_REWARD.

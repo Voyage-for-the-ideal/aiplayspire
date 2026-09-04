@@ -143,6 +143,8 @@ pip install -r sts_ai_framework/requirements.txt   # selectcard 另需 PyTorch/p
 python -m sts_ai_framework --interval 2.0
 ```
 
+对局自动连续：一局结束（死亡/胜利）后，agent 会自动返回主菜单，按配置重选角色（`CHARACTER`，默认 IRONCLAD）与进阶等级（`ASCENSION`，默认 15）并开始下一局 —— 完整选项见 [sts_ai_framework/README.md](sts_ai_framework/README.md)（需 CommunicationMod 1.4.0+）。
+
 战斗流水线（无头搜索实例、存档目录、战斗内激活 BattleAiMod）请按 [AUTOFIGHT.md](AUTOFIGHT.md) 操作。
 
 ## 技术栈
