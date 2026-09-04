@@ -79,6 +79,7 @@ AUTO_RESTART=true
 CHARACTER=IRONCLAD      # IRONCLAD / SILENT / DEFECT / WATCHER
 ASCENSION=15            # 进阶等级，0 = 普通难度
 RESTART_DELAY=2.0       # 对局结束/开局提交后的额外等待（秒）
+BATTLE_STALL_WARN_SECONDS=300  # 战斗状态无变化的停摆告警阈值（秒），0 关闭
 ```
 
 ## 自动重开
@@ -88,6 +89,7 @@ RESTART_DELAY=2.0       # 对局结束/开局提交后的额外等待（秒）
 - 需要 CommunicationMod 1.4.0+（旧版 mod 下主菜单不可见，框架会照旧重试后退出）。
 - 关闭自动重开：`.env` 设 `AUTO_RESTART=false` 或命令行 `--no-auto-restart`（对局结束停在结算界面等待人工处理）。
 - 战斗内搜索不存在胜利路线时，BattleAiMod 1.4.1+ 会自动打出存活最久的死亡路线让角色战死（`stop_reason: ALL_LOSE`），死亡后照常触发自动重开，详见 [AUTOFIGHT.md](../AUTOFIGHT.md)。
+- 战斗停摆看门狗（仅告警）：战斗中状态连续 `BATTLE_STALL_WARN_SECONDS` 秒（默认 300，0 关闭）无任何变化时，`run_log` 记录 `battle_stall` 事件并在终端提示人工检查——战斗决策属于 BattleAiMod，框架只报告不干预。
 
 ## 启动
 

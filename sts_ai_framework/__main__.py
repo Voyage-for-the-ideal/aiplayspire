@@ -9,21 +9,23 @@ from colorama import init, Fore, Style
 # Try importing from package, otherwise fall back to local (if user runs script directly inside folder, though discouraged)
 try:
     from .config import STS_API_BASE_URL, LLM_MODEL, DEBUG_PROMPT_FILE, RUN_LOG_DIR
-    from .config import AUTO_RESTART, CHARACTER, ASCENSION, RESTART_DELAY
+    from .config import AUTO_RESTART, CHARACTER, ASCENSION, RESTART_DELAY, BATTLE_STALL_WARN_SECONDS
     from .game_client import GameClient
     from .llm_agent import LLMAgent
     from .models import ActionType
     from .run_lifecycle import LIFECYCLE_SCREENS, get_lifecycle_action, is_lifecycle_state
+    from .battle_stall import StallWatcher
     from .run_log import setup_run_log, log_event, install_stdout_tee
 except ImportError:
     # Hack to allow running python sts_ai_framework/__main__.py
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from sts_ai_framework.config import STS_API_BASE_URL, LLM_MODEL, DEBUG_PROMPT_FILE, RUN_LOG_DIR
-    from sts_ai_framework.config import AUTO_RESTART, CHARACTER, ASCENSION, RESTART_DELAY
+    from sts_ai_framework.config import AUTO_RESTART, CHARACTER, ASCENSION, RESTART_DELAY, BATTLE_STALL_WARN_SECONDS
     from sts_ai_framework.game_client import GameClient
     from sts_ai_framework.llm_agent import LLMAgent
     from sts_ai_framework.models import ActionType
     from sts_ai_framework.run_lifecycle import LIFECYCLE_SCREENS, get_lifecycle_action, is_lifecycle_state
+    from sts_ai_framework.battle_stall import StallWatcher
     from sts_ai_framework.run_log import setup_run_log, log_event, install_stdout_tee
 
 # Initialize colorama
@@ -149,6 +151,7 @@ def main():
     pending_submission = None
     pending_submission_timeout = 15.0
     prev_state = None
+    stall_watcher = StallWatcher(BATTLE_STALL_WARN_SECONDS)
 
     try:
         while True:
@@ -182,6 +185,18 @@ def main():
                     log_event(event="run_start", character=state.character,
                               ascension=state.ascension_level, ts=time.strftime("%H:%M:%S"))
             prev_state = state
+
+            # Battle-stall watchdog: combat is BattleAiMod's job, so all the
+            # framework can do about a frozen fight is report it.
+            stall_seconds = stall_watcher.observe(state, time.monotonic(),
+                                                  in_battle=_is_battle_owned_state(state))
+            if stall_seconds is not None:
+                print(Fore.RED + f"\n战斗停滞告警: 战斗状态已 {stall_seconds:.0f} 秒无任何变化，"
+                                 f"BattleAiMod 可能已停止行动，请人工检查游戏。" + Style.RESET_ALL)
+                log_event(event="battle_stall", stall_seconds=round(stall_seconds, 1),
+                          ts=time.strftime("%H:%M:%S"), floor=state.floor, act=state.act,
+                          hp=f"{state.player.current_hp}/{state.player.max_hp}" if state.player else None,
+                          screen=state.screen_type)
 
             # The Mod acknowledges actions when they enter its queue, before the
             # game necessarily consumes them.  Do not enqueue the same choice on

@@ -27,3 +27,9 @@ CHARACTER = os.getenv("CHARACTER", "IRONCLAD").strip().upper()
 ASCENSION = int(os.getenv("ASCENSION", "15"))
 RESTART_DELAY = float(os.getenv("RESTART_DELAY", "2.0"))
 
+# Battle-stall watchdog (log-only): warn when the battle-owned state has not
+# changed for this many seconds. 0 disables. A legit battle search can freeze
+# the fight for up to ~90s (DEEP profile) plus replay time, so keep the
+# threshold well above that.
+BATTLE_STALL_WARN_SECONDS = float(os.getenv("BATTLE_STALL_WARN_SECONDS", "300"))
+
