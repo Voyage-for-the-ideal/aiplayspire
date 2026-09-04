@@ -379,8 +379,8 @@ public class BattleAiMod implements PostInitializeSubscriber, PostUpdateSubscrib
     /**
      * Client-side run-boundary detection: on the falling edge of
      * CardCrawlGame.isInARun() (death/victory -> menu), drop every per-run
-     * controller and counter so the next run — possibly a different character
-     * or ascension started by the framework — begins from a clean slate.
+     * controller and counter so the next run (possibly a different character
+     * or ascension started by the framework) begins from a clean slate.
      * The server instance lives in a permanent synthetic run (GameStartupPatch)
      * and is excluded by the caller.
      */

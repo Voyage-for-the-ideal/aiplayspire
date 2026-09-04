@@ -245,13 +245,22 @@ public class BattleAiController implements Controller {
 
                     return;
                 } else if (turns.isEmpty()) {
-                    System.err.println("No safe path found, using start state as fallback");
-                    bestEnd = committedTurn == null ? startNode.startingState
+                    StateNode progressFallback = committedTurn == null ? startNode.startingState
                             : committedTurn.startingState;
+                    bestEnd = noWinFallback(progressFallback, deathNode);
+                    boolean playingOutDeath = deathNode != null && bestEnd == deathNode;
+                    if (playingOutDeath) {
+                        System.err.println("No winning path exists; playing out the longest-surviving"
+                                + " death line so the run can end.");
+                    } else {
+                        System.err.println("No safe path found, using start state as fallback");
+                    }
                     isDone = true;
                     battleComplete = false;
-                    shouldReplan = hasProgress(bestEnd);
-                    stopReason = "SEARCH_EXHAUSTED";
+                    // A death line has ancestors, so hasProgress() would wrongly ask for a
+                    // replan; when playing it out the run must simply end.
+                    shouldReplan = !playingOutDeath && hasProgress(bestEnd);
+                    stopReason = playingOutDeath ? "ALL_LOSE" : "SEARCH_EXHAUSTED";
                     printRuntimeStats();
                     return;
                 }
@@ -433,14 +442,19 @@ public class BattleAiController implements Controller {
             TurnNode partialResult = bestTurn != null ? bestTurn
                     : (backupTurn != null ? backupTurn : committedTurn);
             if (partialResult == null) {
-                bestEnd = startNode.startingState;
+                bestEnd = noWinFallback(startNode.startingState, deathNode);
             } else {
                 int committedThroughTurn = searchProfile.streamCommands() && committedTurn != null
                         ? committedTurn.startingState.saveState.turn : startingState.turn;
                 bestEnd = firstStateAfterTurn(partialResult.startingState, committedThroughTurn);
             }
-            shouldReplan = hasProgress(bestEnd);
-            stopReason = timedOut ? "TIMEOUT" : "EXPANSION_LIMIT";
+            boolean playingOutDeath = deathNode != null && bestEnd == deathNode;
+            if (playingOutDeath) {
+                System.err.println("No winning path exists; playing out the longest-surviving"
+                        + " death line so the run can end.");
+            }
+            shouldReplan = !playingOutDeath && hasProgress(bestEnd);
+            stopReason = playingOutDeath ? "ALL_LOSE" : (timedOut ? "TIMEOUT" : "EXPANSION_LIMIT");
         }
 
         isDone = true;
@@ -494,6 +508,20 @@ public class BattleAiController implements Controller {
 
     private static boolean hasProgress(StateNode stateNode) {
         return stateNode != null && stateNode.parent != null;
+    }
+
+    /**
+     * Terminal fallback when the search found no winning line. With no committed
+     * progress the default result is the start state, whose empty command path
+     * leaves the battle waiting for input forever; prefer the longest-surviving
+     * death line instead so the run actually ends (and auto-restart takes over).
+     * A usable death line must have at least one command behind it.
+     */
+    static StateNode noWinFallback(StateNode progressFallback, StateNode deathNode) {
+        if (progressFallback.parent == null && deathNode != null && deathNode.parent != null) {
+            return deathNode;
+        }
+        return progressFallback;
     }
 
 

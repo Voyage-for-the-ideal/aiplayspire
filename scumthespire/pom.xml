@@ -5,10 +5,10 @@
 
     <groupId>autoplay</groupId>
     <artifactId>BattleAiMod</artifactId>
-    <version>1.4.0</version>
+    <version>1.4.1</version>
     <packaging>jar</packaging>
     <name>Battle Ai Mod</name>
-    <description>Server/client integration for AI-controlled combat with a tactical battle evaluator: threat-aware target selection, non-linear survival risk, lethal/kill breakpoints, and interpretable per-component turn scoring, alongside immutable per-path replay snapshots, restart-safe replay cancellation, automatic battle startup, and per-run state reset on run end for automatic consecutive runs.</description>
+    <description>Server/client integration for AI-controlled combat with a tactical battle evaluator: threat-aware target selection, non-linear survival risk, lethal/kill breakpoints, and interpretable per-component turn scoring, alongside immutable per-path replay snapshots, restart-safe replay cancellation, automatic battle startup, per-run state reset on run end for automatic consecutive runs, and an all-lose death-path fallback that plays out the longest-surviving death line when no winning path exists.</description>
 
     <properties>
         <maven.compiler.source>1.8</maven.compiler.source>

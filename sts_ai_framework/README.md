@@ -87,6 +87,7 @@ RESTART_DELAY=2.0       # 对局结束/开局提交后的额外等待（秒）
 
 - 需要 CommunicationMod 1.4.0+（旧版 mod 下主菜单不可见，框架会照旧重试后退出）。
 - 关闭自动重开：`.env` 设 `AUTO_RESTART=false` 或命令行 `--no-auto-restart`（对局结束停在结算界面等待人工处理）。
+- 战斗内搜索不存在胜利路线时，BattleAiMod 1.4.1+ 会自动打出存活最久的死亡路线让角色战死（`stop_reason: ALL_LOSE`），死亡后照常触发自动重开，详见 [AUTOFIGHT.md](../AUTOFIGHT.md)。
 
 ## 启动
 
