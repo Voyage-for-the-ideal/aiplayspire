@@ -26,6 +26,7 @@ import java.io.*;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.URISyntaxException;
+import java.nio.charset.StandardCharsets;
 
 public class BattleClientController {
     private static final String HOST_IP = "127.0.0.1";
@@ -247,29 +248,27 @@ public class BattleClientController {
             BufferedReader stdInput = new BufferedReader(new InputStreamReader(serverProcess
                     .getInputStream()));
 
-            new Thread(() -> {
-                String s = "";
-                while (true) {
-                    try {
-                        if (!((s = stdError.readLine()) != null))
-                            break;
-                    } catch (IOException e) {
-                        e.printStackTrace();
-                    }
-                }
-            }).start();
+            // Tee the server subprocess output to a log file in the working
+            // directory instead of dropping it: the spawned process has no
+            // console of its own, so a server-side crash mid-search (client
+            // sees EOF from AiClient.sendState and the battle stalls) used to
+            // be invisible.
+            File serverLogFile = new File(System.getProperty("user.dir"),
+                    String.format("battle_server_%d.log", System.currentTimeMillis()));
+            PrintWriter serverLog;
+            try {
+                serverLog = new PrintWriter(new OutputStreamWriter(new FileOutputStream(
+                        serverLogFile), StandardCharsets.UTF_8), true);
+            } catch (IOException e) {
+                serverLog = null;
+                e.printStackTrace();
+            }
+            System.out.println("Battle AI server output -> "
+                    + serverLogFile.getAbsolutePath());
 
-            new Thread(() -> {
-                String s = "";
-                while (true) {
-                    try {
-                        if (!((s = stdInput.readLine()) != null))
-                            break;
-                    } catch (IOException e) {
-                        e.printStackTrace();
-                    }
-                }
-            }).start();
+            final PrintWriter logOut = serverLog;
+            new Thread(() -> drainStream(stdError, logOut)).start();
+            new Thread(() -> drainStream(stdInput, logOut)).start();
 
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                 System.out.println("Shutting Down External Process");
@@ -285,6 +284,30 @@ public class BattleClientController {
         }
 
 
+    }
+
+    /** Copies one of the server subprocess's streams into the shared log
+     *  writer (or drops it when no log file could be opened). */
+    private static void drainStream(BufferedReader in, PrintWriter out) {
+        try {
+            String s;
+            while ((s = in.readLine()) != null) {
+                if (out != null) {
+                    out.println(s);
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        } finally {
+            try {
+                in.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+            if (out != null) {
+                out.close();
+            }
+        }
     }
 
     private static void pingServer() {
