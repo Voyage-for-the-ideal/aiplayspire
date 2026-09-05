@@ -5,6 +5,7 @@ import com.megacrit.cardcrawl.characters.AbstractPlayer;
 import com.megacrit.cardcrawl.core.CardCrawlGame;
 import com.megacrit.cardcrawl.dungeons.AbstractDungeon;
 import com.megacrit.cardcrawl.saveAndContinue.SaveAndContinue;
+import com.megacrit.cardcrawl.screens.GameOverScreen;
 import com.megacrit.cardcrawl.screens.charSelect.CharacterOption;
 import com.megacrit.cardcrawl.screens.charSelect.CharacterSelectScreen;
 import com.megacrit.cardcrawl.screens.mainMenu.MainMenuScreen;
@@ -170,10 +171,10 @@ public class RunSetupUtils {
         }
         switch (AbstractDungeon.screen) {
             case DEATH:
-                clickReturnButton(AbstractDungeon.deathScreen, com.megacrit.cardcrawl.screens.DeathScreen.class);
+                clickReturnButton(AbstractDungeon.deathScreen);
                 break;
             case VICTORY:
-                clickReturnButton(AbstractDungeon.victoryScreen, com.megacrit.cardcrawl.screens.VictoryScreen.class);
+                clickReturnButton(AbstractDungeon.victoryScreen);
                 break;
             case UNLOCK:
                 if (AbstractDungeon.unlockScreen != null) {
@@ -190,11 +191,19 @@ public class RunSetupUtils {
         }
     }
 
-    private static void clickReturnButton(Object screen, Class<?> screenClass) {
+    /**
+     * Clicks the return button of a death/victory screen. The field is declared
+     * as protected on the shared GameOverScreen superclass (DeathScreen and
+     * VictoryScreen both extend it), so the reflection target must be that
+     * superclass: getDeclaredField does not look up inherited fields and would
+     * otherwise throw NoSuchFieldException (which is why the click silently did
+     * nothing before 1.4.2).
+     */
+    private static void clickReturnButton(Object screen) {
         if (screen == null) {
             return;
         }
-        Object buttonObj = ReflectionHacks.getPrivate(screen, screenClass, "returnButton");
+        Object buttonObj = ReflectionHacks.getPrivate(screen, GameOverScreen.class, "returnButton");
         if (buttonObj instanceof ReturnToMenuButton) {
             ReturnToMenuButton button = (ReturnToMenuButton) buttonObj;
             if (button.show) {

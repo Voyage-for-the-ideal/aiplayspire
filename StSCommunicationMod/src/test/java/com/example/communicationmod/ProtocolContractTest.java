@@ -1,6 +1,7 @@
 package com.example.communicationmod;
 
 import com.megacrit.cardcrawl.rewards.RewardItem;
+import com.megacrit.cardcrawl.screens.DeathScreen;
 import com.megacrit.cardcrawl.screens.select.GridCardSelectScreen;
 import com.megacrit.cardcrawl.shop.ShopScreen;
 import org.junit.Test;
@@ -39,5 +40,23 @@ public class ProtocolContractTest {
         assertTrue(ChoiceScreenUtils.isGridConfirmAvailable(false, true, false, false, false));
         assertTrue(ChoiceScreenUtils.isGridConfirmAvailable(false, false, true, false, false));
         assertTrue(ChoiceScreenUtils.isGridConfirmAvailable(false, false, false, true, false));
+    }
+
+    @Test
+    public void gameOverReturnButtonLivesOnTheSharedSuperclass() throws Exception {
+        // RunSetupUtils.clickReturnButton reflects on GameOverScreen.class
+        // because DeathScreen and VictoryScreen only inherit the protected
+        // field from that superclass; a subclass-scoped lookup would throw
+        // NoSuchFieldException and the click would silently do nothing
+        // (the 1.4.1 regression on the death settlement chain).
+        assertNotNull(com.megacrit.cardcrawl.screens.GameOverScreen.class
+                .getDeclaredField("returnButton"));
+        try {
+            DeathScreen.class.getDeclaredField("returnButton");
+        } catch (NoSuchFieldException expected) {
+            return;
+        }
+        throw new AssertionError("returnButton moved into DeathScreen; update RunSetupUtils"
+                + " to reflect on the declaring class instead");
     }
 }
