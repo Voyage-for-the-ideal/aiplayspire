@@ -48,10 +48,17 @@ public class GameStateConverter {
     }
 
     public static String getGameStateJson() {
-        // Out-of-run is a controllable state now (auto next run): report the
-        // menu/char-select instead of an error. Remaining in-run transient
-        // moments (loading, act transitions) still report the error below.
+        // isInARun() flips to false the moment the player dies (!isDead clause),
+        // even though the death settlement chain (DeathScreen + the unlock
+        // screens on the way back to the menu) still runs in GAMEPLAY mode with
+        // the dungeon mounted. Report that chain as a controllable GAME_OVER
+        // screen; only the real menu (mode CHAR_SELECT) is MAIN_MENU/CHAR_SELECT.
+        // Remaining in-run transient moments (loading, act transitions) and
+        // out-of-run transients keep the legacy error JSON for client retries.
         if (!CardCrawlGame.isInARun()) {
+            if (ChoiceScreenUtils.isSettlementScreenActive()) {
+                return buildGameOverStateJson();
+            }
             return buildOutOfRunStateJson();
         }
         if (AbstractDungeon.player == null || AbstractDungeon.currMapNode == null || AbstractDungeon.getCurrRoom() == null) {
@@ -238,6 +245,54 @@ public class GameStateConverter {
     }
 
     /**
+     * Compact GAME_OVER state for the death settlement chain. Only the fields
+     * the framework needs to click through death/unlock screens and log run_end
+     * are reported; room_phase is deliberately omitted so the client never
+     * mistakes the settlement chain for combat.
+     */
+    private static String buildGameOverStateJson() {
+        Map<String, Object> player = new HashMap<>();
+        player.put("current_hp", AbstractDungeon.player.currentHealth);
+        player.put("max_hp", AbstractDungeon.player.maxHealth);
+        player.put("block", AbstractDungeon.player.currentBlock);
+        player.put("energy", EnergyPanel.totalCount);
+        player.put("gold", AbstractDungeon.player.gold);
+        return gson.toJson(settlementStateFields(
+                ChoiceScreenUtils.settlementReasonFor(AbstractDungeon.screen),
+                ChoiceScreenUtils.settlementChoicesFor(AbstractDungeon.screen),
+                AbstractDungeon.floorNum,
+                AbstractDungeon.actNum,
+                AbstractDungeon.player.chosenClass.name(),
+                AbstractDungeon.ascensionLevel,
+                player));
+    }
+
+    /**
+     * Pure field assembly for the settlement GAME_OVER state; package-visible
+     * so the no-game-runtime tests can lock the python-facing contract. The
+     * player map must carry exactly the five keys the python PlayerState model
+     * declares non-optional (current_hp/max_hp/block/energy/gold); a partial
+     * map would fail pydantic validation and look like a lost connection.
+     */
+    static Map<String, Object> settlementStateFields(String reason, ArrayList<String> choices,
+                                                     int floor, int act, String character,
+                                                     int ascensionLevel,
+                                                     Map<String, Object> player) {
+        Map<String, Object> state = new HashMap<>();
+        state.put("screen_type", "GAME_OVER");
+        state.put("game_over_reason", reason);
+        state.put("choice_list", choices);
+        state.put("can_proceed", false);
+        state.put("can_cancel", false);
+        state.put("floor", floor);
+        state.put("act", act);
+        state.put("character", character);
+        state.put("ascension_level", ascensionLevel);
+        state.put("player", player);
+        return state;
+    }
+
+    /**
      * Out-of-run state for the auto-next-run flow. Only the controllable menu
      * surfaces are reported; any other menu screen (settings, door cutscene,
      * splash, act transitions, ...) keeps the legacy error JSON so clients
@@ -273,17 +328,7 @@ public class GameStateConverter {
     }
 
     private static String getGameOverReason() {
-        if (AbstractDungeon.screen == null) {
-            return "unknown";
-        }
-        switch (AbstractDungeon.screen) {
-            case DEATH:
-                return "defeat";
-            case VICTORY:
-                return "victory";
-            default:
-                return "unlock";
-        }
+        return ChoiceScreenUtils.settlementReasonFor(AbstractDungeon.screen);
     }
 
     /**

@@ -52,6 +52,62 @@ public class ChoiceScreenUtils {
         NONE
     }
 
+    /**
+     * Death/victory settlement screens: DEATH, VICTORY, and the UNLOCK /
+     * NEOW_UNLOCK screens reached on the return-to-menu flow. These are
+     * controllable in the in-run branch (victory, player still alive) AND in
+     * the out-of-run branch (death: isInARun() is already false the moment
+     * the player dies because of its !isDead clause, even though mode is still
+     * GAMEPLAY until the game reaches the main menu). Pure rule functions take
+     * an explicit screen argument so the rules stay unit-testable without a
+     * booted game, mirroring GameStateConverter.visibleBossFor.
+     */
+    static boolean isSettlementScreenType(AbstractDungeon.CurrentScreen screen) {
+        return screen != null
+                && (screen == AbstractDungeon.CurrentScreen.DEATH
+                || screen == AbstractDungeon.CurrentScreen.VICTORY
+                || screen == AbstractDungeon.CurrentScreen.UNLOCK
+                || screen == AbstractDungeon.CurrentScreen.NEOW_UNLOCK);
+    }
+
+    /** Choices advertised on a settlement screen: confirm on the unlock
+     * screens of the return flow, return_to_menu on the death/victory ones. */
+    static ArrayList<String> settlementChoicesFor(AbstractDungeon.CurrentScreen screen) {
+        ArrayList<String> choices = new ArrayList<>();
+        if (screen == AbstractDungeon.CurrentScreen.UNLOCK
+                || screen == AbstractDungeon.CurrentScreen.NEOW_UNLOCK) {
+            choices.add("confirm");
+        } else if (isSettlementScreenType(screen)) {
+            choices.add("return_to_menu");
+        }
+        return choices;
+    }
+
+    /** game_over_reason label for a settlement screen; unknown for anything else. */
+    static String settlementReasonFor(AbstractDungeon.CurrentScreen screen) {
+        if (screen == null) {
+            return "unknown";
+        }
+        switch (screen) {
+            case DEATH:
+                return "defeat";
+            case VICTORY:
+                return "victory";
+            default:
+                return "unlock";
+        }
+    }
+
+    /** True while the game sits on the death settlement chain: mode is still
+     * GAMEPLAY (the dungeon is not unloaded until the menu), but the player is
+     * dead so isInARun() is already false. Reports these screens as GAME_OVER
+     * instead of treating them like an unreachable out-of-run error state. */
+    public static boolean isSettlementScreenActive() {
+        return CardCrawlGame.mode == CardCrawlGame.GameMode.GAMEPLAY
+                && AbstractDungeon.player != null
+                && isSettlementScreenType(AbstractDungeon.screen);
+    }
+
     // Helper method to remove text formatting
     public static String removeTextFormatting(String text) {
         text = text.replaceAll("~|@(\\S+)~|@", "$1");
@@ -79,8 +135,13 @@ public class ChoiceScreenUtils {
 
     public static ChoiceType getCurrentChoiceType() {
         // Out-of-run screens must be classified before any AbstractDungeon
-        // dereference (the dungeon is already disposed at the menu).
+        // dereference (the dungeon is already disposed at the menu). The death
+        // settlement chain also lands here (isInARun() is false once the player
+        // died) and must be checked before the menu branch below.
         if (!CardCrawlGame.isInARun()) {
+            if (isSettlementScreenActive()) {
+                return ChoiceType.GAME_OVER;
+            }
             if (RunSetupUtils.isMenuAvailable()) {
                 switch (CardCrawlGame.mainMenuScreen.screen) {
                     case CHAR_SELECT:
@@ -164,13 +225,7 @@ public class ChoiceScreenUtils {
             case GAME_OVER:
                 // Death/victory screens offer "return to menu"; the unlock
                 // screens that appear during the same return flow offer confirm.
-                if (AbstractDungeon.screen == AbstractDungeon.CurrentScreen.UNLOCK
-                        || AbstractDungeon.screen == AbstractDungeon.CurrentScreen.NEOW_UNLOCK) {
-                    choices.add("confirm");
-                } else {
-                    choices.add("return_to_menu");
-                }
-                break;
+                return settlementChoicesFor(AbstractDungeon.screen);
             case MAIN_MENU:
                 if (CardCrawlGame.mainMenuScreen != null
                         && CardCrawlGame.mainMenuScreen.screen == MainMenuScreen.CurScreen.MAIN_MENU) {

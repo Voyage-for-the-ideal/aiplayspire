@@ -2,8 +2,8 @@
   "modid": "CommunicationMod",
   "name": "Communication Mod",
   "author_list": ["YourName"],
-  "description": "Provides structured event semantics, local non-LLM flow for multi-step Cursed Tome handling, and full run-lifecycle control: reports main menu / character select states, accepts set_ascension, starts the next run and returns to the menu from the death/victory screens for automatic consecutive runs.",
-  "version": "1.4.0",
+  "description": "Provides structured event semantics, local non-LLM flow for multi-step Cursed Tome handling, and full run-lifecycle control: reports main menu / character select states, accepts set_ascension, starts the next run, and reports the death/victory settlement chain (including defeat and unlock screens) as clickable GAME_OVER states so automatic consecutive runs also trigger after a lost run.",
+  "version": "1.4.1",
   "dependencies": ["basemod"],
   "entry_point": "com.example.communicationmod.CommunicationMod",
   "credits": ""
