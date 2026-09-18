@@ -81,20 +81,27 @@ java Build
 - `floor`, `act`, `room_phase`
 - `screen_type`, `choice_list`, `can_proceed`, `can_cancel`
 - `is_end_turn_button_enabled`
+- 宝箱字段（仅 `screen_type=CHEST` 时提供；内容在进房时已由 `treasureRng` 预先 roll 定）：
+  - `chest_boss`: 是否为 Boss 遗物箱（`TreasureRoomBoss`，开箱不触发诅咒钥匙）
+  - `chest_gold_reward`: 开箱是否含金币
+  - `chest_gold_amount`: 金币基数（25/50/75，按箱型；无金币时为 0，实际数额另有 ±10% 抖动）
+  - `chest_relic_tier`: 箱内遗物档位 `"common"` / `"uncommon"` / `"rare"`，无遗物时为 `null`
 - 地图事实字段（AI 无关的原始状态）：
   - `first_room_chosen`
   - `map_ascii`: 地图的 ASCII 文本渲染
   - `map_position`: 当前位置（楼层 + 从左往右第几个房间）
   - `map_choices_human`: 当前地图可选房间的人类可读列表
-  - `map_nodes`: 全图节点列表（内部事实字段，仍含 `x/y/symbol/is_current/children`）
+  - `map_nodes`: 全图节点列表（含 `x/y/symbol/is_current/burning/children`，供本地规划器校验 DAG 与检查钥匙可达性）
   - `current_map_node`: 当前节点内部事实字段
   - `current_map_choices`: 仅在 `screen_type=MAP` 时提供当前合法下一步节点的内部事实字段
+  - `event_chances`: 当前 `?` 房间 roll 使用的有效概率分布（读取过程不消费 RNG）
+  - `path_history`: 已发生路径的 `selected_symbol` / `resolved_symbol`，不包含未来遭遇
 
 说明：
 
 - `hand` 中卡牌索引从 `0` 开始，可直接用于 `play.card_index`。
 - `monsters` 的目标索引基于“存活怪顺序”，可用于 `target_index`。
-- 地图展示层默认不再使用坐标，而使用 ASCII 地图与“第几个房间”的文案；`map_nodes/current_map_choices` 仅保留为内部事实字段。
+- `map_ascii`、`map_position`、`map_choices_human` 是展示与诊断字段；确定性地图规划使用 `map_nodes`、`current_map_choices`、`event_chances`、`path_history` 等结构化事实，不依赖 LLM Prompt。
 - 若主线程未及时响应，请求可能返回超时错误。
 
 ### 2) 执行动作
@@ -202,3 +209,4 @@ java Build
 ## 最近更新 (Changelog)
 
 - 修复（2026-03-15）：修复了在地图的最后一步（`y == 14` / `y == 2`）准备进入 Boss 房间时，`getMapScreenNodeChoices()` 会返回空列表导致 AI 端卡死不断尝试 `proceed` 的问题。现在引入了底层鼠标点击 Patch (`DungeonMapPatch`)，能够为 AI 提供虚拟的 Boss 节点事件，并在选择后自动安全打通进入 Boss 的地图连线。
+- 功能（2026-09-17，v1.5.0）：`/state` 在 `screen_type=CHEST` 时新增 `chest_boss` / `chest_gold_reward` / `chest_gold_amount` / `chest_relic_tier` 字段，暴露进房时已 roll 定的宝箱内容，供客户端在 Cursed Key 诅咒结算前权衡「开箱 vs 离开」（离开复用既有 `proceed` 动作，无需新命令）。

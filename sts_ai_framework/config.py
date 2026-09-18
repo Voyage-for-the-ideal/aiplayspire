@@ -20,10 +20,19 @@ LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-v4-flash")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 DEBUG_PROMPT_FILE = os.getenv("DEBUG_PROMPT_FILE", "debug/latest_prompt.txt")
 RUN_LOG_DIR = os.getenv("RUN_LOG_DIR", "debug")  # 运行日志目录(每次运行生成 run_YYYYMMDD_HHMMSS.log)
+ROUTE_POLICY = os.getenv("ROUTE_POLICY", "planner").strip().lower()
+if ROUTE_POLICY not in ("planner", "legacy"):
+    ROUTE_POLICY = "planner"
 
-# Run lifecycle (auto next run). CHARACTER: IRONCLAD / SILENT / DEFECT / WATCHER.
+# Event decision policy: "expectimax" = per-choice expected-value scoring (no LLM for
+# events); "legacy" = pre-expectimax behavior (DETERMINISTIC/COMPLEX rules, LLM fallback).
+EVENT_DECISION_POLICY = os.getenv("EVENT_DECISION_POLICY", "expectimax").strip().lower()
+if EVENT_DECISION_POLICY not in ("expectimax", "legacy"):
+    EVENT_DECISION_POLICY = "expectimax"
+
+# Run lifecycle (auto next run). CHARACTER: DEFECT (robot) / IRONCLAD / SILENT / WATCHER.
 AUTO_RESTART = os.getenv("AUTO_RESTART", "true").strip().lower() in ("1", "true", "yes", "on")
-CHARACTER = os.getenv("CHARACTER", "IRONCLAD").strip().upper()
+CHARACTER = os.getenv("CHARACTER", "DEFECT").strip().upper()
 ASCENSION = int(os.getenv("ASCENSION", "15"))
 RESTART_DELAY = float(os.getenv("RESTART_DELAY", "2.0"))
 

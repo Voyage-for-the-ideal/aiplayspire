@@ -100,7 +100,7 @@ def main():
     parser.add_argument("--interval", type=float, default=2.0, help="行动间隔时间 (秒)")
     parser.add_argument("--debug-prompt-file", type=str, default=DEBUG_PROMPT_FILE, help="将最新 Prompt 持续写入到指定文件，便于调试")
     parser.add_argument("--character", type=str, default=CHARACTER,
-                        help="自动重开时选择的角色 (IRONCLAD/SILENT/DEFECT/WATCHER)")
+                        help="自动重开时选择的角色 (默认 DEFECT/机器人；可选 IRONCLAD/SILENT/WATCHER)")
     parser.add_argument("--ascension", type=int, default=ASCENSION,
                         help="自动重开时的进阶等级 (0 = 普通难度)")
     parser.add_argument("--no-auto-restart", dest="auto_restart", action="store_false",

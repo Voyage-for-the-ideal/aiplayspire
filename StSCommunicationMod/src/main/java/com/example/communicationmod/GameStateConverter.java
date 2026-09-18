@@ -8,6 +8,8 @@ import com.megacrit.cardcrawl.core.CardCrawlGame;
 import com.megacrit.cardcrawl.core.Settings;
 import com.megacrit.cardcrawl.dungeons.AbstractDungeon;
 import com.megacrit.cardcrawl.helpers.CardLibrary;
+import com.megacrit.cardcrawl.helpers.EventHelper;
+import com.megacrit.cardcrawl.helpers.ModHelper;
 import com.megacrit.cardcrawl.monsters.AbstractMonster;
 import com.megacrit.cardcrawl.monsters.EnemyMoveInfo;
 import com.megacrit.cardcrawl.map.MapRoomNode;
@@ -17,8 +19,10 @@ import com.megacrit.cardcrawl.potions.PotionSlot;
 import com.megacrit.cardcrawl.powers.AbstractPower;
 import com.megacrit.cardcrawl.relics.AbstractRelic;
 import com.megacrit.cardcrawl.rewards.RewardItem;
+import com.megacrit.cardcrawl.rewards.chests.AbstractChest;
 import com.megacrit.cardcrawl.rooms.AbstractRoom;
 import com.megacrit.cardcrawl.rooms.MonsterRoomBoss;
+import com.megacrit.cardcrawl.rooms.TreasureRoom;
 import com.megacrit.cardcrawl.rooms.TreasureRoomBoss;
 import com.megacrit.cardcrawl.screens.mainMenu.MainMenuScreen;
 import com.megacrit.cardcrawl.screens.select.GridCardSelectScreen;
@@ -29,8 +33,10 @@ import basemod.ReflectionHacks;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
@@ -137,6 +143,16 @@ public class GameStateConverter {
         keys.put("sapphire", Settings.hasSapphireKey);
         state.put("keys", keys);
 
+        // Chest contents are pre-rolled at room entry (AbstractChest
+        // randomizeReward), so clients can weigh opening against leaving
+        // before the Cursed Key curse resolves on open.
+        if (currentChoiceType == ChoiceScreenUtils.ChoiceType.CHEST) {
+            Map<String, Object> chestInfo = describeChest(AbstractDungeon.getCurrRoom());
+            if (chestInfo != null) {
+                state.putAll(chestInfo);
+            }
+        }
+
         // Card-reward choices need structured, language-independent card data.
         // `choice_list` remains a human-readable display field; clients that make
         // model decisions should use this field's stable ID and upgrade count.
@@ -222,6 +238,8 @@ public class GameStateConverter {
         state.put("map_ascii", renderMapAscii());
         state.put("map_position", convertMapPositionToJson());
         state.put("map_choices_human", ChoiceScreenUtils.getCurrentChoiceType() == ChoiceScreenUtils.ChoiceType.MAP ? ChoiceScreenUtils.getCurrentChoiceList() : new ArrayList<>());
+        state.put("event_chances", resolveEventChancesForCurrentRun());
+        state.put("path_history", buildPathHistory());
         state.put("map_nodes", convertMapNodesToJson());
         state.put("current_map_node", convertCurrentMapNodeToJson());
         if (currentChoiceType == ChoiceScreenUtils.ChoiceType.MAP) {
@@ -374,6 +392,50 @@ public class GameStateConverter {
         );
     }
 
+    /**
+     * Live-object extraction for the chest info block; the pure mapping lives
+     * in {@link #buildChestInfo} so it can be unit tested without a running
+     * game.
+     */
+    static Map<String, Object> describeChest(AbstractRoom room) {
+        boolean bossChest = room instanceof TreasureRoomBoss;
+        AbstractChest chest = bossChest
+            ? ((TreasureRoomBoss) room).chest
+            : (room instanceof TreasureRoom ? ((TreasureRoom) room).chest : null);
+        if (chest == null) {
+            return null;
+        }
+        return buildChestInfo(bossChest, chest.goldReward, chest.GOLD_AMT, chest.relicReward);
+    }
+
+    /**
+     * Flat chest fields for the /state payload. Gold and relic tier are
+     * whatever randomizeReward rolled at room entry; a boss chest reports
+     * boss=true with empty content fields (its relics come from the
+     * BOSS_REWARD screen, and opening it never triggers Cursed Key).
+     */
+    static Map<String, Object> buildChestInfo(boolean bossChest, boolean goldReward,
+                                              int goldAmount, AbstractChest.RelicReward relicReward) {
+        Map<String, Object> chest = new LinkedHashMap<>();
+        chest.put("chest_boss", bossChest);
+        chest.put("chest_gold_reward", goldReward);
+        chest.put("chest_gold_amount", goldReward ? goldAmount : 0);
+        chest.put("chest_relic_tier", relicTierName(relicReward));
+        return chest;
+    }
+
+    static String relicTierName(AbstractChest.RelicReward relicReward) {
+        if (relicReward == null) {
+            return null;
+        }
+        switch (relicReward) {
+            case COMMON_RELIC: return "common";
+            case UNCOMMON_RELIC: return "uncommon";
+            case RARE_RELIC: return "rare";
+            default: return null;
+        }
+    }
+
     private static List<Map<String, Object>> convertGridCardsToJson(GridCardSelectScreen grid) {
         List<Map<String, Object>> cards = new ArrayList<>();
         int choiceOffset = ChoiceScreenUtils.isConfirmButtonAvailable() ? 1 : 0;
@@ -421,6 +483,177 @@ public class GameStateConverter {
             }
         }
         return result;
+    }
+
+    static Map<String, Double> resolveEventChancesForCurrentRun() {
+        if (AbstractDungeon.player == null || AbstractDungeon.getCurrRoom() == null) {
+            return Collections.emptyMap();
+        }
+
+        boolean tinyChestForcesTreasure = false;
+        if (AbstractDungeon.player.hasRelic("Tiny Chest")) {
+            AbstractRelic tinyChest = AbstractDungeon.player.getRelic("Tiny Chest");
+            // EventHelper.roll increments the counter before checking for 4.
+            tinyChestForcesTreasure = tinyChest != null && tinyChest.counter == 3;
+        }
+
+        return resolveEventChances(
+                EventHelper.getChances(),
+                AbstractDungeon.floorNum,
+                AbstractDungeon.getCurrRoom() instanceof com.megacrit.cardcrawl.rooms.ShopRoom,
+                ModHelper.isModEnabled("DeadlyEvents"),
+                tinyChestForcesTreasure,
+                AbstractDungeon.player.hasRelic("Juzu Bracelet"),
+                Settings.isEndless,
+                AbstractDungeon.player.hasBlight("MimicInfestation")
+        );
+    }
+
+    static Map<String, Double> resolveEventChances(List<Float> preRollChances, int floorNumber,
+                                                  boolean isCurrentRoomShop, boolean hasDeadlyEvents,
+                                                  boolean tinyChestForcesTreasure, boolean hasJuzuBracelet,
+                                                  boolean isEndless, boolean hasMimicInfestation) {
+        if (preRollChances == null || preRollChances.size() < 4) {
+            return Collections.emptyMap();
+        }
+
+        final int EVENT = 0;
+        final int ELITE = 1;
+        final int MONSTER = 2;
+        final int SHOP = 3;
+        final int TREASURE = 4;
+
+        int[] roomResults = new int[100];
+        Arrays.fill(roomResults, EVENT);
+
+        int eliteSize = hasDeadlyEvents
+                ? (int) (preRollChances.get(0) * 100.0F)
+                : 0;
+        int monsterSize = (int) (preRollChances.get(1) * 100.0F);
+        int shopSize = (int) (preRollChances.get(2) * 100.0F);
+        int treasureSize = (int) (preRollChances.get(3) * 100.0F);
+
+        if (hasDeadlyEvents) {
+            if (floorNumber < 6) {
+                eliteSize = 0;
+            }
+            int fillStart = 0;
+            fillRoomType(roomResults, fillStart, fillStart + eliteSize, ELITE);
+            fillStart += eliteSize;
+            fillRoomType(roomResults, fillStart, fillStart + eliteSize, ELITE);
+            fillStart += eliteSize;
+
+            fillRoomType(roomResults, fillStart, fillStart + monsterSize, MONSTER);
+            fillStart += monsterSize;
+            int shopFillStart = fillStart;
+            if (isCurrentRoomShop) {
+                shopFillStart = fillStart;
+                shopSize = 0;
+            }
+            fillRoomType(roomResults, shopFillStart, shopFillStart + shopSize, SHOP);
+            fillStart += shopSize;
+            fillRoomType(roomResults, fillStart, fillStart + treasureSize, TREASURE);
+        } else {
+            int fillStart = 0;
+            fillRoomType(roomResults, fillStart, fillStart + monsterSize, MONSTER);
+            fillStart += monsterSize;
+
+            int shopFillStart = fillStart;
+            if (isCurrentRoomShop) {
+                shopFillStart = fillStart;
+                shopSize = 0;
+            }
+            fillRoomType(roomResults, shopFillStart, shopFillStart + shopSize, SHOP);
+            fillStart += shopSize;
+
+            fillRoomType(roomResults, fillStart, fillStart + treasureSize, TREASURE);
+        }
+
+        if (tinyChestForcesTreasure) {
+            Arrays.fill(roomResults, TREASURE);
+        } else if (hasJuzuBracelet) {
+            for (int i = 0; i < roomResults.length; i++) {
+                if (roomResults[i] == MONSTER) {
+                    roomResults[i] = EVENT;
+                }
+            }
+        }
+
+        if (isEndless && hasMimicInfestation) {
+            for (int i = 0; i < roomResults.length; i++) {
+                if (roomResults[i] == TREASURE) {
+                    roomResults[i] = hasJuzuBracelet ? EVENT : ELITE;
+                }
+            }
+        }
+
+        int eliteCount = 0;
+        int monsterCount = 0;
+        int shopCount = 0;
+        int treasureCount = 0;
+        int eventCount = 0;
+        for (int result : roomResults) {
+            switch (result) {
+                case ELITE:
+                    eliteCount++;
+                    break;
+                case MONSTER:
+                    monsterCount++;
+                    break;
+                case SHOP:
+                    shopCount++;
+                    break;
+                case TREASURE:
+                    treasureCount++;
+                    break;
+                default:
+                    eventCount++;
+                    break;
+            }
+        }
+
+        Map<String, Double> chances = new LinkedHashMap<>();
+        int total = roomResults.length;
+        chances.put("elite", (double) eliteCount / total);
+        chances.put("monster", (double) monsterCount / total);
+        chances.put("shop", (double) shopCount / total);
+        chances.put("treasure", (double) treasureCount / total);
+        chances.put("event", (double) eventCount / total);
+        return chances;
+    }
+
+    static List<Map<String, Object>> buildPathHistory() {
+        if (CardCrawlGame.metricData == null
+                || CardCrawlGame.metricData.path_taken == null
+                || CardCrawlGame.metricData.path_per_floor == null) {
+            return new ArrayList<>();
+        }
+        return buildPathHistory(CardCrawlGame.metricData.path_taken, CardCrawlGame.metricData.path_per_floor);
+    }
+
+    static List<Map<String, Object>> buildPathHistory(List<String> selectedSymbols,
+                                                     List<String> resolvedSymbols) {
+        List<Map<String, Object>> result = new ArrayList<>();
+        int length = Math.min(selectedSymbols.size(), resolvedSymbols.size());
+        for (int i = 0; i < length; i++) {
+            Map<String, Object> entry = new LinkedHashMap<>();
+            entry.put("floor", i + 1);
+            entry.put("selected_symbol", selectedSymbols.get(i));
+            entry.put("resolved_symbol", resolvedSymbols.get(i));
+            result.add(entry);
+        }
+        return result;
+    }
+
+    private static void fillRoomType(int[] roomResults, int start, int end, int roomType) {
+        int clampedStart = Math.min(99, start);
+        int clampedEnd = Math.min(100, end);
+        if (clampedStart < 0 || clampedEnd > roomResults.length || clampedStart >= clampedEnd) {
+            return;
+        }
+        for (int i = clampedStart; i < clampedEnd; i++) {
+            roomResults[i] = roomType;
+        }
     }
 
     private static List<Map<String, Object>> convertCardGroup(ArrayList<AbstractCard> cards) {
@@ -602,6 +835,7 @@ public class GameStateConverter {
                 jsonNode.put("x", node.x);
                 jsonNode.put("y", node.y);
                 jsonNode.put("symbol", node.getRoomSymbol(true));
+                jsonNode.put("burning", node.hasEmeraldKey);
                 jsonNode.put("lane_index_from_left", ChoiceScreenUtils.getMapNodeLaneIndexFromLeft(node));
                 jsonNode.put("human_label", ChoiceScreenUtils.describeMapNodeForHuman(node));
                 jsonNode.put("is_current", AbstractDungeon.currMapNode != null && node.x == AbstractDungeon.currMapNode.x && node.y == AbstractDungeon.currMapNode.y);
@@ -681,6 +915,7 @@ public class GameStateConverter {
             jsonChoice.put("x", node.x);
             jsonChoice.put("y", node.y);
             jsonChoice.put("symbol", node.getRoomSymbol(true));
+            jsonChoice.put("burning", node.hasEmeraldKey);
             jsonChoice.put("lane_index_from_left", ChoiceScreenUtils.getMapNodeLaneIndexFromLeft(node));
             jsonChoice.put("human_label", ChoiceScreenUtils.describeMapNodeForHuman(node));
 

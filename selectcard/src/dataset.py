@@ -17,6 +17,7 @@ try:
     )
     from .encoding import ItemVocabulary, encode_items, split_items
     from .boss_context import boss_id
+    from . import map_context
 except ImportError:
     from data_contract import (
         FILTER_VERSION, HAZARD_ENDPOINTS, MASK_COLUMNS, PREPROCESSING_VERSION,
@@ -24,6 +25,7 @@ except ImportError:
     )
     from encoding import ItemVocabulary, encode_items, split_items
     from boss_context import boss_id
+    import map_context
 
 
 REQUIRED_COLUMNS = {
@@ -341,6 +343,8 @@ class STSDataset(Dataset):
         max_upgrade=15,
         max_count=10,
         progress=None,
+        use_map_context=False,
+        plan_dropout=0.0,
     ):
         self.vocabulary = vocabulary
         self.feature_encoder = feature_encoder
@@ -348,6 +352,11 @@ class STSDataset(Dataset):
         self.max_seq_len = max_seq_len
         self.max_upgrade = max_upgrade
         self.max_count = max_count
+        self.use_map_context = use_map_context
+        self.plan_dropout_rate = float(plan_dropout)
+        # Curriculum switch: while False, map/plan tokens are masked out so a
+        # v3 run warms up on the pure v2 objective (MODEL_V3_DESIGN.md 5).
+        self.context_enabled = True
         self.files = sorted(
             glob.glob(os.path.join(parquet_dir, f"{split}_valid_chunk_*.parquet"))
         )
@@ -393,6 +402,84 @@ class STSDataset(Dataset):
     def _get_df(self, file_idx):
         return _read_frame(self.files[file_idx])
 
+    @staticmethod
+    def _column_list(row, name):
+        value = row.get(name)
+        if value is None:
+            return None
+        if isinstance(value, float) and math.isnan(value):
+            return None
+        # Parquet list columns come back as numpy arrays or python lists.
+        if isinstance(value, (list, tuple)) or hasattr(value, "tolist"):
+            return list(value)
+        return None
+
+    def _map_context_tensors(self, row):
+        """Decode the packed v3 context columns of one row."""
+        plan = self._column_list(row, "plan_rooms")
+        key_states = self._column_list(row, "key_states") or [0, 0, 0]
+        act = row.get("act")
+        act = int(act) if isinstance(act, (int, float)) and not (
+            isinstance(act, float) and math.isnan(act)
+        ) else 0
+
+        if not self.context_enabled:
+            plan = None
+        elif plan is not None and torch.rand(()).item() < self.plan_dropout_rate:
+            plan = None
+
+        map_rooms = self._column_list(row, "map_rooms")
+        map_flags = self._column_list(row, "map_flags")
+        map_present = map_rooms is not None
+        if not self.context_enabled or not map_present:
+            map_rooms = [0] * map_context.MAP_GRID_CELLS
+            map_flags = [0] * map_context.MAP_GRID_CELLS
+
+        raw_plan = list(plan or [])
+        if 0 in raw_plan:  # pipeline pads missing plan slots with room id 0
+            raw_plan = raw_plan[: raw_plan.index(0)]
+        plan_ids = raw_plan[: map_context.PLAN_HORIZON]
+        plan_dist = list(range(len(plan_ids)))
+        plan_ids = plan_ids + [0] * (map_context.PLAN_HORIZON - len(plan_ids))
+        plan_dist = plan_dist + [map_context.PLAN_HORIZON] * (
+            map_context.PLAN_HORIZON - len(plan_dist)
+        )
+
+        # History is most-recent-first (index 0 = the room just left) and
+        # right-padded, mirroring the plan layout.  No dropout: it carries no
+        # future information.
+        history = self._column_list(row, "history_rooms")
+        if not self.context_enabled:
+            history = None
+        raw_history = list(history or [])
+        if 0 in raw_history:
+            raw_history = raw_history[: raw_history.index(0)]
+        history_ids = raw_history[: map_context.HISTORY_HORIZON]
+        history_dist = list(range(len(history_ids)))
+        history_ids = history_ids + [0] * (
+            map_context.HISTORY_HORIZON - len(history_ids)
+        )
+        history_dist = history_dist + [map_context.HISTORY_HORIZON] * (
+            map_context.HISTORY_HORIZON - len(history_dist)
+        )
+
+        keys_features = map_context.keys_token_features(key_states, map_flags, act)
+        key_labels = [float(key_states[0]), float(key_states[1]), float(key_states[2])]
+        # Sapphire is not recoverable from archived logs; emerald needs the
+        # reconstructed map, so it is only supervised where the map exists.
+        key_mask = [1.0, 1.0 if map_present else 0.0, 0.0]
+        return (
+            torch.tensor(keys_features, dtype=torch.float32),
+            torch.tensor(map_rooms, dtype=torch.long),
+            torch.tensor(map_flags, dtype=torch.long),
+            torch.tensor(plan_ids, dtype=torch.long),
+            torch.tensor(plan_dist, dtype=torch.long),
+            torch.tensor(history_ids, dtype=torch.long),
+            torch.tensor(history_dist, dtype=torch.long),
+            torch.tensor(key_labels, dtype=torch.float32),
+            torch.tensor(key_mask, dtype=torch.float32),
+        )
+
     def __getitem__(self, idx):
         if idx < 0:
             idx += self.total_samples
@@ -414,7 +501,7 @@ class STSDataset(Dataset):
         encoded_boss = boss_id(row["visible_boss"])
         targets = [float(row[column]) for column in TARGET_COLUMNS]
         masks = [float(bool(row[column])) for column in MASK_COLUMNS]
-        return (
+        base = (
             torch.tensor(tokens, dtype=torch.long),
             torch.tensor(upgrades, dtype=torch.long),
             torch.tensor(counts, dtype=torch.long),
@@ -424,6 +511,9 @@ class STSDataset(Dataset):
             torch.tensor(targets, dtype=torch.float32),
             torch.tensor(masks, dtype=torch.float32),
         )
+        if not self.use_map_context:
+            return base
+        return base + self._map_context_tensors(row)
 
 
 class ChunkShuffleSampler(Sampler):

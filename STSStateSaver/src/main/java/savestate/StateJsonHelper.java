@@ -14,6 +14,14 @@ import java.util.List;
 import java.util.Map;
 
 public class StateJsonHelper {
+    private static final String[] TRANSIENT_PLAYED_CARD_FIELDS = {
+            "damage",
+            "block",
+            "magic_number",
+            "cost_for_turn",
+            "is_cost_modified_for_turn"
+    };
+
     private static final Gson GSON = new GsonBuilder()
             .registerTypeAdapter(CardState.class, new JsonSerializer<CardState>() {
                 @Override
@@ -74,6 +82,35 @@ public class StateJsonHelper {
 
     public static JsonElement normalizeCardUuids(JsonElement json) {
         return normalizeCardUuids(json, new HashMap<String, String>(), new int[]{0});
+    }
+
+    static void normalizePlayedCardHistoryForDiff(JsonObject state) {
+        JsonElement turnBackup = state.get("cards_played_this_turn_backup");
+        if (turnBackup != null && turnBackup.isJsonArray()) {
+            for (JsonElement card : turnBackup.getAsJsonArray()) {
+                removeTransientPlayedCardFields(card);
+            }
+        }
+
+        JsonElement combatHistory = state.get("cards_played_this_combat");
+        if (combatHistory != null && combatHistory.isJsonArray()) {
+            for (JsonElement entry : combatHistory.getAsJsonArray()) {
+                if (entry != null && entry.isJsonObject()) {
+                    removeTransientPlayedCardFields(entry.getAsJsonObject().get("card_state"));
+                }
+            }
+        }
+    }
+
+    private static void removeTransientPlayedCardFields(JsonElement card) {
+        if (card == null || !card.isJsonObject()) {
+            return;
+        }
+
+        JsonObject cardObject = card.getAsJsonObject();
+        for (String field : TRANSIENT_PLAYED_CARD_FIELDS) {
+            cardObject.remove(field);
+        }
     }
 
     private static JsonElement normalizeCardUuids(JsonElement json, Map<String, String> aliases,

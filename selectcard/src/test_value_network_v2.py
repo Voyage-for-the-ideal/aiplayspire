@@ -554,7 +554,7 @@ class ModelTests(unittest.TestCase):
         })
         self.assertEqual(result["deck"], ["Bash", "Inflame"])
 
-    def test_v7_checkpoint_round_trip(self):
+    def test_v8_checkpoint_round_trip(self):
         model = self._model()
         config = {
             "vocab_size": 12,
@@ -581,7 +581,7 @@ class ModelTests(unittest.TestCase):
             path = os.path.join(directory, "model.pth")
             save_checkpoint(path, model, config, vocabulary, feature_encoder)
             checkpoint, loaded_vocab, loaded_encoder = load_checkpoint(path)
-        self.assertEqual(checkpoint["format_version"], 7)
+        self.assertEqual(checkpoint["format_version"], 8)
         self.assertEqual(loaded_vocab.to_dict(), vocabulary.to_dict())
         self.assertEqual(loaded_encoder.to_dict(), feature_encoder.to_dict())
 

@@ -3,7 +3,10 @@ import sys
 
 from colorama import Fore, Style
 
+from ..config import EVENT_DECISION_POLICY
 from ..models import ActionType, GameAction, GameState, visible_boss_of
+from ..run_log import log_event
+from .map_payload import map_context_fields
 
 
 class ActionMixin:
@@ -33,12 +36,10 @@ class ActionMixin:
         if state.screen_type == "REST":
             return self._handle_rest_room(state)
 
-        # Structured map data is sufficient for a local deterministic route;
-        # retain the LLM path for older/partial Communication Mod payloads.
+        # Every MAP state stays on the deterministic local path, including
+        # incomplete payloads handled by the planner's fallback modes.
         if state.screen_type == "MAP":
-            map_action = self._get_deterministic_map_action(state)
-            if map_action is not None:
-                return map_action
+            return self._get_map_action(state)
 
         # Prefer locale-independent structured event semantics. Text parsing remains
         # available only for older servers which do not expose state.event.
@@ -52,8 +53,12 @@ class ActionMixin:
                 return GameAction(type=ActionType.WAIT)
 
         if state.screen_type == "EVENT" and getattr(state, "choice_list", None):
-            if state.event is None and self.value_engine is not None:
-                print(Fore.MAGENTA + "旧版服务端事件：使用文字解析和本地价值网络..." + Style.RESET_ALL)
+            unknown_event = state.event is None or state.event.semantics_status != "KNOWN"
+            if self.value_engine is not None and unknown_event:
+                if state.event is None:
+                    print(Fore.MAGENTA + "旧版服务端事件：使用文字解析和本地价值网络..." + Style.RESET_ALL)
+                else:
+                    print(Fore.MAGENTA + "事件语义未知：使用文字解析和本地价值网络..." + Style.RESET_ALL)
                 action = self._get_model_event_decision(state)
                 if action is not None:
                     return action
@@ -90,15 +95,9 @@ class ActionMixin:
         if state.screen_type == "COMBAT_REWARD":
             return self._handle_combat_reward(state)
 
-        # Auto-handle CHEST: just open it, no LLM needed
+        # CHEST：默认直接开箱；持 Cursed Key 时由价值网络权衡开箱(期望)与离开
         if state.screen_type == "CHEST":
-            print(Fore.MAGENTA + "自动打开宝箱..." + Style.RESET_ALL)
-            unified_choices = self._build_unified_choices(state)
-            if unified_choices:
-                return unified_choices[0][1]
-            if state.can_proceed:
-                return GameAction(type=ActionType.PROCEED)
-            return GameAction(type=ActionType.WAIT)
+            return self._handle_chest(state)
 
         # === COMBAT MODULE DISABLED - outsourced to masterspire BattleAiMod.jar ===
         if state.screen_type == "NONE" and state.room_phase == "COMBAT":
@@ -130,6 +129,18 @@ class ActionMixin:
             if action is not None:
                 return action
         # ==================================
+
+        # ====== 事件永不调用 LLM（expectimax 策略）：结构化与文本解析都失败时走安全回退 ======
+        if state.screen_type == "EVENT" and EVENT_DECISION_POLICY == "expectimax":
+            event = getattr(state, "event", None)
+            log_event(
+                event="event_llm_blocked",
+                event_id=getattr(event, "id", None),
+                phase=getattr(event, "phase", None),
+                decision_kind=getattr(event, "decision_kind", None),
+                floor=state.floor,
+            )
+            return self._build_safe_fallback_action(state)
 
         prompt = self._format_state_for_prompt(state)
         self._write_debug_prompt(state, prompt)
@@ -403,6 +414,7 @@ class ActionMixin:
                 "floor": state.floor,
                 "ascension": 20,
                 "visible_boss": visible_boss_of(state),
+                **map_context_fields(state, getattr(self, "_last_plan_symbols", None)),
                 "deck": [card.id for card in state.deck] if hasattr(state, "deck") else [],
                 "relics": [relic.id for relic in state.relics] if hasattr(state, "relics") else [],
                 "relic_states": self._build_relic_state_payload(state) if hasattr(self, "_build_relic_state_payload") else [],

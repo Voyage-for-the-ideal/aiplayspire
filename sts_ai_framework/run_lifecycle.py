@@ -51,7 +51,7 @@ def _main_menu_action(state: GameState, auto_restart: bool) -> GameAction:
 
 def _char_select_action(state: GameState, character: str, ascension: int) -> GameAction:
     choices = state.choice_list or []
-    target = (character or "IRONCLAD").upper()
+    target = (character or "DEFECT").upper()
     if target not in choices:
         # Locked or unknown character: waiting beats picking blindly.
         return GameAction(type=ActionType.WAIT)

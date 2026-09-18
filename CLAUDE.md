@@ -16,7 +16,7 @@ AIPlaySpire：让 AI 自动通关《杀戮尖塔》的研究项目。游戏侧 4
 
 | 目录 | 职责 |
 |---|---|
-| `sts_ai_framework/` | Python agent 主循环：轮询 CommunicationMod (`:5000`) 状态 → 屏幕分类 → 决策分发 → 提交动作并校验生效。决策逻辑在 `llm_agent_parts/`（route / decision / choice / action / info_prompt mixin：确定性地图路由、价值网络候选打分、LLM 兜底）；回归测试在 `sts_ai_framework/tests/` |
+| `sts_ai_framework/` | Python agent 主循环：轮询 CommunicationMod (`:5000`) 状态 → 屏幕分类 → 决策分发 → 提交动作并校验生效。`routing/` 负责 6 层有限视野确定性地图规划（`MAP` 决策 0 LLM）；`llm_agent_parts/` 负责动作分发、价值网络候选打分及非地图非结构化界面的 LLM 兜底；回归测试在 `sts_ai_framework/tests/` |
 | `selectcard/` | 价值网络 V(S)：Set Transformer + bucket-hazard / Heart 输出头；含重放式数据流水线、训练、进程内推理与可选 FastAPI 服务（细节见下文 "Set Transformer v2"） |
 | `StSCommunicationMod/` | Communication Mod：游戏内 HTTP 桥（`:5000`，`/state` `/action` `/card_info`），结构化事件语义与 Cursed Tome 多步本地流程 |
 | `STSStateSaver/` | Save State Mod：战斗状态完整序列化/恢复（含 RNG）—— 树搜索的回滚原语 |
@@ -44,15 +44,25 @@ AIPlaySpire：让 AI 自动通关《杀戮尖塔》的研究项目。游戏侧 4
 
 更新后验证：`mvn package` 并确认 `target/classes/ModTheSpire.json` 中的 `version` 和 `description` 已正确生成，再部署到 `_ModTheSpire/mods/`。
 
-## Set Transformer v2
+## Set Transformer v2 / v3 地图条件化
 
 - The v2 processed dataset lives in `selectcard/processed_data_v2/`; it is generated and must not be committed.
 - Rebuild it from `selectcard/` with `python src/data_pipeline.py`.
-- Run model tests from `selectcard/src/` with `python -m unittest test_value_network_v2.py`.
+- Run model tests from `selectcard/src/` with `python -m unittest test_value_network_v2.py`（以及 v3：`test_map_context.py`、`test_value_network_v3.py`；依赖在 conda `spire` 环境）.
 - Train from `selectcard/` with `python src/train.py` (evaluate a checkpoint with `--test-only`); use a CUDA-enabled PyTorch environment for the full dataset.
 - The default architecture is one early Global token, Pre-LN attention blocks, and final CLS pooling. Ablations are controlled by `GLOBAL_CONDITIONING` and `NORM_POSITION` in `selectcard/src/config.py`.
-- 输入序列为 `[CLS] + [GLOBAL] + [BOSS] + item tokens`：`[BOSS]` 是当前幕可见 Boss 的 embedding 上下文 token（数据侧由 `boss_context.py` / `build_boss_context.py` 支持）。
+- 输入序列 v2 为 `[CLS] + [GLOBAL] + [BOSS] + item tokens`：`[BOSS]` 是当前幕可见 Boss 的 embedding 上下文 token（数据侧由 `boss_context.py` / `build_boss_context.py` 支持）。
+- **v3 地图条件化**（`Config.USE_MAP_CONTEXT`，设计见仓库根 `MODEL_V3_DESIGN.md`）：序列扩展为
+  `[CLS] + [GLOBAL] + [BOSS] + [KEYS] + [MAP×105] + [PLAN×1] + [HISTORY×8] + item tokens`（token 类型 embedding），并新增 3 路 key-progress 辅助头（权重 `KEY_HEAD_LOSS_WEIGHT`）。
+  - 地图上下文由 `selectcard/src/map_context.py` 打包（房间/边/带火/visited/reachable/on_plan 位标记 + plan 固定视野 1 + 当前幕走过的路径 history 视野 8）；
+    归档 run 经 `sts_mapgen.py` 由 `seed_played` 逐位重建整幕真图（历史回验 99.97%），训练/推理共用同一打包格式。
+    plan 视野从 8 收窄到 1 是防泄漏措施：hindsight 路径不足视野时的 padding 长度会泄露「8 层内死亡」（人总会走进他死亡的房间，视野 1 时 plan 几乎从不缺位）。
+  - `data_pipeline.py` 为每个样本附加上下文列（`map_rooms/map_flags/plan_rooms/history_rooms/key_states/act`）；`train.py` 提供 plan dropout 0.5、
+    前 `CONTEXT_CURRICULUM_EPOCHS` 轮的课程掩码与 key 头损失。
+  - `use_map_context=False`（v2 checkpoint）时模型结构与 v2 完全一致，旧 checkpoint 与旧数据集照常加载；推理侧 item 预算自动回退 64。
+  - 框架侧 `sts_ai_framework/llm_agent_parts/map_payload.py` 把 GameState 的地图/钥匙/router 计划（锚定楼层随楼层移位，过期即省略）/当前幕 path_history
+    注入价值网络 payload（v2 引擎自动忽略）。
 - 输出头是 20 个楼层桶的 stopping-hazard + 1 个 Heart-win logit；端点与标签契约定义在 `selectcard/src/data_contract.py`（`VALUE_TARGET_SCHEMA = "bucket-hazard-v1"`）。标量价值 V(S) = E[终止楼层] + `HEART_WIN_BONUS_FLOORS` × P(Heart)。
 - v2 checkpoints embed model configuration, the frozen vocabulary, normalization statistics, and preprocessing version. Legacy bare `state_dict` checkpoints are intentionally incompatible and require retraining.
 - Optional HTTP inference server: `uvicorn src.api:app` from `selectcard/` (`POST /recommend/choice`, `/recommend/shop`).
-- Do not commit `selectcard/checkpoints/`, `selectcard/processed_data/`, or `selectcard/processed_data_v2/` artifacts.
+- Do not commit `selectcard/checkpoints/`, `selectcard/processed_data/`, `selectcard/processed_data_v2/`, or `selectcard/processed_data_v3/` artifacts.

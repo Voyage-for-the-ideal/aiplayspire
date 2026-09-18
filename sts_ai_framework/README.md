@@ -6,7 +6,7 @@
 ## 项目目标
 
 1. 持续轮询游戏状态并转为结构化数据。
-2. 用 LLM + 本地策略模型做决策。
+2. 用本地策略模型（价值网络 + 地图路由）做决策；复杂或非结构化界面再走 LLM 兜底。
 3. 将动作提交给 Mod，并检测动作是否生效。
 
 ## 精简后的项目结构
@@ -28,7 +28,16 @@ sts_ai_framework/
     action_mixin.py               # choose_action 主流程、状态流转与回退
     choice_mixin.py               # 统一选项、按钮处理、战斗 fallback
     decision_mixin.py             # 本地 value model 决策（商店/选卡/事件/Boss遗物）
-    info_prompt_mixin.py          # 卡牌解析、地图摘要、Prompt 构建
+    info_prompt_mixin.py          # 卡牌解析、结构化事件效果与非地图 Prompt 构建
+    route_mixin.py                # MAP 分发、legacy 基线与确定性 fallback 适配
+  routing/                        # 确定性地图规划器（图、上下文、特征、评分、决策）
+    map_graph.py                  # 地图 DAG 校验、普通/Winged 边与路径枚举
+    context.py                    # RouteContext 与 HP/Gold 状态分桶
+    features.py                   # 恢复、强制风险、弹性与钥匙可达性特征
+    policy.py                     # 集中式路由参数
+    evaluator.py                 # 路径与候选评分
+    planner.py                   # 约束过滤、确定性选择与四档 fallback
+    decision.py                  # RouteDecision 及评分分项
   tests/
     test_main_loop.py             # 战斗接管判定回归测试
     test_run_lifecycle.py         # 生命周期状态机回归测试
@@ -76,11 +85,13 @@ DEEPSEEK_API_KEY=sk-...
 
 # 自动重开（对局结束后自动开始下一局，需要 CommunicationMod >= 1.4.0）
 AUTO_RESTART=true
-CHARACTER=IRONCLAD      # IRONCLAD / SILENT / DEFECT / WATCHER
+CHARACTER=DEFECT        # DEFECT（机器人） / IRONCLAD / SILENT / WATCHER
 ASCENSION=15            # 进阶等级，0 = 普通难度
 RESTART_DELAY=2.0       # 对局结束/开局提交后的额外等待（秒）
 BATTLE_STALL_WARN_SECONDS=300  # 战斗状态无变化的停摆告警阈值（秒），0 关闭
 ```
+
+角色的统一配置入口是 `sts_ai_framework/.env` 中的 `CHARACTER`；修改这一项即可影响自动连续开局。命令行 `--character` 仅用于临时覆盖本次运行。
 
 ## 自动重开
 
@@ -105,7 +116,7 @@ python -m sts_ai_framework --model deepseek-v4-flash --interval 2.0
 1. --model：覆盖 .env 的 LLM_MODEL。
 2. --interval：轮询与行动间隔（秒）。
 3. --debug-prompt-file：将最新 Prompt 持续写入指定文件。
-4. --character：自动重开角色（默认取 .env 的 CHARACTER，IRONCLAD/SILENT/DEFECT/WATCHER）。
+4. --character：自动重开角色（默认取 .env 的 CHARACTER，默认 DEFECT（机器人）；可选 IRONCLAD/SILENT/DEFECT/WATCHER）。
 5. --ascension：自动重开进阶等级（默认取 .env 的 ASCENSION，0 = 普通）。
 6. --no-auto-restart：关闭自动重开。
 7. --restart-delay：对局结束/开局提交后的额外等待（秒）。
@@ -135,9 +146,10 @@ Mod 接口：
 
 1. 选择态严格使用 choice_list 与 choice_index 映射。
 2. 按钮态在无 choice_list 时处理 proceed/cancel。
-3. 战斗失败回退优先安全动作，避免直接无脑 end_turn。
-4. 商店/事件/选卡可走本地 value model 决策。
-5. Prompt 会融合地图摘要、卡牌信息和战斗上下文。
+3. 地图路由使用确定性规划器执行（6 层有限视野、硬约束与安全约束检查），不进入 LLM。
+4. 战斗失败回退优先安全动作，避免直接无脑 end_turn。
+5. 商店/事件/选卡可走本地 value model 决策。
+6. LLM Prompt 只服务于非地图兜底，融合卡牌信息与结构化事件效果，不包含地图路线信息。
 
 ## 常见问题
 

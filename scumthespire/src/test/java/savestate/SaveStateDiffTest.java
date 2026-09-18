@@ -29,6 +29,34 @@ public class SaveStateDiffTest {
         assertFalse(SaveState.diff(client.toString(), server.toString()));
     }
 
+    @Test
+    public void acceptsPlayedCardFieldsResetAfterNecronomiconCopyExhausts() {
+        JsonObject client = diffState("10590ee7-4b45-477f-aa38-f94a3012e5de",
+                "10590ee7-4b45-477f-aa38-f94a3012e5de");
+        JsonObject server = diffState("00000000-0000-0000-0000-0000000da991",
+                "00000000-0000-0000-0000-0000000da991");
+
+        setTransientPlayedCardHistoryFields(client, 5, -1, 2, 1, false);
+        setTransientPlayedCardHistoryFields(server, 9, 0, 4, 0, true);
+
+        assertTrue(SaveState.diff(client.toString(), server.toString()));
+    }
+
+    @Test
+    public void stillRejectsMeaningfulPlayedCardDifferences() {
+        JsonObject client = diffState("10590ee7-4b45-477f-aa38-f94a3012e5de",
+                "10590ee7-4b45-477f-aa38-f94a3012e5de");
+        JsonObject server = diffState("00000000-0000-0000-0000-0000000da991",
+                "00000000-0000-0000-0000-0000000da991");
+
+        client.getAsJsonArray("cards_played_this_turn_backup").get(0)
+                .getAsJsonObject().addProperty("base_damage", 5);
+        server.getAsJsonArray("cards_played_this_turn_backup").get(0)
+                .getAsJsonObject().addProperty("base_damage", 6);
+
+        assertFalse(SaveState.diff(client.toString(), server.toString()));
+    }
+
     private static JsonObject diffState(String turnUuid, String combatUuid) {
         JsonObject state = new JsonObject();
         state.addProperty("screen_name", "NONE");
@@ -105,5 +133,28 @@ public class SaveStateDiffTest {
         card.addProperty("uuid", uuid);
         card.addProperty("cost_for_turn", 0);
         return card;
+    }
+
+    private static void setTransientPlayedCardHistoryFields(JsonObject state, int damage, int block,
+                                                            int magicNumber, int costForTurn,
+                                                            boolean costModifiedForTurn) {
+        JsonObject turnCard = state.getAsJsonArray("cards_played_this_turn_backup").get(0)
+                .getAsJsonObject();
+        JsonObject combatCard = state.getAsJsonArray("cards_played_this_combat").get(0)
+                .getAsJsonObject().getAsJsonObject("card_state");
+        setTransientPlayedCardFields(turnCard, damage, block, magicNumber, costForTurn,
+                costModifiedForTurn);
+        setTransientPlayedCardFields(combatCard, damage, block, magicNumber, costForTurn,
+                costModifiedForTurn);
+    }
+
+    private static void setTransientPlayedCardFields(JsonObject card, int damage, int block,
+                                                     int magicNumber, int costForTurn,
+                                                     boolean costModifiedForTurn) {
+        card.addProperty("damage", damage);
+        card.addProperty("block", block);
+        card.addProperty("magic_number", magicNumber);
+        card.addProperty("cost_for_turn", costForTurn);
+        card.addProperty("is_cost_modified_for_turn", costModifiedForTurn);
     }
 }

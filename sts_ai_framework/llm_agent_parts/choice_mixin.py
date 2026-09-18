@@ -3,6 +3,7 @@ from typing import List, Optional, Tuple
 from colorama import Fore, Style
 
 from ..models import ActionType, GameAction, GameState, visible_boss_of
+from .map_payload import map_context_fields
 
 
 class ChoiceMixin:
@@ -53,6 +54,7 @@ class ChoiceMixin:
             "floor": state.floor,
             "ascension": 20,
             "visible_boss": visible_boss_of(state),
+            **map_context_fields(state, getattr(self, "_last_plan_symbols", None)),
             "deck": [card.id for card in state.deck] if hasattr(state, "deck") else [],
             "relics": [relic.id for relic in state.relics] if hasattr(state, "relics") else [],
         }
@@ -277,6 +279,7 @@ class ChoiceMixin:
             "floor": state.floor,
             "ascension": 20,
             "visible_boss": visible_boss_of(state),
+            **map_context_fields(state, getattr(self, "_last_plan_symbols", None)),
             "deck": [card.id for card in state.deck],
             "relics": [relic.id for relic in state.relics],
         }

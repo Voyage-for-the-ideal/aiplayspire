@@ -102,6 +102,24 @@ public class EventStateExtractorTest {
         assertTrue(effect.get("book_relics") instanceof List);
     }
 
+    @Test
+    public void colosseumPostCombatMatchesVanillaButtonOrder() {
+        Map<String, Object> result = EventStateExtractor.extract(new Colosseum(), buttons("leave", "fight"));
+        assertEquals("KNOWN", result.get("semantics_status"));
+        assertEquals("COMPLEX", result.get("decision_kind"));
+        List<Map<String, Object>> choices = (List<Map<String, Object>>) result.get("choices");
+        // Vanilla Colosseum.buttonEffect: button 0 leaves, button 1 fights the Nobs.
+        assertEquals("LEAVE", choices.get(0).get("kind"));
+        assertEquals(0, choices.get(0).get("action_index"));
+        Map<String, Object> leaveOutcome = (Map<String, Object>) ((List<?>) choices.get(0).get("outcomes")).get(0);
+        assertTrue(((List<?>) leaveOutcome.get("effects")).isEmpty());
+        assertEquals("COMBAT", choices.get(1).get("kind"));
+        assertEquals(1, choices.get(1).get("action_index"));
+        Map<String, Object> fightOutcome = (Map<String, Object>) ((List<?>) choices.get(1).get("outcomes")).get(0);
+        Map<String, Object> effect = (Map<String, Object>) ((List<?>) fightOutcome.get("effects")).get(0);
+        assertEquals("start_combat", effect.get("type"));
+    }
+
     private static ArrayList<LargeDialogOptionButton> buttons(String... labels) {
         ArrayList<LargeDialogOptionButton> result = new ArrayList<>();
         for (int i = 0; i < labels.length; i++) result.add(new LargeDialogOptionButton(i, labels[i]));
@@ -132,6 +150,11 @@ public class EventStateExtractorTest {
     private static class CursedTome extends AbstractEvent {
         @SuppressWarnings("unused") private String screen = "INTRO";
         @SuppressWarnings("unused") private int finalDmg = 15;
+        @Override protected void buttonEffect(int buttonPressed) {}
+    }
+
+    private static class Colosseum extends AbstractEvent {
+        @SuppressWarnings("unused") private String screen = "POST_COMBAT";
         @Override protected void buttonEffect(int buttonPressed) {}
     }
 }

@@ -46,6 +46,7 @@ except ImportError:
         ascension_band,
     )
     from reconstructor import RunReconstructor
+    from map_context import MAP_CONTEXT_VERSION, RunMapContextBuilder
 
 
 MIN_GAME_DATE = datetime(2020, 1, 14)
@@ -421,6 +422,10 @@ def process_run(event_data, catalog):
     split = assign_split(run_id)
     terminal_known = bool(recon.is_victory or recon.killed_by)
     heart_victory = is_heart_victory(event_data)
+    try:
+        map_builder = RunMapContextBuilder(event_data)
+    except Exception:  # noqa: BLE001 - context is additive, never fatal
+        map_builder = None
     rows = []
     for snapshot in snapshots:
         floor = _validate_snapshot(snapshot, validated["ascension"])
@@ -432,6 +437,8 @@ def process_run(event_data, catalog):
         )
         target_fields = dict(zip(TARGET_COLUMNS, targets))
         mask_fields = dict(zip(MASK_COLUMNS, masks))
+        context = map_builder.context_for_floor(floor) if map_builder else None
+        has_map = bool(map_builder is not None and map_builder.seed is not None and context)
         rows.append(
             {
                 **snapshot,
@@ -451,6 +458,14 @@ def process_run(event_data, catalog):
                 "deck": ",".join(snapshot["deck"]),
                 "relics": ",".join(snapshot["relics"]),
                 "candidates": ",".join(snapshot["candidates"]),
+                # v3 map-context columns (additive; None degrades to missing).
+                "map_context_version": MAP_CONTEXT_VERSION if has_map else None,
+                "act": context["act"] if context else None,
+                "map_rooms": context["map_rooms"] if has_map else None,
+                "map_flags": context["map_flags"] if has_map else None,
+                "plan_rooms": context["plan_rooms"] if context else None,
+                "history_rooms": context["history_rooms"] if context else None,
+                "key_states": context["key_states"] if context else None,
             }
         )
     return {
@@ -459,6 +474,7 @@ def process_run(event_data, catalog):
         "ascension": validated["ascension"],
         "ascension_band": validated["ascension_band"],
         "split": split,
+        "has_map_context": bool(map_builder is not None and map_builder.seed is not None),
         "rows": rows,
     }
 
@@ -655,6 +671,7 @@ def build_dataset(
         "runs_by_ascension": Counter(),
         "runs_by_ascension_band": Counter(),
         "runs_by_split": Counter(),
+        "runs_with_map_context": Counter(),
         "samples_by_split": Counter(),
         "positive_samples_by_target": Counter(),
         "valid_samples_by_target": Counter(),
@@ -663,6 +680,7 @@ def build_dataset(
         "censored_samples_by_hazard": Counter(),
         "valid_samples_by_split": Counter(),
         "train_valid_samples_by_ascension_band": Counter(),
+        "samples_with_map_context": Counter(),
     }
     seen_run_keys = set()
     accepted_runs = 0
@@ -702,8 +720,12 @@ def build_dataset(
                 dimensions["runs_by_ascension"][str(run["ascension"])] += 1
                 dimensions["runs_by_ascension_band"][str(run["ascension_band"])] += 1
                 dimensions["runs_by_split"][run["split"]] += 1
+                if run.get("has_map_context"):
+                    dimensions["runs_with_map_context"]["true"] += 1
                 for row in run["rows"]:
                     sample_count += 1
+                    if row.get("map_rooms") is not None:
+                        dimensions["samples_with_map_context"]["true"] += 1
                     dimensions["samples_by_split"][row["split"]] += 1
                     for target_column, mask_column in zip(TARGET_COLUMNS, MASK_COLUMNS):
                         target_name = target_column.removeprefix("target_")
@@ -747,6 +769,7 @@ def build_dataset(
         manifest = {
             "preprocessing_version": PREPROCESSING_VERSION,
             "filter_version": FILTER_VERSION,
+            "map_context_version": MAP_CONTEXT_VERSION,
             "value_target_schema": VALUE_TARGET_SCHEMA,
             "hazard_endpoints": list(HAZARD_ENDPOINTS),
             "created_at_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",

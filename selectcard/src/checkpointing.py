@@ -10,15 +10,17 @@ try:
     from .dataset import GlobalFeatureEncoder
     from .boss_context import BOSS_VOCABULARY, NUM_BOSS_IDS
     from .config import Config
+    from .map_context import context_schema
 except ImportError:
     from data_contract import HAZARD_ENDPOINTS, VALUE_TARGET_SCHEMA, BOSS_SCHEMA_VERSION
     from encoding import PREPROCESSING_VERSION, ItemVocabulary
     from dataset import GlobalFeatureEncoder
     from boss_context import BOSS_VOCABULARY, NUM_BOSS_IDS
     from config import Config
+    from map_context import context_schema
 
 
-CHECKPOINT_FORMAT_VERSION = 7
+CHECKPOINT_FORMAT_VERSION = 8
 LEGACY_VALUE_TARGET_ERROR = (
     "Checkpoint uses a legacy or incompatible value target. "
     "Rebuild processed_data_v2 and retrain the bucket hazard model."
@@ -35,6 +37,7 @@ def create_checkpoint(model, model_config, vocabulary, feature_encoder, metadata
         "global_feature_schema_version": feature_encoder.schema_version,
         "boss_schema_version": BOSS_SCHEMA_VERSION,
         "boss_vocabulary": dict(BOSS_VOCABULARY),
+        "context_schema": context_schema(),
         "model_config": dict(model_config),
         "model_state_dict": model.state_dict(),
         "vocabulary": vocabulary.to_dict(),
@@ -91,6 +94,13 @@ def load_checkpoint(path, map_location="cpu"):
         raise ValueError("Checkpoint boss schema is incompatible; retraining required")
     if checkpoint["model_config"].get("num_bosses") != NUM_BOSS_IDS:
         raise ValueError("Checkpoint boss vocabulary size is incompatible; retraining required")
+    if checkpoint["model_config"].get("use_map_context"):
+        if checkpoint.get("context_schema") != context_schema():
+            raise ValueError(
+                "Checkpoint map-context schema is incompatible "
+                f"(expected {context_schema()}, got {checkpoint.get('context_schema')}); "
+                "retraining required"
+            )
     if checkpoint["global_feature_schema_version"] != GlobalFeatureEncoder.schema_version:
         raise ValueError("Checkpoint global feature schema is incompatible")
     vocabulary = ItemVocabulary.from_dict(checkpoint["vocabulary"])

@@ -343,7 +343,7 @@ public final class EventStateExtractor {
             case "Colosseum":
                 if ("INTRO".equals(phase)) complex(c,0,"COMBAT","COMBAT",startCombat("Slavers"));
                 else if ("FIGHT".equals(phase)) continueChoice(c,0,"COMBAT");
-                else if ("POST_COMBAT".equals(phase)) { complex(c,0,"COMBAT","COMBAT",startCombat("Nob and Taskmaster")); leave(c,1); }
+                else if ("POST_COMBAT".equals(phase)) { leave(c,0); complex(c,1,"COMBAT","COMBAT",startCombat("Colosseum Nobs")); }
                 else continueChoice(c,0,"EVENT");
                 break;
             case "CursedTome": describeCursedTome(event, phase, c); break;

@@ -569,9 +569,11 @@ public class BattleAiMod implements PostInitializeSubscriber, PostUpdateSubscrib
                 Settings.seed = 123L;
                 AbstractDungeon.generateSeeds();
 
-                // TODO this needs to be the actual character class or bad things happen
+                // The server needs a temporary player before the first request.
+                // SaveState.initPlayerAndCardPool() replaces it with the actual
+                // character from the client's serialized battle state.
                 new Exordium(CardCrawlGame.characterManager
-                        .getCharacter(AbstractPlayer.PlayerClass.IRONCLAD), new ArrayList<>());
+                        .getCharacter(AbstractPlayer.PlayerClass.DEFECT), new ArrayList<>());
 
                 AbstractDungeon.currMapNode.room = new EmptyRoom();
 

@@ -8,11 +8,12 @@ An end-to-end AI agent that plays complete runs of **Slay the Spire** — combin
 
 AIPlaySpire is a hybrid agent that plays a whole run on its own: it routes the map, chooses cards and relics, buys from shops, resolves events, rests at campfires, collects the keys that unlock Act 4, and plays every combat — no human input after the run starts.
 
-Plain LLM prompting is a poor fit for Slay the Spire's decision structure, so the agent splits decisions into three regimes:
+Plain LLM prompting is a poor fit for Slay the Spire's decision structure, so the agent splits decisions into four regimes:
 
 1. **Long-horizon, enumerable decisions** — card rewards, purchases, removals, upgrades, boss relics, event branches. Each candidate can be applied to the current state and scored, but its true value only shows up acts later. A **learned value function** V(S) — trained on ~157M decision states replayed from 13.4M validated recorded runs — provides the long-horizon comparison; candidates are evaluated as hypothetical next-states (enumerate → simulate → argmax V).
-2. **Combat** — exact, deterministic, and cheap to run once game state is serialized. A **best-first tree search** explores card-play/targeting/potion sequences on an accelerated copy of the real game engine, with budgets up to 50k branch expansions per turn.
-3. **Everything unstructured** — rare screens, legacy payloads, novel situations. An **LLM** with a structured-output contract acts as the general reasoning fallback, and deterministic rules handle the few decisions that have a provably correct answer (opening chests, claiming key relics).
+2. **Map routing** — a **deterministic six-level limited-horizon planner** enumerates visible DAG paths, evaluates growth, forced risk, recovery access, optionality, and key reachability, then executes one step and replans. MAP states never enter the LLM path.
+3. **Combat** — exact, deterministic, and cheap to run once game state is serialized. A **best-first tree search** explores card-play/targeting/potion sequences on an accelerated copy of the real game engine, with budgets up to 50k branch expansions per turn.
+4. **Everything else that is unstructured** — rare non-map screens, legacy non-map payloads, novel situations. An **LLM** with a structured-output contract acts as the general reasoning fallback, and deterministic rules handle the few decisions that have a provably correct answer (opening chests, claiming key relics).
 
 ## System Architecture
 
@@ -26,8 +27,8 @@ flowchart TB
     Agent -->|actions| Game
     subgraph Agent["Python agent (sts_ai_framework)"]
         V["Learned value network V(S)"] --> D{"Decision"}
-        LLM["LLM"] --> D
-        R["Map router + hard rules"] --> D
+        LLM["LLM (non-map fallback only)"] --> D
+        R["Deterministic 6-level map planner"] --> D
     end
     D -->|non-combat choices| Game
     D -->|combat detected| Combat["BattleAiMod tree search<br/>(headless 2nd game instance, :5125)"]
@@ -85,7 +86,7 @@ Every decision in a run is owned by exactly one mechanism:
 | Boss relics | Value network |
 | Combat rewards | Fixed priority (relic > gold > potion > card) + structured Emerald/Sapphire key claims with value-based key-vs-relic tradeoff |
 | Chests | Auto-open |
-| **Map routing** | **Deterministic HP-aware router** — room-value scoring, rest-vs-elite risk vs current HP, 1-step lookahead, Act-2 elite HP buffer; LLM only as fallback on partial payloads |
+| **Map routing** | **Deterministic 6-level limited-horizon planner** — DAG path enumeration with `RouteContext` risk/health/gold/keys/`?` state, hard constraints (Act-3 key reachability, recovery safety), and local four-mode fallback (`FULL_GRAPH`, `IMMEDIATE_ONLY`, `FIRST_LEGAL`, `WAIT`); `MAP` decisions are never sent to LLM |
 | **Combat** (card plays, targeting, potions, end-turn, in-combat selections) | **BattleAiMod best-first tree search** on the real (fast-forwarded) engine; turn nodes prioritized by a hand-tuned tactical evaluator (threat, survival bands, lethal breakpoints); budgets 5k–50k expansions; result replayed command-by-command with per-step state-diff verification |
 | Novel / unstructured screens | LLM with JSON-output contract + safe-action fallback chain |
 
@@ -95,7 +96,7 @@ The design rule of thumb: **if a decision can be enumerated and needs long-horiz
 
 | Directory | Role |
 |---|---|
-| `sts_ai_framework/` | Python agent: state polling, decision dispatch, LLM client, run logging ([README](sts_ai_framework/README.md)) |
+| `sts_ai_framework/` | Python agent: state polling, decision dispatch, deterministic map planning, non-map LLM fallback, run logging ([README](sts_ai_framework/README.md)) |
 | `selectcard/` | PyTorch project for the Set Transformer value network: replay-based data pipeline, training, inference engine ([README](selectcard/README.md)) |
 | `StSCommunicationMod/` | Java mod: in-game HTTP bridge exposing state JSON and executing actions |
 | `STSStateSaver/` | Java mod: full combat-state serialization/restore (incl. RNG) — the search rewind primitive |
@@ -143,7 +144,9 @@ pip install -r sts_ai_framework/requirements.txt   # + PyTorch/pandas/fastapi fo
 python -m sts_ai_framework --interval 2.0
 ```
 
-Runs restart automatically: when a run ends (death/victory), the agent returns to the main menu, re-picks the configured character (`CHARACTER`, default IRONCLAD) and ascension level (`ASCENSION`, default 15), and starts the next run — see the option list in [sts_ai_framework/README.md](sts_ai_framework/README.md) (needs CommunicationMod 1.4.0+).
+The single configuration entry for the automatic run character is `sts_ai_framework/.env`'s `CHARACTER` value; `--character` is a temporary override for one process.
+
+Runs restart automatically: when a run ends (death/victory), the agent returns to the main menu, re-picks the configured character (`CHARACTER`, default DEFECT / robot) and ascension level (`ASCENSION`, default 15), and starts the next run — see the option list in [sts_ai_framework/README.md](sts_ai_framework/README.md) (needs CommunicationMod 1.4.0+).
 
 For the combat pipeline (headless search instance, save-state dirs, BattleAiMod activation in fights) follow [AUTOFIGHT.md](AUTOFIGHT.md).
 

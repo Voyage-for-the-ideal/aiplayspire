@@ -262,7 +262,12 @@ public class ChoiceScreenUtils {
                 ArrayList<String> cChoices = getCurrentChoiceList();
                 if (cChoices.get(choice_index).equals("bowl")) {
                     SingingBowlButton bowlButton = (SingingBowlButton) ReflectionHacks.getPrivate(AbstractDungeon.cardRewardScreen, com.megacrit.cardcrawl.screens.CardRewardScreen.class, "bowlButton");
-                    bowlButton.onClick();
+                    // Queue the real button click instead of calling onClick()
+                    // directly. SingingBowlButton.update() performs the
+                    // reward effect and then closes CARD_REWARD; calling
+                    // onClick() alone only grants the +2 max HP and leaves
+                    // the screen open, so the next poll repeats the reward.
+                    bowlButton.hb.clicked = true;
                 } else {
                     AbstractCard selectedCard = AbstractDungeon.cardRewardScreen.rewardGroup.get(choice_index);
                     CardRewardScreenPatch.doHover = true;

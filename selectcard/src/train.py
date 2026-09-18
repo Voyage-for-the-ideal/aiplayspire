@@ -288,23 +288,56 @@ def model_config(vocab_size):
         "dropout": Config.DROPOUT,
         "global_conditioning": Config.GLOBAL_CONDITIONING,
         "norm_position": Config.NORM_POSITION,
+        "use_map_context": Config.USE_MAP_CONTEXT,
     }
 
 
 def make_dataset(split, vocabulary, feature_encoder, progress=None):
+    is_train = split == "train"
     return STSDataset(
         Config.DATA_DIR,
         vocabulary,
         feature_encoder,
         split=split,
-        max_seq_len=Config.MAX_SEQ_LEN,
+        max_seq_len=Config.MAX_ITEM_TOKENS if Config.USE_MAP_CONTEXT else Config.MAX_SEQ_LEN,
         max_upgrade=Config.MAX_UPGRADE,
         max_count=Config.MAX_COUNT,
         progress=progress,
+        use_map_context=Config.USE_MAP_CONTEXT,
+        # Hindsight-plan dropout is train-only noise; val/test always see it.
+        plan_dropout=Config.PLAN_TOKEN_DROPOUT if is_train else 0.0,
     )
 
 
-def evaluate(model, loader, device, progress=None, name="Evaluation", baseline_rates=None):
+def _split_batch(batch, use_map):
+    """Unpack a (v2 or v3) dataset batch into common and context parts."""
+    if use_map:
+        if len(batch) != 17:
+            raise ValueError("v3 dataset batches must carry 17 tensors")
+        (seq, upgrades, counts, globals_, boss_ids, floors, targets, masks,
+         keys_features, map_rooms, map_flags, plan_rooms, plan_dist,
+         history_rooms, history_dist, key_labels, key_masks) = batch
+        context = (
+            keys_features, map_rooms, map_flags, plan_rooms, plan_dist,
+            history_rooms, history_dist,
+        )
+        return (seq, upgrades, counts, globals_, boss_ids, floors, targets, masks), context, (key_labels, key_masks)
+    if len(batch) != 8:
+        raise ValueError("v2 dataset batches must carry 8 tensors")
+    return tuple(batch), None, None
+
+
+def _key_head_loss(key_logits, key_labels, key_masks):
+    """Masked BCE for the auxiliary key-progress head (0 where unsupervised)."""
+    losses = nn.functional.binary_cross_entropy_with_logits(
+        key_logits, key_labels, reduction="none"
+    )
+    weighted = losses * key_masks
+    return weighted.sum() / key_masks.sum().clamp_min(1.0)
+
+
+def evaluate(model, loader, device, progress=None, name="Evaluation", baseline_rates=None,
+             use_map=False):
     model.eval()
     total_loss = 0.0
     targets = []
@@ -318,12 +351,9 @@ def evaluate(model, loader, device, progress=None, name="Evaluation", baseline_r
     started = time.monotonic()
     last_progress = started
     with torch.no_grad():
-        for batch_index, (
-            seq, upgrades, counts, globals_, boss_ids, floors,
-            batch_targets, batch_masks,
-        ) in enumerate(
-            loader, start=1
-        ):
+        for batch_index, batch in enumerate(loader, start=1):
+            (seq, upgrades, counts, globals_, boss_ids, floors,
+             batch_targets, batch_masks), context, key_batch = _split_batch(batch, use_map)
             seq, upgrades, counts, globals_, boss_ids, floors, batch_targets, batch_masks = (
                 value.to(device, non_blocking=device.type == "cuda")
                 for value in (
@@ -331,7 +361,25 @@ def evaluate(model, loader, device, progress=None, name="Evaluation", baseline_r
                     batch_targets, batch_masks,
                 )
             )
-            logits = model(seq, upgrades, counts, globals_, boss_ids)
+            if use_map:
+                (keys_features, map_rooms, map_flags, plan_rooms, plan_dist,
+                 history_rooms, history_dist) = (
+                    value.to(device, non_blocking=device.type == "cuda")
+                    for value in context
+                )
+                key_labels, key_masks = (
+                    value.to(device, non_blocking=device.type == "cuda")
+                    for value in key_batch
+                )
+                logits, key_logits = model(
+                    seq, upgrades, counts, globals_, boss_ids,
+                    keys_features=keys_features, map_rooms=map_rooms,
+                    map_flags=map_flags, plan_rooms=plan_rooms,
+                    plan_dist=plan_dist, history_rooms=history_rooms,
+                    history_dist=history_dist, return_keys=True,
+                )
+            else:
+                logits = model(seq, upgrades, counts, globals_, boss_ids)
             raw_loss = weighted_hazard_loss(
                 logits,
                 batch_targets,
@@ -340,6 +388,10 @@ def evaluate(model, loader, device, progress=None, name="Evaluation", baseline_r
                 globals_,
                 torch.ones(6, dtype=torch.float32, device=device),
             )
+            if use_map:
+                raw_loss = raw_loss + Config.KEY_HEAD_LOSS_WEIGHT * _key_head_loss(
+                    key_logits, key_labels, key_masks
+                )
             total_loss += raw_loss.item()
             hazards, survival, heart_probability = hazard_predictions(logits, floors)
             future = torch.as_tensor(
@@ -503,6 +555,7 @@ def finish_training(
         progress=log,
         name="Test",
         baseline_rates=baseline_rates,
+        use_map=Config.USE_MAP_CONTEXT,
     )
     save_checkpoint(
         final_path,
@@ -663,14 +716,21 @@ def train_model(test_only=False):
         last_progress = epoch_started
         if device.type == "cuda":
             torch.cuda.reset_peak_memory_stats()
+        if Config.USE_MAP_CONTEXT:
+            # Curriculum: mask [MAP]/[PLAN] for the warm-up epochs (5.).
+            warmup = epoch < Config.CONTEXT_CURRICULUM_EPOCHS
+            datasets["train"].context_enabled = not warmup
+            log(
+                f"Epoch {epoch + 1}/{Config.EPOCHS}: map/plan context "
+                f"{'masked (curriculum)' if warmup else 'enabled'}"
+            )
         log(f"Epoch {epoch + 1}/{Config.EPOCHS}: training started")
         model.train()
         running_loss = 0.0
-        for batch_index, (
-            seq, upgrades, counts, globals_, boss_ids, floors, targets, masks,
-        ) in enumerate(
-            loaders["train"], start=1
-        ):
+        for batch_index, batch in enumerate(loaders["train"], start=1):
+            (seq, upgrades, counts, globals_, boss_ids, floors, targets, masks), context, key_batch = (
+                _split_batch(batch, Config.USE_MAP_CONTEXT)
+            )
             seq, upgrades, counts, globals_, boss_ids, floors, targets, masks = (
                 value.to(device, non_blocking=device.type == "cuda")
                 for value in (
@@ -678,14 +738,37 @@ def train_model(test_only=False):
                 )
             )
             optimizer.zero_grad()
-            loss = weighted_hazard_loss(
-                model(seq, upgrades, counts, globals_, boss_ids),
-                targets,
-                masks,
-                floors,
-                globals_,
-                band_weights,
-            )
+            if Config.USE_MAP_CONTEXT:
+                (keys_features, map_rooms, map_flags, plan_rooms, plan_dist,
+                 history_rooms, history_dist) = (
+                    value.to(device, non_blocking=device.type == "cuda")
+                    for value in context
+                )
+                key_labels, key_masks = (
+                    value.to(device, non_blocking=device.type == "cuda")
+                    for value in key_batch
+                )
+                logits, key_logits = model(
+                    seq, upgrades, counts, globals_, boss_ids,
+                    keys_features=keys_features, map_rooms=map_rooms,
+                    map_flags=map_flags, plan_rooms=plan_rooms,
+                    plan_dist=plan_dist, history_rooms=history_rooms,
+                    history_dist=history_dist, return_keys=True,
+                )
+                loss = weighted_hazard_loss(
+                    logits, targets, masks, floors, globals_, band_weights
+                ) + Config.KEY_HEAD_LOSS_WEIGHT * _key_head_loss(
+                    key_logits, key_labels, key_masks
+                )
+            else:
+                loss = weighted_hazard_loss(
+                    model(seq, upgrades, counts, globals_, boss_ids),
+                    targets,
+                    masks,
+                    floors,
+                    globals_,
+                    band_weights,
+                )
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
@@ -720,6 +803,7 @@ def train_model(test_only=False):
             progress=log,
             name=f"Epoch {epoch + 1}/{Config.EPOCHS} validation",
             baseline_rates=baseline_rates,
+            use_map=Config.USE_MAP_CONTEXT,
         )
         train_loss = running_loss / len(loaders["train"])
         log(

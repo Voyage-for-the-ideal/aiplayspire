@@ -19,6 +19,7 @@ from data_contract import (
     VALUE_TARGET_SCHEMA,
     ascension_band,
 )
+from map_context import MAP_CONTEXT_VERSION
 from data_pipeline import (
     RunRejected,
     assign_split,
@@ -198,7 +199,7 @@ class DatasetBuildTests(unittest.TestCase):
             output_dir = os.path.join(directory, "output")
             os.makedirs(input_dir)
             path = os.path.join(input_dir, "runs.json.gz")
-            run = standard_run()
+            run = standard_run(seed_played="-3775500262246337531")
             suffix = 0
             while assign_split(stable_run_id(run)) != "train":
                 suffix += 1
@@ -231,6 +232,18 @@ class DatasetBuildTests(unittest.TestCase):
         self.assertEqual(set(frame["preprocessing_version"]), {PREPROCESSING_VERSION})
         self.assertEqual(set(frame["filter_version"]), {FILTER_VERSION})
         self.assertEqual(set(frame["ascension_band"]), {0})
+        # v3 map context columns ride along with every accepted sample.
+        self.assertEqual(set(frame["map_context_version"]), {MAP_CONTEXT_VERSION})
+        self.assertEqual(len(frame["map_rooms"].iloc[0]), 105)
+        self.assertEqual(len(frame["map_flags"].iloc[0]), 105)
+        self.assertEqual(len(frame["plan_rooms"].iloc[0]), 1)
+        self.assertEqual(len(frame["history_rooms"].iloc[0]), 8)
+        self.assertEqual(list(frame["key_states"].iloc[0]), [0, 0, 0])
+        self.assertTrue(any(room for room in frame["map_rooms"].iloc[0]))
+        self.assertEqual(stored_manifest["map_context_version"], MAP_CONTEXT_VERSION)
+        self.assertEqual(
+            stored_manifest["distributions"]["runs_with_map_context"], {"true": 1}
+        )
         self.assertEqual(len(dataset), 1)
         self.assertEqual(shuffled_indices, [0])
 

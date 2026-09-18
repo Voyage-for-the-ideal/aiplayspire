@@ -8,11 +8,12 @@
 
 AIPlaySpire 是一个混合架构 agent，可以独立完成整局游戏：规划地图路线、选择卡牌与遗物、商店购物、处理事件、在营火休息、收集解锁 Act 4 的三把钥匙，并打完每一场战斗 —— 开局后无需人工干预。
 
-纯 LLM 提示难以适配《杀戮尖塔》的决策结构，因此 agent 将决策划分为三类机制：
+纯 LLM 提示难以适配《杀戮尖塔》的决策结构，因此 agent 将决策划分为四类机制：
 
 1. **长时程、可枚举的决策** —— 选卡、购买、删牌、升级、Boss 遗物、事件分支。每个候选动作都可以作用在当前状态上打分，但其真正价值要数幕之后才显现。**学得的价值函数** V(S) —— 由 1340 万局通过校验的存档对局重放出的约 1.57 亿个决策状态训练而成 —— 提供长时程比较；候选通过"枚举 → 模拟 → argmax V" 的假设下一状态进行评估。
-2. **战斗** —— 状态一旦序列化，转移是精确、确定且廉价的。**最佳优先树搜索**在加速后的真实游戏引擎上探索出牌/目标/药水的动作序列，每回合扩展预算最高 5 万分支。
-3. **其余非结构化情况** —— 罕见界面、旧版 payload、新场景。**LLM** 以结构化输出契约为通用推理兜底；少数有确定最优解的决策（开宝箱、拿钥匙遗物）由硬编码规则处理。
+2. **地图选路** —— **确定性 6 层有限视野规划器**枚举可见 DAG 路径，评估成长收益、强制风险、恢复能力、选择弹性与钥匙可达性；每次只执行一步并重新规划，MAP 状态绝不进入 LLM 链路。
+3. **战斗** —— 状态一旦序列化，转移是精确、确定且廉价的。**最佳优先树搜索**在加速后的真实游戏引擎上探索出牌/目标/药水的动作序列，每回合扩展预算最高 5 万分支。
+4. **其余非结构化情况** —— 罕见的非地图界面、旧版非地图 payload、新场景。**LLM** 以结构化输出契约为通用推理兜底；少数有确定最优解的决策（开宝箱、拿钥匙遗物）由硬编码规则处理。
 
 ## 系统架构
 
@@ -26,8 +27,8 @@ flowchart TB
     Agent -->|actions| Game
     subgraph Agent["Python agent (sts_ai_framework)"]
         V["Learned value network V(S)"] --> D{"Decision"}
-        LLM["LLM"] --> D
-        R["Map router + hard rules"] --> D
+        LLM["LLM（仅非地图兜底）"] --> D
+        R["确定性 6 层地图规划器"] --> D
     end
     D -->|non-combat choices| Game
     D -->|combat detected| Combat["BattleAiMod tree search<br/>(headless 2nd game instance, :5125)"]
@@ -85,7 +86,7 @@ hazard 组合 → 存活曲线 S(F) → E[终止楼层] + β·P(Heart)   （β =
 | Boss 遗物 | 价值网络 |
 | 战斗奖励 | 固定优先级（遗物 > 金币 > 药水 > 卡牌）+ 结构化翡翠/蓝宝石钥匙认领，钥匙与遗物的取舍由价值模型决策 |
 | 宝箱 | 自动开启 |
-| **地图路由** | **确定性 HP 感知路由器** —— 房间价值打分、结合当前 HP 权衡休息 vs 精英、1 步前瞻、Act 2 精英 HP 缓冲；仅对不完整 payload 回退 LLM |
+| **地图路由** | **确定性 6 层有限视野规划器**：在地图 DAG 上枚举路径，按 `RouteContext` 的 HP/金币/钥匙/`?` 状态评分，施加硬约束（Act 3 钥匙可达性、连续战斗生存安全）并按 `FULL_GRAPH` / `IMMEDIATE_ONLY` / `FIRST_LEGAL` / `WAIT` 四档 fallback 执行；`MAP` 决策不经过 LLM |
 | **战斗**（出牌、目标选择、药水、结束回合、战斗内选择） | **BattleAiMod 最佳优先树搜索**，跑在真实（快进）引擎上；回合节点由人工调校的战术评估器（威胁、生存区间、致死断点）排序；预算 5k–50k 次扩展；结果以命令序列逐条回放，并带逐步状态 diff 校验 |
 | 陌生 / 非结构化界面 | LLM + JSON 输出契约 + 安全动作回退链 |
 
@@ -95,7 +96,7 @@ hazard 组合 → 存活曲线 S(F) → E[终止楼层] + β·P(Heart)   （β =
 
 | 目录 | 职责 |
 |---|---|
-| `sts_ai_framework/` | Python agent：状态轮询、决策分发、LLM 客户端、运行日志（[README](sts_ai_framework/README.md)） |
+| `sts_ai_framework/` | Python agent：状态轮询、决策分发、确定性地图规划、非地图 LLM 兜底、运行日志（[README](sts_ai_framework/README.md)） |
 | `selectcard/` | Set Transformer 价值网络的 PyTorch 工程：基于重放的数据流水线、训练、推理引擎（[README](selectcard/README.md)） |
 | `StSCommunicationMod/` | Java mod：游戏内 HTTP 桥，暴露状态 JSON 并执行动作 |
 | `STSStateSaver/` | Java mod：完整战斗状态序列化/恢复（含 RNG）—— 搜索回滚的原语 |
@@ -143,7 +144,9 @@ pip install -r sts_ai_framework/requirements.txt   # selectcard 另需 PyTorch/p
 python -m sts_ai_framework --interval 2.0
 ```
 
-对局自动连续：一局结束（死亡/胜利）后，agent 会自动返回主菜单，按配置重选角色（`CHARACTER`，默认 IRONCLAD）与进阶等级（`ASCENSION`，默认 15）并开始下一局 —— 完整选项见 [sts_ai_framework/README.md](sts_ai_framework/README.md)（需 CommunicationMod 1.4.0+）。
+自动开局角色的统一配置入口是 `sts_ai_framework/.env` 中的 `CHARACTER`；`--character` 仅临时覆盖本次运行。
+
+对局自动连续：一局结束（死亡/胜利）后，agent 会自动返回主菜单，按配置重选角色（`CHARACTER`，默认 DEFECT/机器人）与进阶等级（`ASCENSION`，默认 15）并开始下一局 —— 完整选项见 [sts_ai_framework/README.md](sts_ai_framework/README.md)（需 CommunicationMod 1.4.0+）。
 
 战斗流水线（无头搜索实例、存档目录、战斗内激活 BattleAiMod）请按 [AUTOFIGHT.md](AUTOFIGHT.md) 操作。
 

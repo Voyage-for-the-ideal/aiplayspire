@@ -63,6 +63,24 @@ class KeyState(BaseModel):
     sapphire: bool = False
 
 
+class EventRoomChances(BaseModel):
+    """Current effective outcome distribution for an event-map room."""
+
+    elite: float = 0.0
+    monster: float = 0.10
+    shop: float = 0.03
+    treasure: float = 0.02
+    event: float = 0.85
+
+
+class PathHistoryEntry(BaseModel):
+    """One already-resolved map step; never contains future encounter data."""
+
+    floor: Optional[int] = None
+    selected_symbol: str = "?"
+    resolved_symbol: str = "?"
+
+
 class RewardChoice(BaseModel):
     """Structured combat/chest reward aligned with ``choice_list`` by index."""
     choice_index: int
@@ -84,6 +102,7 @@ class MapNodeState(BaseModel):
     lane_index_from_left: int = -1
     human_label: str = ""
     is_current: bool = False
+    burning: bool = False
     children: List[MapEdgeState] = []
 
 
@@ -95,6 +114,7 @@ class MapChoiceState(BaseModel):
     lane_index_from_left: int = -1
     human_label: str = ""
     winged: bool = False
+    burning: bool = False
 
 
 class CurrentMapNodeState(BaseModel):
@@ -198,6 +218,8 @@ class GameState(BaseModel):
     reward_choices: List[RewardChoice] = Field(default_factory=list)
     grid_cards: List[Card] = Field(default_factory=list)
     keys: KeyState = Field(default_factory=KeyState)
+    event_chances: EventRoomChances = Field(default_factory=EventRoomChances)
+    path_history: List[PathHistoryEntry] = Field(default_factory=list)
     can_proceed: bool = False
     can_cancel: bool = False
     grid_selected_count: int = 0
@@ -207,6 +229,12 @@ class GameState(BaseModel):
     next_boss: str = "UNKNOWN"
     is_end_turn_button_enabled: bool = False
     event: Optional[EventState] = None
+    # Chest fields (CHEST screens only; absent on older servers). Contents are
+    # pre-rolled at room entry, before a Cursed Key curse would resolve on open.
+    chest_boss: Optional[bool] = None
+    chest_gold_reward: Optional[bool] = None
+    chest_gold_amount: Optional[int] = None
+    chest_relic_tier: Optional[str] = None
     # Run identity (in-run states)
     character: Optional[str] = None
     # Run-lifecycle fields: game_over_reason on GAME_OVER (defeat/victory/unlock),

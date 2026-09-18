@@ -4,7 +4,12 @@ from typing import Optional
 
 from colorama import Fore, Style
 
+from ..config import EVENT_DECISION_POLICY
+from ..event_pools import CHEST_CURSE_POOL, chest_relic_pool
 from ..models import ActionType, GameAction, GameState, visible_boss_of
+from ..run_log import log_event
+from .event_expectimax import decide_event, event_state_payload, relic_state_payload
+from .map_payload import map_context_fields
 
 
 class DecisionMixin:
@@ -62,20 +67,20 @@ class DecisionMixin:
                 return k.title()
         return None
 
+    def _log_event_fallback(self, state: GameState, reason: str) -> None:
+        """记录事件未能本地决策的原因（改造前的 LLM fall-through 基线 / 改造后应归零）。"""
+        event = getattr(state, "event", None)
+        log_event(
+            event="event_fallback",
+            event_id=getattr(event, "id", None),
+            phase=getattr(event, "phase", None),
+            decision_kind=getattr(event, "decision_kind", None),
+            floor=getattr(state, "floor", None),
+            reason=reason,
+        )
+
     def _build_relic_state_payload(self, state: GameState):
-        relic_payload = []
-        for relic in getattr(state, "relics", []) or []:
-            relic_id = getattr(relic, "id", "")
-            relic_name = getattr(relic, "name", relic_id)
-            counter = getattr(relic, "counter", -1)
-            if (relic_id == "Omamori" or relic_name == "Omamori") and (counter is None or counter < 0):
-                counter = 2
-            relic_payload.append({
-                "id": relic_id,
-                "name": relic_name,
-                "counter": counter,
-            })
-        return relic_payload
+        return relic_state_payload(state)
 
     def _has_omamori_charge(self, state: GameState) -> bool:
         for relic in getattr(state, "relics", []) or []:
@@ -227,6 +232,7 @@ class DecisionMixin:
             "floor": state.floor,
             "ascension": 20,
             "visible_boss": visible_boss_of(state),
+            **map_context_fields(state, getattr(self, "_last_plan_symbols", None)),
             "deck": [card.id for card in state.deck] if hasattr(state, "deck") else [],
             "relics": [relic.id for relic in state.relics] if hasattr(state, "relics") else [],
         }
@@ -289,6 +295,7 @@ class DecisionMixin:
             "floor": state.floor,
             "ascension": 20,
             "visible_boss": visible_boss_of(state),
+            **map_context_fields(state, getattr(self, "_last_plan_symbols", None)),
             "deck": [card.id for card in state.deck] if hasattr(state, "deck") else [],
             "relics": [relic.id for relic in state.relics] if hasattr(state, "relics") else [],
             "relic_states": self._build_relic_state_payload(state),
@@ -337,17 +344,7 @@ class DecisionMixin:
         return None
 
     def _event_current_state(self, state: GameState) -> dict:
-        return {
-            "hp": state.player.current_hp,
-            "max_hp": state.player.max_hp,
-            "gold": state.player.gold,
-            "floor": state.floor,
-            "ascension": 20,
-            "visible_boss": visible_boss_of(state),
-            "deck": [card.id for card in state.deck],
-            "relics": [relic.id for relic in state.relics],
-            "relic_states": self._build_relic_state_payload(state),
-        }
+        return event_state_payload(state)
 
     def _event_choice_effects(self, choice) -> list:
         """Flatten a deterministic event outcome into inference effects."""
@@ -496,6 +493,121 @@ class DecisionMixin:
                 best_card = card.id
         return [best_card] if best_card else []
 
+    # 遗物候选 × 10 诅咒的枚举预算上限；超出时按单独价值预筛遗物（见
+    # _handle_chest 内注释：预筛会把 open 期望向上偏，方向已知且幅度有限）。
+    CHEST_MAX_BRANCHES = 400
+    CHEST_PREFILTER_KEEP = 24
+
+    def _chest_auto_open(self, state: GameState) -> GameAction:
+        unified_choices = self._build_unified_choices(state)
+        if unified_choices:
+            return unified_choices[0][1]
+        if state.can_proceed:
+            return GameAction(type=ActionType.PROCEED)
+        return GameAction(type=ActionType.WAIT)
+
+    def _handle_chest(self, state: GameState) -> GameAction:
+        """CHEST 屏决策：默认开箱；持 Cursed Key 时权衡 开箱(结果期望) vs 离开。
+
+        - Boss 箱直接开：必须打开才能看到 Boss 遗物，且 BossChest.open 对全部
+          遗物硬编码 onChestOpen(true)，Cursed Key 不触发。
+        - 无 Cursed Key 时开箱严格占优（免费遗物 + 事后把遗物换成蓝钥匙链接
+          选项），无需打分。
+        - 离开 = PROCEED（pressConfirmButton 的 TreasureRoom 分支点 ProceedButton
+          开地图离房，不执行 AbstractChest.open，诅咒不结算）。
+        """
+        has_cursed_key = any(relic.id == "Cursed Key" for relic in state.relics or [])
+        chest_known = state.chest_gold_reward is not None or state.chest_relic_tier is not None
+        if state.chest_boss or not has_cursed_key or not chest_known or self.value_engine is None:
+            return self._chest_auto_open(state)
+
+        engine = self.value_engine
+        current = event_state_payload(state)
+        skip_score = engine.evaluate_state(current)
+
+        base_effects = []
+        if state.chest_gold_reward and (state.chest_gold_amount or 0) > 0:
+            base_effects.append({"type": "gain_gold", "amount": state.chest_gold_amount})
+
+        relic_candidates = [(None, 1.0)]
+        if state.chest_relic_tier:
+            pool = chest_relic_pool(
+                state.chest_relic_tier, state.character, [relic.id for relic in state.relics or []])
+            if pool:
+                relic_candidates = pool
+
+        prefiltered = len(relic_candidates) * len(CHEST_CURSE_POOL) > self.CHEST_MAX_BRANCHES
+        if prefiltered:
+            # 单独价值预筛：遗物按 V(S + 遗物) 取 top-K，被淘汰的是低价值遗物，
+            # 因此下方 open 期望相对真值系统性偏高（保守方向应为开箱存疑时不开）。
+            ranked = []
+            for relic_id, weight in relic_candidates:
+                if relic_id is None:
+                    continue
+                hypothetical = engine._apply_choice(current, {"action": "composite_event", "effects":
+                    base_effects + [{"type": "obtain_relic", "relic_id": relic_id}]})
+                ranked.append((engine.evaluate_state(hypothetical), relic_id, weight))
+            ranked.sort(reverse=True)
+            relic_candidates = [(relic_id, weight) for _, relic_id, weight in ranked[:self.CHEST_PREFILTER_KEEP]]
+
+        curse_weight = 1.0 / len(CHEST_CURSE_POOL)
+        branch_count = 0
+        open_score = 0.0
+        for relic_id, relic_weight in relic_candidates:
+            for curse_id in CHEST_CURSE_POOL:
+                effects = list(base_effects)
+                if relic_id:
+                    effects.append({"type": "obtain_relic", "relic_id": relic_id})
+                effects.append({"type": "add_card", "card_id": curse_id})
+                hypothetical = engine._apply_choice(
+                    current, {"action": "composite_event", "effects": effects})
+                open_score += relic_weight * curse_weight * engine.evaluate_state(hypothetical)
+                branch_count += 1
+
+        # 蓝钥匙链接选项：开箱后在奖励屏可弃遗物换 Sapphire Key，而 Cursed Key 的
+        # 诅咒在 open() 开头就已结算，事后换钥匙照样吃。open 取两者价值上限；
+        # 拾取时的最终取舍仍由 _should_take_sapphire_key 决定。
+        if not state.keys.sapphire:
+            sapphire_payload = dict(current)
+            key_states = dict(current.get("key_states") or {})
+            key_states["sapphire"] = True
+            sapphire_payload["key_states"] = key_states
+            sapphire_score = 0.0
+            for curse_id in CHEST_CURSE_POOL:
+                hypothetical = engine._apply_choice(sapphire_payload, {"action": "composite_event", "effects":
+                    base_effects + [{"type": "add_card", "card_id": curse_id}]})
+                sapphire_score += curse_weight * engine.evaluate_state(hypothetical)
+                branch_count += 1
+            open_score = max(open_score, sapphire_score)
+
+        if open_score > skip_score:
+            decision = "open"
+            action = self._chest_auto_open(state)
+        else:
+            decision = "skip"
+            if state.can_proceed:
+                action = GameAction(type=ActionType.PROCEED)
+            else:
+                action = GameAction(type=ActionType.WAIT)
+
+        print(Fore.MAGENTA +
+              "宝箱决策 (Cursed Key): {} | open={:.2f} skip={:.2f} branches={}".format(
+                  decision, open_score, skip_score, branch_count) +
+              Style.RESET_ALL)
+        log_event(
+            event="chest_decided",
+            floor=state.floor,
+            act=state.act,
+            relic_tier=state.chest_relic_tier,
+            gold_reward=state.chest_gold_reward,
+            choice=decision,
+            value=round(open_score, 2),
+            noop=round(skip_score, 2),
+            branches=branch_count,
+            prefiltered=prefiltered,
+        )
+        return action
+
     def _choice_guaranteed_hp_loss(self, choice) -> Optional[int]:
         if len(choice.outcomes) != 1 or choice.outcomes[0].probability not in (None, 1, 1.0):
             return None
@@ -562,6 +674,7 @@ class DecisionMixin:
     def _get_structured_event_decision(self, state: GameState) -> Optional[GameAction]:
         event = getattr(state, "event", None)
         if event is None or event.semantics_status != "KNOWN":
+            self._log_event_fallback(state, "unknown_semantics")
             return None
 
         if event.class_name == "GremlinMatchGame" and event.phase == "PLAY":
@@ -577,41 +690,67 @@ class DecisionMixin:
             self._remember_event_followup(state, choice.action_index)
             return GameAction(type=ActionType.CHOOSE, choice_index=choice.action_index)
 
-        if event.decision_kind == "DETERMINISTIC" and self.value_engine is not None:
-            candidates = []
-            for choice in enabled:
-                hp_loss = self._choice_guaranteed_hp_loss(choice)
-                if hp_loss is not None and hp_loss >= state.player.current_hp:
-                    continue
-                effects = self._event_choice_effects(choice)
-                if not self._effects_supported_by_value_model(effects):
-                    return None
-                candidate = {
-                    "action": "composite_event",
-                    "effects": effects,
-                    "index": choice.action_index,
-                    "raw_text": choice.label,
-                }
-                for effect in choice.outcomes[0].effects if choice.outcomes else []:
-                    if effect.type == "select_cards" and (effect.purpose or "").lower() == "transform":
-                        candidate["_is_transform"] = True
-                candidates.append(candidate)
-
-            if candidates:
-                curse_ids = {card.id for card in state.deck if card.type == "CURSE"}
-                best = self.value_engine.recommend_choice(
-                    self._event_current_state(state),
-                    candidates,
-                    exclude_purge_ids=curse_ids,
+        if self.value_engine is not None and EVENT_DECISION_POLICY == "expectimax":
+            result = decide_event(state, self.value_engine)
+            if result is not None:
+                action, best = result
+                self._store_grid_intent_from_choice(best, state)
+                self._remember_event_followup(state, action.choice_index, best)
+                log_event(
+                    event="event_decided",
+                    event_id=event.id,
+                    phase=event.phase,
+                    decision_kind=event.decision_kind,
+                    floor=state.floor,
+                    choice_index=action.choice_index,
+                    value=round(best.get("_score", 0.0), 2),
                 )
-                if best is not None:
-                    action_index = best["index"]
-                    self._store_grid_intent_from_choice(best, state)
-                    self._remember_event_followup(state, action_index, best)
-                    return GameAction(type=ActionType.CHOOSE, choice_index=action_index)
+                return action
+            self._log_event_fallback(state, "expectimax_no_candidate")
 
+        if EVENT_DECISION_POLICY == "legacy" and self.value_engine is not None:
+            # legacy 策略：v2 行为，仅作回滚 / A/B 对照
+            if event.decision_kind == "DETERMINISTIC":
+                candidates = []
+                for choice in enabled:
+                    hp_loss = self._choice_guaranteed_hp_loss(choice)
+                    if hp_loss is not None and hp_loss >= state.player.current_hp:
+                        continue
+                    effects = self._event_choice_effects(choice)
+                    if not self._effects_supported_by_value_model(effects):
+                        # 不支持的效果只踢出该选项，不放弃整个事件
+                        continue
+                    candidate = {
+                        "action": "composite_event",
+                        "effects": effects,
+                        "index": choice.action_index,
+                        "raw_text": choice.label,
+                    }
+                    for effect in choice.outcomes[0].effects if choice.outcomes else []:
+                        if effect.type == "select_cards" and (effect.purpose or "").lower() == "transform":
+                            candidate["_is_transform"] = True
+                    candidates.append(candidate)
+
+                if candidates:
+                    curse_ids = {card.id for card in state.deck if card.type == "CURSE"}
+                    best = self.value_engine.recommend_choice(
+                        self._event_current_state(state),
+                        candidates,
+                        exclude_purge_ids=curse_ids,
+                    )
+                    if best is not None:
+                        action_index = best["index"]
+                        self._store_grid_intent_from_choice(best, state)
+                        self._remember_event_followup(state, action_index, best)
+                        return GameAction(type=ActionType.CHOOSE, choice_index=action_index)
+
+        # COMPLEX 安全规则不依赖价值引擎：expectimax 无候选时也作为兜底
         if event.decision_kind == "COMPLEX":
-            return self._get_safe_complex_event_rule(state)
+            action = self._get_safe_complex_event_rule(state)
+            if action is not None:
+                return action
+
+        self._log_event_fallback(state, "no_local_decision")
         return None
 
     def _get_cursed_tome_decision(self, state: GameState) -> Optional[GameAction]:
@@ -813,6 +952,7 @@ class DecisionMixin:
             "floor": state.floor,
             "ascension": 20,
             "visible_boss": visible_boss_of(state),
+            **map_context_fields(state, getattr(self, "_last_plan_symbols", None)),
             "deck": [card.id for card in state.deck] if hasattr(state, "deck") else [],
             "relics": [relic.id for relic in state.relics] if hasattr(state, "relics") else [],
         }
@@ -917,6 +1057,7 @@ class DecisionMixin:
             "floor": state.floor,
             "ascension": 20,
             "visible_boss": visible_boss_of(state),
+            **map_context_fields(state, getattr(self, "_last_plan_symbols", None)),
             "deck": [card.id for card in state.deck] if hasattr(state, "deck") else [],
             "relics": [relic.id for relic in state.relics] if hasattr(state, "relics") else [],
         }

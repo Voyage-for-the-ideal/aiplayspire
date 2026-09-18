@@ -8,6 +8,7 @@ try:
     from .config import Config
     from .data_contract import HAZARD_ENDPOINTS, HAZARD_OUTPUT_DIM
     from .boss_context import NUM_BOSS_IDS, boss_id, get_visible_boss
+    from . import map_context
 except ImportError:
     from model import STSValueNetwork
     from checkpointing import load_checkpoint
@@ -16,7 +17,11 @@ except ImportError:
     from config import Config
     from data_contract import HAZARD_ENDPOINTS, HAZARD_OUTPUT_DIM
     from boss_context import NUM_BOSS_IDS, boss_id, get_visible_boss
+    import map_context
 import re
+
+
+V2_ITEM_TOKEN_BUDGET = 64  # v2 checkpoints were trained with this item budget
 
 
 def compose_hazard_value(hazards, heart_conditional, floor, heart_bonus_floors=None):
@@ -103,11 +108,16 @@ class STSInferenceEngine:
                 "dropout": Config.DROPOUT,
                 "global_conditioning": Config.GLOBAL_CONDITIONING,
                 "norm_position": Config.NORM_POSITION,
+                "use_map_context": Config.USE_MAP_CONTEXT,
             }
             self.model = STSValueNetwork(**architecture)
+        self.uses_map_context = bool(getattr(self.model, "use_map_context", False))
+        item_budget = (
+            Config.MAX_ITEM_TOKENS if self.uses_map_context else V2_ITEM_TOKEN_BUDGET
+        )
         self.tokenizer = InferenceTokenizer(
             vocabulary,
-            max_seq_len=Config.MAX_SEQ_LEN,
+            max_seq_len=item_budget,
             max_upgrade=architecture["max_upgrade"],
             max_count=architecture["max_count"],
         )
@@ -119,14 +129,58 @@ class STSInferenceEngine:
 
     def _boss_id(self, state):
         return torch.tensor([boss_id(get_visible_boss(state))], dtype=torch.long)
-        
-    def _evaluate_state_distribution(self, state, heart_bonus_floors=None):
+
+    def _context_tensors(self, state):
+        """Pack optional map/plan/key fields of ``state`` into model tensors.
+
+        ``_apply_choice`` deep-copies the state dict, so hypothetical next
+        states inherit the same act map; only keys/plan that the choice
+        itself changes need updating by the caller.
+        """
+        context = map_context.inference_context(state if isinstance(state, dict) else {})
+        keys_features = map_context.keys_token_features(
+            context["key_states"], context["map_flags"], context["act"]
+        )
+        plan_ids = context["plan_rooms"]
+        plan_dist = [
+            index if room else map_context.PLAN_HORIZON
+            for index, room in enumerate(plan_ids)
+        ]
+        history_ids = context["history_rooms"]
+        history_dist = [
+            index if room else map_context.HISTORY_HORIZON
+            for index, room in enumerate(history_ids)
+        ]
+        return (
+            torch.tensor([keys_features], dtype=torch.float32),
+            torch.tensor([context["map_rooms"]], dtype=torch.long),
+            torch.tensor([context["map_flags"]], dtype=torch.long),
+            torch.tensor([plan_ids], dtype=torch.long),
+            torch.tensor([plan_dist], dtype=torch.long),
+            torch.tensor([history_ids], dtype=torch.long),
+            torch.tensor([history_dist], dtype=torch.long),
+        )
+
+    def _model_logits(self, state):
         seq_tokens, upgrades, counts = self.tokenizer.encode(state['deck'], state['relics'])
         global_feats = self._global_features(state)
         boss_ids = self._boss_id(state)
+        if not self.uses_map_context:
+            return self.model(seq_tokens, upgrades, counts, global_feats, boss_ids)
+        context = self._context_tensors(state)
+        logits, key_logits = self.model(
+            seq_tokens, upgrades, counts, global_feats, boss_ids,
+            keys_features=context[0], map_rooms=context[1],
+            map_flags=context[2], plan_rooms=context[3],
+            plan_dist=context[4], history_rooms=context[5],
+            history_dist=context[6], return_keys=True,
+        )
+        self._last_key_logits = key_logits
+        return logits
 
+    def _evaluate_state_distribution(self, state, heart_bonus_floors=None):
         with torch.no_grad():
-            logits = self.model(seq_tokens, upgrades, counts, global_feats, boss_ids)
+            logits = self._model_logits(state)
             probabilities = torch.sigmoid(logits).squeeze(0).tolist()
         hazards = dict(zip(HAZARD_ENDPOINTS, probabilities[:HAZARD_OUTPUT_DIM]))
         heart_conditional = probabilities[HAZARD_OUTPUT_DIM]
@@ -161,17 +215,21 @@ class STSInferenceEngine:
 
     def evaluate_state_logits(self, state):
         """Evaluate a single state dictionary and return raw logits."""
-        seq_tokens, upgrades, counts = self.tokenizer.encode(state['deck'], state['relics'])
-        global_feats = self._global_features(state)
-        boss_ids = self._boss_id(state)
-        
         with torch.no_grad():
-            logits = self.model(seq_tokens, upgrades, counts, global_feats, boss_ids)
+            logits = self._model_logits(state)
         values = logits.squeeze(0).tolist()
         return {
             "hazards": dict(zip(HAZARD_ENDPOINTS, values[:HAZARD_OUTPUT_DIM])),
             "heart_conditional": values[HAZARD_OUTPUT_DIM],
         }
+
+    def evaluate_state_keys(self, state):
+        """Return P(ruby/emerald/sapphire collected | S) from the key head."""
+        if not self.uses_map_context:
+            raise ValueError("key head requires a map-context checkpoint")
+        with torch.no_grad():
+            self._model_logits(state)
+            return torch.sigmoid(self._last_key_logits).squeeze(0).tolist()
 
     def _print_choice_score(self, label, score):
         print(f"{label} -> V(S') = {score:.4f}")
@@ -234,7 +292,9 @@ class STSInferenceEngine:
             if not card_id:
                 return False
             normalized = str(card_id).strip().lower()
-            if "curse" not in normalized and normalized not in {"regret", "pain", "normality", "doubt", "shame", "clumsy", "injury", "writhe", "curse of the bell"}:
+            # Omamori blocks any curse; the explicit list covers curses whose
+            # id doesn't contain "curse" (Decay/Parasite included).
+            if "curse" not in normalized and normalized not in {"regret", "pain", "normality", "doubt", "shame", "clumsy", "injury", "writhe", "decay", "parasite", "curse of the bell"}:
                 return False
             return _consume_omamori_charge_if_possible()
 

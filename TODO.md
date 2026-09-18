@@ -1,7 +1,13 @@
 # TODO: Event Regex + GRID Testing
 
-> 创建日期: 2026-05-07 | 更新日期: 2026-05-14
+> 创建日期: 2026-05-07 | 更新日期: 2026-09-12
 > **每个任务均独立可验证**,建议按顺序完成。
+
+> **2026-09-12 状态更新**：任务 1（Java 侧事件选项文字替换）已被结构化事件语义方案取代
+> （`EventStateExtractor` 输出 locale-independent 的选项效果/概率/池），且 EVENT 决策已全面
+> 本地化：`llm_agent_parts/event_expectimax.py` 对每个选项做 expectimax 期望值打分，
+> 随机效果（random_relic 等）枚举 realization 取期望，事件不再调用 LLM
+> （`EVENT_DECISION_POLICY=legacy` 可回滚旧行为）。下文任务 1 仅作历史记录保留。
 
 ---
 
@@ -9,7 +15,7 @@
 
 AI bot 的 `choose_action` 决策链路对全部 14 个 `ChoiceType` screen_type 的拦截现状:
 
-**已拦截 (9 个)**:
+**已拦截 (10 个)**:
 - `NONE` (战斗) → WAIT,等待外部 BattleAiMod
 - `REST` → `_handle_rest_room` (价值网络)
 - `EVENT` → `_get_model_event_decision` (价值网络,需先正则解析选项效果)
@@ -19,9 +25,9 @@ AI bot 的 `choose_action` 决策链路对全部 14 个 `ChoiceType` screen_type
 - `CARD_REWARD` → `_get_model_card_decision` (价值网络)
 - `BOSS_REWARD` → `_get_model_boss_reward_decision` (价值网络) ✅
 - `GRID` → 通用拦截,支持 purge/upgrade/transform/duplicate ✅
+- `MAP` → 确定性 MAP 规划器（FULL_GRAPH / IMMEDIATE_ONLY / FIRST_LEGAL / WAIT），`MAP` 相关不走 LLM
 
-**未拦截/部分拦截 (5 个)**:
-- `MAP` → 掉到 LLM (prompt 中含 BFS 距离,LLM 可接受)
+**未拦截/部分拦截 (4 个)**:
 - `HAND_SELECT` → 掉到 LLM
 - `SHOP_ROOM` → 仅拦截从 `SHOP_SCREEN` 返回后自动 proceed;初次进入商店房间掉到 LLM
 - `GAME_OVER` → 掉到 LLM/fallback

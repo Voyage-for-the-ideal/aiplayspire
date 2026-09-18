@@ -77,14 +77,59 @@ def cursed_tome_event(phase, choices, status="KNOWN"):
 
 
 class FakeValueEngine:
+    """最小价值引擎：同时满足 legacy recommend_choice 与 expectimax 的三个接口。
+
+    evaluate_state = hp + 0.5*max_hp + 0.01*gold + relic_bonus*len(relics)。
+    """
+
     def __init__(self):
         self.choices = None
         self.exclude_purge_ids = None
+        self.applied_effects = []
+        self.relic_bonus = 20.0
 
     def recommend_choice(self, state, choices, exclude_purge_ids=None):
         self.choices = choices
         self.exclude_purge_ids = exclude_purge_ids
         return choices[-1]
+
+    def evaluate_state(self, state):
+        return (state["hp"] + 0.5 * state["max_hp"] + 0.01 * state["gold"]
+                + self.relic_bonus * len(state["relics"]))
+
+    def _apply_choice(self, state, choice):
+        result = copy.deepcopy(state)
+        for effect in choice.get("effects", []):
+            self.applied_effects.append(effect["type"])
+            kind = effect["type"]
+            amount = effect.get("amount", 1) or 1
+            if kind == "lose_hp":
+                result["hp"] -= amount
+            elif kind == "gain_hp":
+                result["hp"] = min(result["max_hp"], result["hp"] + amount)
+            elif kind == "gain_max_hp":
+                result["max_hp"] += amount
+            elif kind == "lose_max_hp":
+                result["max_hp"] -= amount
+            elif kind == "gain_gold":
+                result["gold"] += amount
+            elif kind in ("lose_gold",):
+                result["gold"] -= amount
+            elif kind == "lose_all_gold":
+                result["gold"] = 0
+            elif kind == "remove_card":
+                result["deck"] = [c for c in result["deck"] if c != effect.get("card_id")]
+            elif kind == "add_card":
+                result["deck"].extend([effect["card_id"]] * max(1, amount))
+            elif kind == "obtain_relic":
+                result["relics"].append(effect["relic_id"])
+            elif kind == "lose_relic":
+                result["relics"] = [r for r in result["relics"] if r != effect.get("relic_id")]
+        return result
+
+    def rank_cards_for_purpose(self, state, purpose, count, exclude_ids=None):
+        excluded = exclude_ids or set()
+        return [card_id for card_id in state["deck"] if card_id not in excluded][:count]
 
 
 class PurgeChoosingEngine(FakeValueEngine):
@@ -193,7 +238,90 @@ class StructuredEventTests(unittest.TestCase):
         ]), choice_list=["gold", "max hp"])
         action = Harness(engine)._get_structured_event_decision(state)
         self.assertEqual(1, action.choice_index)
-        self.assertEqual("composite_event", engine.choices[0]["action"])
+        self.assertIn("gain_max_hp", engine.applied_effects)
+
+    def test_expectimax_excludes_guaranteed_lethal_choice(self):
+        engine = FakeValueEngine()
+        state = make_state(event("DETERMINISTIC", [
+            choice(0, [{"type": "lose_hp", "amount": 50}]),
+            choice(1, [{"type": "gain_gold", "amount": 10}]),
+        ]), hp=50, choice_list=["die", "gold"])
+        action = Harness(engine)._get_structured_event_decision(state)
+        self.assertEqual(1, action.choice_index)
+
+    def test_stochastic_outcome_scores_probability_weighted_expectation(self):
+        # ScrapOoze 型：0.5 出遗物 / 0.5 空，均 -3 HP；遗物值钱时挖，不值钱时走
+        def dig_event():
+            return event("COMPLEX", [
+                {
+                    "button_index": 0, "action_index": 0, "enabled": True,
+                    "label": "dig", "kind": "STOCHASTIC", "followup": "NONE",
+                    "outcomes": [
+                        {"probability": 0.5, "effects": [
+                            {"type": "lose_hp", "amount": 3},
+                            {"type": "random_relic", "pool": "RARE"},
+                        ]},
+                        {"probability": 0.5, "effects": [{"type": "lose_hp", "amount": 3}]},
+                    ],
+                },
+                choice(1, []),
+            ])
+
+        engine = FakeValueEngine()
+        engine.relic_bonus = 100.0
+        state = make_state(dig_event(), hp=50, choice_list=["dig", "leave"])
+        self.assertEqual(0, Harness(engine)._get_structured_event_decision(state).choice_index)
+
+        engine = FakeValueEngine()
+        engine.relic_bonus = 0.0
+        state = make_state(dig_event(), hp=50, choice_list=["dig", "leave"])
+        self.assertEqual(1, Harness(engine)._get_structured_event_decision(state).choice_index)
+
+    def test_expectimax_select_cards_sets_grid_intent(self):
+        engine = FakeValueEngine()
+        state = make_state(event("DETERMINISTIC", [
+            choice(0, [{"type": "select_cards", "purpose": "PURGE", "count": 1}]),
+            choice(1, []),
+        ]), choice_list=["purge", "leave"])
+        state.deck = [
+            Card.model_validate(card("Strike_R", "Strike", index=0)),
+            Card.model_validate(card("Defend_R", "Defend", index=1)),
+        ]
+        agent = Harness(engine)
+        action = agent._get_structured_event_decision(state)
+        self.assertEqual(ActionType.CHOOSE, action.type)
+        self.assertEqual("purge", agent._pending_grid["purpose"])
+        self.assertIn("Strike_R", agent._pending_grid["target_ids"])
+
+    def test_combat_only_event_enters_forced_combat(self):
+        # Colosseum INTRO：唯一 enabled 选项是战斗 → 直接进入
+        state = make_state(event("COMPLEX", [
+            choice(0, [{"type": "start_combat", "encounter": "Slavers"}], "COMBAT"),
+        ]))
+        action = Harness(FakeValueEngine())._get_structured_event_decision(state)
+        self.assertEqual(ActionType.CHOOSE, action.type)
+        self.assertEqual(0, action.choice_index)
+
+    def test_event_with_combat_alternative_never_reaches_llm(self):
+        # MaskedBandits 型：战斗选项不可打分，交钱选项不优于 no-op → 决策器放弃，
+        # choose_action 层安全回退选中交钱（index 0），全程不触碰 LLM。
+        agent = Harness(FakeValueEngine())
+        state = make_state(event("COMPLEX", [
+            choice(0, [{"type": "lose_all_gold"}]),
+            choice(1, [{"type": "start_combat", "encounter": "Masked Bandits"}], "COMBAT"),
+        ]), choice_list=["give gold", "fight"])
+        action = agent.choose_action(state)
+        self.assertEqual(ActionType.CHOOSE, action.type)
+        self.assertEqual(0, action.choice_index)
+
+    def test_unknown_event_uses_safe_default_never_llm(self):
+        # UNKNOWN 事件 + 无价值引擎：文本解析跳过，安全回退选中第一个安全选项
+        agent = Harness(None)
+        state = make_state(event("UNKNOWN", [choice(0), choice(1)], status="UNKNOWN"),
+                           choice_list=["mystery a", "mystery b"])
+        action = agent.choose_action(state)
+        self.assertEqual(ActionType.CHOOSE, action.type)
+        self.assertEqual(0, action.choice_index)
 
     def test_complex_rule_avoids_only_immediately_lethal_choice(self):
         state = make_state(event("COMPLEX", [
@@ -678,6 +806,38 @@ class StructuredEventTests(unittest.TestCase):
         action = agent._get_structured_event_decision(state)
         self.assertEqual(ActionType.CHOOSE, action.type)
         self.assertEqual(0, action.choice_index)
+
+
+class EventPoolsTests(unittest.TestCase):
+    def test_any_pool_excludes_owned_and_normalizes_weights(self):
+        from sts_ai_framework.event_pools import relic_pool
+        pool = relic_pool("ANY", "DEFECT", {"Vajra", "Anchor"})
+        self.assertTrue(pool)
+        self.assertAlmostEqual(1.0, sum(weight for _, weight in pool), places=6)
+        self.assertNotIn("Vajra", [relic_id for relic_id, _ in pool])
+        self.assertNotIn("Anchor", [relic_id for relic_id, _ in pool])
+
+    def test_any_pool_merges_shared_and_class_relics(self):
+        from sts_ai_framework.event_pools import relic_pool
+        ids = [relic_id for relic_id, _ in relic_pool("ANY", "IRONCLAD", set())]
+        self.assertIn("Akabeko", ids)          # shared common
+        self.assertIn("Red Skull", ids)        # ironclad common
+
+    def test_rare_pool_only_contains_rare_tier(self):
+        from sts_ai_framework.event_pools import relic_pool
+        ids = [relic_id for relic_id, _ in relic_pool("RARE", "IRONCLAD", set())]
+        self.assertIn("Dead Branch", ids)      # shared rare
+        self.assertIn("Champion Belt", ids)    # ironclad rare
+        self.assertNotIn("Akabeko", ids)       # common 不应在 RARE 池
+
+    def test_book_pool_falls_back_to_circlet_when_all_owned(self):
+        from sts_ai_framework.event_pools import relic_pool
+        owned = {"Necronomicon", "Enchiridion", "Nilry's Codex"}
+        self.assertEqual([("Circlet", 1.0)], relic_pool("BOOK", "DEFECT", owned))
+
+    def test_unknown_pool_returns_empty(self):
+        from sts_ai_framework.event_pools import relic_pool
+        self.assertEqual([], relic_pool("MYSTERY", "DEFECT", set()))
 
 
 if __name__ == "__main__":

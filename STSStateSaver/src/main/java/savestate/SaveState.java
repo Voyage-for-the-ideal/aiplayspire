@@ -569,6 +569,8 @@ public class SaveState {
         JsonObject two = new JsonParser().parse(diffString2).getAsJsonObject();
         JsonObject normalizedOne = StateJsonHelper.normalizeCardUuids(one).getAsJsonObject();
         JsonObject normalizedTwo = StateJsonHelper.normalizeCardUuids(two).getAsJsonObject();
+        StateJsonHelper.normalizePlayedCardHistoryForDiff(normalizedOne);
+        StateJsonHelper.normalizePlayedCardHistoryForDiff(normalizedTwo);
 
         boolean allMatch = true;
 

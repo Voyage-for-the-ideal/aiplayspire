@@ -13,6 +13,7 @@ import com.megacrit.cardcrawl.cards.red.Dropkick;
 import com.megacrit.cardcrawl.cards.red.SpotWeakness;
 import com.megacrit.cardcrawl.dungeons.AbstractDungeon;
 import com.megacrit.cardcrawl.monsters.AbstractMonster;
+import com.megacrit.cardcrawl.screens.select.GridCardSelectScreen;
 import com.megacrit.cardcrawl.ui.panels.EnergyPanel;
 import ludicrousspeed.simulator.commands.CardCommand;
 import ludicrousspeed.simulator.commands.Command;
@@ -169,6 +170,10 @@ public class StateNode {
         };
 
         commands = CommandList.getAvailableCommands(null, BattleAiMod.actionHeuristics);
+
+        if (commands.isEmpty() && AbstractDungeon.isScreenUp) {
+            logEmptyCommandList();
+        }
 
         HashMap<Integer, ArrayList<Command>> byCardIndex = new HashMap<>();
         ArrayList<Command> otherCommands = new ArrayList<>();
@@ -363,6 +368,45 @@ public class StateNode {
         result.addAll(reallyBadCommandsToRunLast);
 
         commands = result;
+    }
+
+    private void logEmptyCommandList() {
+        String screenName = String.valueOf(AbstractDungeon.screen);
+        String actionName = AbstractDungeon.actionManager.currentAction == null
+                ? "none"
+                : AbstractDungeon.actionManager.currentAction.getClass().getName();
+        int gridSize = -1;
+        int selectableCount = -1;
+        int selectedCount = -1;
+        String anyNumber = "n/a";
+        String forClarity = "n/a";
+
+        if (AbstractDungeon.screen == AbstractDungeon.CurrentScreen.GRID
+                && AbstractDungeon.gridSelectScreen != null) {
+            GridCardSelectScreen screen = AbstractDungeon.gridSelectScreen;
+            gridSize = screen.targetGroup == null ? 0 : screen.targetGroup.size();
+            selectableCount = 0;
+            if (screen.targetGroup != null) {
+                for (AbstractCard card : screen.targetGroup.group) {
+                    if (!card.isGlowing) {
+                        selectableCount++;
+                    }
+                }
+            }
+            selectedCount = screen.selectedCards == null ? 0 : screen.selectedCards.size();
+            anyNumber = Boolean.toString(screen.anyNumber);
+            forClarity = Boolean.toString(screen.forClarity);
+        }
+
+        System.err.println("BattleAiMod: EMPTY_COMMAND_LIST"
+                + " screen=" + screenName
+                + " action=" + actionName
+                + " grid_size=" + gridSize
+                + " selectable_count=" + selectableCount
+                + " selected_count=" + selectedCount
+                + " any_number=" + anyNumber
+                + " for_clarity=" + forClarity
+                + " generated_commands=0");
     }
 
     public boolean isDone() {

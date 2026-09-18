@@ -2,11 +2,11 @@ import os
 import re
 import time
 import json
-from typing import Dict, List, Optional, Set, Tuple
+from typing import List, Optional
 
 from colorama import Fore, Style
 
-from ..models import Card, GameState, MapNodeState
+from ..models import Card, GameState
 
 
 class InfoPromptMixin:
@@ -80,112 +80,6 @@ class InfoPromptMixin:
             return self._resolve_card_info(matched_card.name, matched_card.id)
 
         return self._resolve_card_info(choice_text, choice_text)
-
-    def _build_map_index(self, state: GameState) -> Dict[Tuple[int, int], MapNodeState]:
-        index: Dict[Tuple[int, int], MapNodeState] = {}
-        for node in state.map_nodes:
-            index[(node.x, node.y)] = node
-        return index
-
-    def _get_map_choice_display_text(self, state: GameState, choice_index: int, choice_text: str) -> str:
-        if state.screen_type != "MAP":
-            return choice_text
-
-        if choice_index < len(state.map_choices_human) and state.map_choices_human[choice_index]:
-            return state.map_choices_human[choice_index]
-
-        for item in state.current_map_choices:
-            if item.choice_index == choice_index and item.human_label:
-                return item.human_label
-
-        return choice_text
-
-    def _parse_map_choice_coords(self, choice_text: str) -> Optional[Tuple[int, int]]:
-        match = re.search(r"x\s*=\s*(-?\d+)\s*,\s*y\s*=\s*(-?\d+)", choice_text)
-        if not match:
-            return None
-        return int(match.group(1)), int(match.group(2))
-
-    def _symbol_bucket(self, symbol: str) -> str:
-        if not symbol:
-            return "other"
-        s = symbol.strip().upper()
-        if s == "M":
-            return "monster"
-        if s == "E":
-            return "elite"
-        if s == "R":
-            return "rest"
-        if s == "$":
-            return "shop"
-        if s == "?":
-            return "event"
-        if s == "T":
-            return "treasure"
-        if s == "B":
-            return "boss"
-        return "other"
-
-    def _summarize_map_from_node(self, state: GameState, start: Tuple[int, int]) -> str:
-        node_index = self._build_map_index(state)
-        if start not in node_index:
-            return "无可用路线数据"
-
-        queue: List[Tuple[Tuple[int, int], int]] = [(start, 0)]
-        visited: Set[Tuple[int, int]] = set()
-        min_to_rest: Optional[int] = None
-        min_to_shop: Optional[int] = None
-        min_to_elite: Optional[int] = None
-
-        while queue:
-            key, dist = queue.pop(0)
-            if key in visited:
-                continue
-            visited.add(key)
-
-            node = node_index.get(key)
-            if not node:
-                continue
-
-            bucket = self._symbol_bucket(node.symbol)
-            if bucket == "rest" and min_to_rest is None:
-                min_to_rest = dist
-            if bucket == "shop" and min_to_shop is None:
-                min_to_shop = dist
-            if bucket == "elite" and min_to_elite is None:
-                min_to_elite = dist
-
-            for edge in node.children:
-                next_key = (edge.x, edge.y)
-                if next_key not in visited:
-                    queue.append((next_key, dist + 1))
-
-        def _fmt(value: Optional[int]) -> str:
-            return f"{value}步" if value is not None else "无"
-
-        parts = []
-        parts.append(f"最近火堆:{_fmt(min_to_rest)}")
-        parts.append(f"商店:{_fmt(min_to_shop)}")
-        parts.append(f"精英:{_fmt(min_to_elite)}")
-        return " ".join(parts)
-
-    def _build_map_choice_summary(self, state: GameState, choice_index: int, choice_text: str) -> Optional[str]:
-        if state.screen_type != "MAP" or not state.map_nodes:
-            return None
-
-        start: Optional[Tuple[int, int]] = None
-        for item in state.current_map_choices:
-            if item.choice_index == choice_index:
-                start = (item.x, item.y)
-                break
-
-        if start is None:
-            start = self._parse_map_choice_coords(choice_text)
-
-        if start is None:
-            return None
-
-        return self._summarize_map_from_node(state, start)
 
     def _write_debug_prompt(self, state: GameState, prompt: str) -> None:
         if not self.debug_prompt_file:
@@ -313,11 +207,7 @@ class InfoPromptMixin:
                 if (state.screen_type == "EVENT" and state.event is not None
                         and not self._is_safe_event_action_index(state, i)):
                     continue
-                display_text = self._get_map_choice_display_text(state, i, choice_text)
-                map_summary = self._build_map_choice_summary(state, i, choice_text)
-                if map_summary:
-                    choices_str += f"  {i}: {display_text} | 路线摘要: {map_summary}\n"
-                elif state.screen_type == "EVENT" and state.event is not None:
+                if state.screen_type == "EVENT" and state.event is not None:
                     event_choice = next(
                         (item for item in state.event.choices if item.enabled and item.action_index == i),
                         None,
@@ -328,15 +218,15 @@ class InfoPromptMixin:
                             "followup": event_choice.followup,
                             "outcomes": [outcome.model_dump(exclude_none=True) for outcome in event_choice.outcomes],
                         }
-                        choices_str += f"  {i}: {display_text} | 结构化效果: {json.dumps(semantic, ensure_ascii=False)}\n"
+                        choices_str += f"  {i}: {choice_text} | 结构化效果: {json.dumps(semantic, ensure_ascii=False)}\n"
                     else:
-                        choices_str += f"  {i}: {display_text}\n"
+                        choices_str += f"  {i}: {choice_text}\n"
                 else:
                     choice_info = self._get_choice_card_info(state, choice_text)
                     if choice_info != "未知卡牌效果。":
-                        choices_str += f"  {i}: {display_text} - {choice_info}\n"
+                        choices_str += f"  {i}: {choice_text} - {choice_info}\n"
                     else:
-                        choices_str += f"  {i}: {display_text}\n"
+                        choices_str += f"  {i}: {choice_text}\n"
 
             specific_info += f"""
 - 可选列表 (Choices):
@@ -350,30 +240,6 @@ class InfoPromptMixin:
                 )
             if state.screen_type == "COMBAT_REWARD":
                 specific_info += "\n- 这是一个战斗奖励界面 (COMBAT_REWARD)。\n"
-            if state.screen_type == "MAP":
-                specific_info += "\n- 地图符号说明: M=普通战斗, E=精英战斗, R=火堆(休息/升级), ?=未知事件, $=商店, T=宝箱, B=Boss\n"
-                if state.map_ascii:
-                    specific_info += f"\n- 地图 (ASCII):\n{state.map_ascii}\n"
-                if state.map_position is not None:
-                    if not state.first_room_chosen:
-                        specific_info += f"\n- 当前位置: {state.map_position.human_label}\n"
-                    else:
-                        specific_info += (
-                            f"\n- 当前位置: 第{state.map_position.floor}层，"
-                            f"从左往右第{state.map_position.lane_index_from_left}个房间"
-                        )
-                        if state.map_position.human_label:
-                            specific_info += f"（{state.map_position.human_label}）"
-                        specific_info += "\n"
-                elif state.current_map_node is not None and state.current_map_node.lane_index_from_left > 0:
-                    specific_info += (
-                        f"\n- 当前位置: 第{state.current_map_node.y}层，"
-                        f"从左往右第{state.current_map_node.lane_index_from_left}个房间"
-                    )
-                    if state.current_map_node.human_label:
-                        specific_info += f"（{state.current_map_node.human_label}）"
-                    specific_info += "\n"
-
             specific_info += """
 目标: 根据当前情况做出最佳选择。
 """

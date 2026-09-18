@@ -1,5 +1,11 @@
 import unittest
+from contextlib import redirect_stdout
+import io
+import sys
+import types
+from unittest.mock import patch
 
+from sts_ai_framework import config
 from sts_ai_framework.llm_agent_parts.action_mixin import ActionMixin
 from sts_ai_framework.llm_agent_parts.choice_mixin import ChoiceMixin
 from sts_ai_framework.llm_agent_parts.route_mixin import RouteMixin
@@ -85,6 +91,104 @@ class RouteMixinTests(unittest.TestCase):
         self.assertEqual(ActionType.CHOOSE, action.type)
         self.assertEqual(0, action.choice_index)
         self.assertEqual(0, agent.completions.calls)
+
+    def test_legacy_route_policy_preserves_old_scoring(self):
+        with patch.object(config, "ROUTE_POLICY", "legacy"):
+            agent = MapHarness()
+            action = agent.choose_action(map_state(hp=12))
+            self.assertEqual(ActionType.CHOOSE, action.type)
+            self.assertEqual(1, action.choice_index)
+            self.assertEqual(0, agent.completions.calls)
+
+    def test_map_fallback_first_legal_when_graph_is_invalid(self):
+        agent = MapHarness()
+        state = map_state(
+            choices=[{"choice_index": 5, "x": 0, "y": 5, "symbol": "E"}],
+            nodes=[{"x": 0, "y": 5, "symbol": "E", "children": []}],
+        )
+        action = agent.choose_action(state)
+        self.assertEqual(ActionType.CHOOSE, action.type)
+        self.assertEqual(0, action.choice_index)
+        self.assertEqual(0, agent.completions.calls)
+
+    def test_missing_structured_choices_uses_first_visible_choice_without_llm(self):
+        agent = MapHarness()
+        state = map_state(choices=[])
+        action = agent.choose_action(state)
+        self.assertEqual(ActionType.CHOOSE, action.type)
+        self.assertEqual(0, action.choice_index)
+        self.assertEqual(0, agent.completions.calls)
+
+    def test_empty_map_choices_waits_without_llm(self):
+        agent = MapHarness()
+        state = map_state(choices=[], nodes=[])
+        state.choice_list = []
+        action = agent.choose_action(state)
+        self.assertEqual(ActionType.WAIT, action.type)
+        self.assertIsNone(action.choice_index)
+        self.assertEqual(0, agent.completions.calls)
+
+    def test_planner_mode_returns_route_logs(self):
+        # Thin adapter path: the planner module is optional for this task
+        # and can be absent in runtime; this test verifies the integration shape.
+        routing_pkg = types.ModuleType("sts_ai_framework.routing")
+        planner_pkg = types.ModuleType("sts_ai_framework.routing.planner")
+        routing_pkg.__path__ = []  # allow import as package
+
+        class RouteDecision:
+            def __init__(self):
+                self.choice_index = 1
+                self.mode = "FIRST_LEGAL"
+                self.score = 7.5
+                self.components = ["current_layer"]
+                self.explanation = "planner policy"
+
+        class RoutePlanner:
+            def choose(self, _state):
+                return RouteDecision()
+
+        planner_pkg.RoutePlanner = RoutePlanner
+
+        with patch.dict(
+            sys.modules,
+            {"sts_ai_framework.routing": routing_pkg, "sts_ai_framework.routing.planner": planner_pkg},
+        ):
+            agent = MapHarness()
+            state = map_state()
+            sink = io.StringIO()
+            with redirect_stdout(sink):
+                action = agent.choose_action(state)
+            output = sink.getvalue()
+            self.assertEqual(ActionType.CHOOSE, action.type)
+            self.assertEqual(0, action.choice_index)
+            self.assertIn("[route_candidate]", output)
+            self.assertIn("[route_decision]", output)
+            self.assertIn("mode=FIRST_LEGAL", output)
+
+    def test_planner_wait_mode_prefers_wait(self):
+        routing_pkg = types.ModuleType("sts_ai_framework.routing")
+        planner_pkg = types.ModuleType("sts_ai_framework.routing.planner")
+        routing_pkg.__path__ = []
+
+        class RouteDecision:
+            mode = "WAIT"
+            score = 0.0
+            components = []
+            explanation = "no action"
+
+        class RoutePlanner:
+            def choose(self, _state):
+                return RouteDecision()
+
+        planner_pkg.RoutePlanner = RoutePlanner
+
+        with patch.dict(
+            sys.modules,
+            {"sts_ai_framework.routing": routing_pkg, "sts_ai_framework.routing.planner": planner_pkg},
+        ):
+            agent = MapHarness()
+            action = agent.choose_action(map_state())
+            self.assertEqual(ActionType.WAIT, action.type)
 
 
 if __name__ == "__main__":

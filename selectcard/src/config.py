@@ -45,10 +45,15 @@ class Config:
     # ==========================
     MAX_UPGRADE = 15         # 最大升级等级
     MAX_COUNT = 10           # 最大拥有数量限制
-    MAX_SEQ_LEN = 64
-    D_MODEL = 128            # 隐藏层/嵌入层维度
+    # MAX_SEQ_LEN is the full sequence budget; with map context enabled the
+    # fixed context block is [CLS]+[GLOBAL]+[BOSS]+[KEYS]+105 map+1 plan+8
+    # history tokens, so the item budget shrinks accordingly (73 at
+    # 192/105/1/8).
+    MAX_SEQ_LEN = 192
+    MAX_ITEM_TOKENS = 192 - 4 - 1 - 105 - 1 - 8  # 73
+    D_MODEL = 192            # 隐藏层/嵌入层维度
     N_HEADS = 4              # 注意力头数
-    N_LAYERS = 3             # 注意力层数
+    N_LAYERS = 5             # 注意力层数
     # Boss identity is a separate categorical [BOSS] context token, not a numeric
     # global feature.  Keep this input contract at nine dimensions.
     NUM_GLOBAL_FEATURES = 9
@@ -59,6 +64,20 @@ class Config:
     HEART_WIN_BONUS_FLOORS = 3.0
     HEART_HEAD_LOSS_WEIGHT = 1.0
     VALUE_DEBUG = os.environ.get("STS_VALUE_DEBUG", "").lower() in {"1", "true", "yes"}
+
+    # ==========================
+    # v3 地图条件化上下文（[MAP]/[PLAN]/[KEYS] + key 辅助头）
+    # ==========================
+    # Master switch for the v3 map-conditioned extension.  Checkpoints store
+    # their own flag, so v2 checkpoints keep loading and ignore context.
+    USE_MAP_CONTEXT = True
+    # Hindsight-plan token dropout while training (MODEL_V3_DESIGN.md 4.3).
+    PLAN_TOKEN_DROPOUT = 0.5
+    # First N epochs mask map/plan tokens entirely (curriculum warm-up so the
+    # v3 run can never lose to its own v2 degenerate point).
+    CONTEXT_CURRICULUM_EPOCHS = 3
+    # Auxiliary key-progress head supervision weight (ruby/emerald/sapphire).
+    KEY_HEAD_LOSS_WEIGHT = 0.2
 
     # ==========================
     # 输出与保存
