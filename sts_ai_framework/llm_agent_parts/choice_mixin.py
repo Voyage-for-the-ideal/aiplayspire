@@ -57,9 +57,9 @@ class ChoiceMixin:
             elif "smithoption" in text_lower:
                 best_upgrade_score = -9999.0
                 best_upgrade_card = None
-                unique_cards = {c.id: c for c in state.deck}
+                unique_cards = {c.reference: c for c in state.deck}
                 for card_id, card in unique_cards.items():
-                    if card.can_upgrade and card.type != "CURSE":
+                    if card.can_upgrade and card.type != "CURSE" and (card.upgrades == 0 or card.id == "Searing Blow"):
                         hypo_state = self.value_engine._apply_choice(current_state, {"action": "upgrade_card", "target": card_id})
                         score = self.value_engine.evaluate_state(hypo_state)
                         if score > best_upgrade_score:
@@ -78,7 +78,7 @@ class ChoiceMixin:
             elif "toshoption" in text_lower:
                 best_tosh_score = -9999.0
                 best_tosh_card = None
-                unique_cards = set([c.id for c in state.deck])
+                unique_cards = {c.reference for c in state.deck}
                 for card_id in unique_cards:
                     hypo_state = self.value_engine._apply_choice(current_state, {"action": "tosh", "target": card_id})
                     score = self.value_engine.evaluate_state(hypo_state)

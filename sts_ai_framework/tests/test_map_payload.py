@@ -5,6 +5,7 @@ import unittest
 from sts_ai_framework.llm_agent_parts.map_payload import map_context_fields
 from sts_ai_framework.llm_agent_parts.value_payload import value_state_payload
 from sts_ai_framework.models import (
+    Card,
     GameState,
     KeyState,
     MapNodeState,
@@ -83,6 +84,17 @@ class PayloadShapeTests(unittest.TestCase):
 
 
 class ValuePayloadTests(unittest.TestCase):
+    def test_deck_entries_carry_upgrade_suffix(self):
+        state = _state(character="IRONCLAD",
+                       player=PlayerState(current_hp=55, max_hp=70,
+                                          block=0, energy=3, gold=99), deck=[
+            Card(index=0, uuid="bash", id="Bash", name="Bash+", cost=2,
+                 cost_for_turn=2, upgrades=2),
+            Card(index=1, uuid="defend", id="Defend_R", name="Defend", cost=1,
+                 cost_for_turn=1),
+        ])
+        self.assertEqual(["Bash+2", "Defend_R"], value_state_payload(state)["deck"])
+
     def test_common_payload_carries_character_and_omits_plan(self):
         state = _state(
             character="THE_SILENT",

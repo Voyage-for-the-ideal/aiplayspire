@@ -44,6 +44,8 @@ class InfoPromptMixin:
         visible_cards.extend(state.draw_pile)
         visible_cards.extend(state.discard_pile)
         visible_cards.extend(state.exhaust_pile)
+        visible_cards.extend(state.card_reward_cards)
+        visible_cards.extend(state.grid_cards)
         return visible_cards
 
     def _normalize_card_text(self, text: str) -> str:
@@ -55,6 +57,11 @@ class InfoPromptMixin:
         return normalized
 
     def _find_card_for_choice(self, state: GameState, choice_text: str) -> Optional[Card]:
+        # Card rewards use ``[Name] Cost: ...``; keep the name before the
+        # generic normalizer removes bracketed annotations.
+        formatted_card = re.match(r"^\[([^\]]+)\](?:\s+Cost:.*)?$", choice_text.strip(), re.IGNORECASE)
+        if formatted_card:
+            choice_text = formatted_card.group(1)
         normalized_choice = self._normalize_card_text(choice_text)
         if not normalized_choice:
             return None

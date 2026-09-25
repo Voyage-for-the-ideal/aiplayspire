@@ -306,7 +306,7 @@ class ActionMixin:
             # Prefer the structured, locale-independent GRID metadata.  It also
             # represents the exact legal target set, unlike the player's deck.
             for card in getattr(state, "grid_cards", None) or []:
-                if card.id == card_to_select and card.choice_index is not None:
+                if card.reference == card_to_select and card.choice_index is not None:
                     if hasattr(self, "_pending_grid") and self._pending_grid:
                         self._pending_grid["selected_count"] = selected_count + 1
                     print(Fore.MAGENTA +
@@ -316,7 +316,7 @@ class ActionMixin:
 
             target_name = None
             for card in state.deck:
-                if card.id == card_to_select:
+                if card.reference == card_to_select:
                     target_name = card.name.lower()
                     break
 
@@ -387,7 +387,7 @@ class ActionMixin:
             # have been made against a previous deck snapshot, so discard a
             # stale purge intent and rerank using only cards actually offered.
             if purpose == "purge" and getattr(state, "grid_cards", None) is not None:
-                legal_grid_ids = {card.id for card in state.grid_cards}
+                legal_grid_ids = {card.reference for card in state.grid_cards}
                 if (not target_ids
                         or any(card_id not in legal_grid_ids for card_id in target_ids)):
                     target_ids = []
@@ -423,17 +423,17 @@ class ActionMixin:
             exclude_ids = set()
             grid_cards = getattr(state, "grid_cards", None)
             if grid_cards is not None:
-                legal_ids = {card.id for card in grid_cards}
-                exclude_ids.update(card.id for card in state.deck if card.id not in legal_ids)
+                legal_ids = {card.reference for card in grid_cards}
+                exclude_ids.update(card.reference for card in state.deck if card.reference not in legal_ids)
                 if purpose == "purge" and stale_purge_target:
                     # Ensure ranking cannot inspect cards outside the live GRID,
                     # even if a custom value engine ignores exclude_ids.
-                    current_state["deck"] = [card.id for card in grid_cards]
+                    current_state["deck"] = [card.reference for card in grid_cards]
             if purpose == "transform":
-                exclude_ids.update(card.id for card in state.deck if card.type == "CURSE")
+                exclude_ids.update(card.reference for card in state.deck if card.type == "CURSE")
             elif purpose == "upgrade":
                 exclude_ids.update({
-                    card.id for card in state.deck
+                    card.reference for card in state.deck
                     if card.type == "CURSE" or not card.can_upgrade
                 })
 

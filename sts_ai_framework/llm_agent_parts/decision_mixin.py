@@ -158,13 +158,13 @@ class DecisionMixin:
                     amount = self._extract_first_int(clause) or 1
                     matched_card = self._find_card_for_choice(state, choice_text) if state else None
                     if matched_card:
-                        effects.append({"type": "remove_card", "card_id": matched_card.id, "amount": amount})
+                        effects.append({"type": "remove_card", "card_id": matched_card.reference, "amount": amount})
                     else:
                         effects.append({"type": "remove_card", "card_id": "unknown_card", "amount": amount})
                 elif "transform" in clause_lower:
                     matched_card = self._find_card_for_choice(state, choice_text) if state else None
                     if matched_card:
-                        effects.append({"type": "remove_card", "card_id": matched_card.id})
+                        effects.append({"type": "remove_card", "card_id": matched_card.reference})
                     else:
                         amount = self._extract_first_int(clause) or 1
                         effects.append({"type": "remove_card", "amount": amount})
@@ -175,11 +175,11 @@ class DecisionMixin:
                     else:
                         matched_card = self._find_card_for_choice(state, choice_text) if state else None
                         if matched_card:
-                            effects.append({"type": "upgrade_card", "card_id": matched_card.id})
+                            effects.append({"type": "upgrade_card", "card_id": matched_card.reference})
                 elif "duplicate" in clause_lower or "copy" in clause_lower:
                     matched_card = self._find_card_for_choice(state, choice_text) if state else None
                     if matched_card:
-                        effects.append({"type": "duplicate", "card_id": matched_card.id})
+                        effects.append({"type": "duplicate", "card_id": matched_card.reference})
                     else:
                         effects.append({"type": "duplicate", "card_id": "unknown_card"})
                 else:
@@ -245,10 +245,10 @@ class DecisionMixin:
         }
         deck_by_id = {}
         for card in getattr(state, "deck", []):
-            deck_by_id.setdefault(card.id, []).append(card)
+            deck_by_id.setdefault(card.reference, []).append(card)
         legal_purge_ids = {
             card_id for card_id, copies in deck_by_id.items()
-            if card_id not in never_purgeable_ids
+            if copies[0].id not in never_purgeable_ids
             and any(not card.is_bottled for card in copies)
         }
         purge_excluded_ids = set(deck_by_id) - legal_purge_ids
@@ -281,8 +281,9 @@ class DecisionMixin:
         current_state = value_state_payload(state)
 
         choices = []
+        reward_cards = getattr(state, "card_reward_cards", None) or []
         grid_card_ids = {
-            card.choice_index: card.id
+            card.choice_index: card.reference
             for card in (getattr(state, "grid_cards", None) or [])
             if card.choice_index is not None
         }
@@ -296,12 +297,14 @@ class DecisionMixin:
                 card_id = choice_text
                 if i in grid_card_ids:
                     card_id = grid_card_ids[i]
-                elif hasattr(state, "reward_card_ids") and state.reward_card_ids and i < len(state.reward_card_ids):
+                elif i < len(reward_cards):
+                    card_id = reward_cards[i].reference
+                elif state.reward_card_ids and i < len(state.reward_card_ids):
                     card_id = state.reward_card_ids[i]
                 else:
                     matched_card = self._find_card_for_choice(state, choice_text)
                     if matched_card:
-                        card_id = matched_card.id
+                        card_id = matched_card.reference
 
                 choices.append({"action": "pick_card", "target": card_id, "index": i})
 
@@ -431,7 +434,7 @@ class DecisionMixin:
             elif purpose in ("purge", "transform", "upgrade", "duplicate"):
                 excluded = None
                 if purpose == "transform":
-                    excluded = {card.id for card in state.deck if card.type == "CURSE"}
+                    excluded = {card.reference for card in state.deck if card.type == "CURSE"}
                 target_ids = self.value_engine.rank_cards_for_purpose(
                     self._event_current_state(state), purpose, requested_count, exclude_ids=excluded
                 )
@@ -452,7 +455,7 @@ class DecisionMixin:
         for card in state.deck:
             if card.is_bottled:
                 continue
-            effects = [{"type": "remove_card", "card_id": card.id}]
+            effects = [{"type": "remove_card", "card_id": card.reference}]
             rarity = card.rarity.upper()
             if rarity == "CURSE":
                 relic_id = "Circlet" if "Spirit Poop" in current["relics"] else "Spirit Poop"
@@ -469,7 +472,7 @@ class DecisionMixin:
             score = self.value_engine.evaluate_state(hypothetical)
             if score > best_score:
                 best_score = score
-                best_card = card.id
+                best_card = card.reference
         return [best_card] if best_card else []
 
     # 遗物候选 × 10 诅咒的枚举预算上限；超出时按单独价值预筛遗物（见
@@ -711,7 +714,7 @@ class DecisionMixin:
                     candidates.append(candidate)
 
                 if candidates:
-                    curse_ids = {card.id for card in state.deck if card.type == "CURSE"}
+                    curse_ids = {card.reference for card in state.deck if card.type == "CURSE"}
                     best = self.value_engine.recommend_choice(
                         self._event_current_state(state),
                         candidates,
@@ -928,7 +931,7 @@ class DecisionMixin:
 
         # Detect transform choices and collect curse IDs for transform filtering
         transform_indices = set()
-        curse_ids = {card.id for card in state.deck if card.type == "CURSE"}
+        curse_ids = {card.reference for card in state.deck if card.type == "CURSE"}
 
         choices = []
         unified_choices = self._build_unified_choices(state)

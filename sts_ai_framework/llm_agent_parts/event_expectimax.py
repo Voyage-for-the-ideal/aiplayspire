@@ -97,7 +97,7 @@ def _purge_exclusion_ids(state: GameState) -> set:
     excluded = set(NEVER_PURGEABLE_IDS)
     for card in state.deck:
         if getattr(card, "is_bottled", False):
-            excluded.add(card.id)
+            excluded.add(card.reference)
     return excluded
 
 
@@ -115,7 +115,7 @@ def _select_card_effects(state: GameState, engine, effect, current: dict) -> Opt
         intent = {"_purge_intent_id": targets[0]} if targets else {}
         return engine_effects, intent
     if purpose == "transform":
-        curse_ids = {card.id for card in state.deck if card.type == "CURSE"}
+        curse_ids = {card.reference for card in state.deck if card.type == "CURSE"}
         targets = engine.rank_cards_for_purpose(
             current, "transform", count, exclude_ids=curse_ids)
         engine_effects = [{"type": "remove_card", "card_id": targets[0], "amount": count}] if targets else []

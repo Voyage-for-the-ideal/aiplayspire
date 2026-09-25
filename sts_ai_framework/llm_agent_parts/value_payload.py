@@ -39,7 +39,7 @@ def value_state_payload(state: GameState) -> dict:
         "visible_boss": visible_boss_of(state),
         "character": state.character,
         **map_context_fields(state),
-        "deck": [card.id for card in getattr(state, "deck", []) or []],
+        "deck": [card.reference for card in getattr(state, "deck", []) or []],
         "relics": [relic.id for relic in getattr(state, "relics", []) or []],
         "relic_states": relic_state_payload(state),
     }

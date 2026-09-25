@@ -230,6 +230,7 @@ class GameState(BaseModel):
     screen_type: Optional[str] = "NONE"
     choice_list: Optional[List[str]] = []
     reward_card_ids: Optional[List[str]] = []
+    card_reward_cards: List[Card] = Field(default_factory=list)
     reward_choices: List[RewardChoice] = Field(default_factory=list)
     grid_cards: List[Card] = Field(default_factory=list)
     keys: KeyState = Field(default_factory=KeyState)

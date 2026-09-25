@@ -2,10 +2,12 @@ import copy
 import os
 import sys
 import unittest
+from types import SimpleNamespace
 
 from sts_ai_framework.llm_agent_parts.action_mixin import ActionMixin
 from sts_ai_framework.llm_agent_parts.choice_mixin import ChoiceMixin
 from sts_ai_framework.llm_agent_parts.decision_mixin import DecisionMixin
+from sts_ai_framework.llm_agent_parts.info_prompt_mixin import InfoPromptMixin
 from sts_ai_framework.models import ActionType, Card, GameState, RewardChoice
 from sts_ai_framework.__main__ import _is_action_effective
 
@@ -20,7 +22,8 @@ def make_state(event=None, hp=50, choice_list=None):
     )
 
 
-def card(card_id="Bash", name=None, index=0, choice_index=None):
+def card(card_id="Bash", name=None, index=0, choice_index=None, upgrades=0,
+         can_upgrade=True):
     return {
         "index": index,
         "choice_index": choice_index,
@@ -29,6 +32,8 @@ def card(card_id="Bash", name=None, index=0, choice_index=None):
         "name": name or card_id,
         "cost": 1,
         "cost_for_turn": 1,
+        "upgrades": upgrades,
+        "can_upgrade": can_upgrade,
     }
 
 
@@ -187,12 +192,14 @@ class GridRankingEngine:
         return [card_id for card_id in state["deck"] if card_id not in excluded][:count]
 
 
-class Harness(DecisionMixin, ChoiceMixin, ActionMixin):
+class Harness(DecisionMixin, ChoiceMixin, ActionMixin, InfoPromptMixin):
     def __init__(self, value_engine=None):
         self.value_engine = value_engine
         self._pending_event = None
         self._pending_grid = None
         self.last_screen_type = "NONE"
+        self.knowledge_base = SimpleNamespace(cards={})
+        self.game_client = None
 
 
 class StructuredEventTests(unittest.TestCase):
@@ -380,6 +387,25 @@ class StructuredEventTests(unittest.TestCase):
         self.assertEqual(ActionType.CHOOSE, action.type)
         self.assertEqual(0, action.choice_index)
 
+    def test_grid_choice_matches_suffixed_target(self):
+        state = make_state(choice_list=["Defend+"])
+        state.screen_type = "GRID"
+        state.grid_purpose = "upgrade"
+        state.grid_cards = [Card.model_validate(card(
+            "Defend_R", "Defend+", choice_index=0, upgrades=1))]
+        agent = Harness()
+        agent._pending_grid = {
+            "purpose": "upgrade", "target_ids": ["Defend_R+1"],
+            "num_to_select": 1, "selected_count": 0,
+        }
+
+        action = agent._handle_grid_selection(state)
+
+        self.assertEqual(ActionType.CHOOSE, action.type)
+        self.assertEqual(0, action.choice_index)
+        self.assertIsNotNone(agent._pending_grid)
+        self.assertEqual(["Defend_R+1"], agent._pending_grid["target_ids"])
+
     def test_generated_card_grid_uses_value_model_not_llm(self):
         state = make_state(choice_list=["cloak and dagger"])
         state.screen_type = "GRID"
@@ -457,6 +483,20 @@ class StructuredEventTests(unittest.TestCase):
         self.assertNotIn("Strike_R", engine.exclude_purge_ids)
         self.assertTrue(any(choice["action"] == "remove_card" for choice in engine.choices))
 
+    def test_shop_purge_exclusion_survives_suffix(self):
+        state = make_state(choice_list=["Purge (50 gold)", "Leave"])
+        state.screen_type = "SHOP_SCREEN"
+        bottled = card("Strike_R", "Strike+", index=0, upgrades=1)
+        bottled["is_bottled"] = True
+        state.deck = [Card.model_validate(bottled),
+                      Card.model_validate(card("Strike_R", "Strike", index=1))]
+        engine = PurgeChoosingEngine()
+
+        Harness(engine)._get_model_shop_decision(state)
+
+        self.assertIn("Strike_R+1", engine.exclude_purge_ids)
+        self.assertNotIn("Strike_R", engine.exclude_purge_ids)
+
     def test_shop_omits_purge_when_no_legal_target(self):
         state = make_state(choice_list=["Purge (50 gold)", "Leave"])
         state.screen_type = "SHOP_SCREEN"
@@ -521,6 +561,110 @@ class StructuredEventTests(unittest.TestCase):
         action = Harness(FakeValueEngine())._handle_rest_room(state)
         self.assertEqual(ActionType.CHOOSE, action.type)
         self.assertEqual(2, action.choice_index)
+
+    def test_smith_intent_is_a_suffixed_reference(self):
+        state = make_state(choice_list=["SmithOption"])
+        state.screen_type = "REST"
+        state.deck = [Card.model_validate(card(
+            "Searing Blow", "Searing Blow+2", upgrades=2))]
+        agent = Harness(FakeValueEngine())
+
+        action = agent._handle_rest_room(state)
+
+        self.assertEqual(ActionType.CHOOSE, action.type)
+        self.assertEqual("Searing Blow+2", agent.intended_smith_card)
+        self.assertEqual(["Searing Blow+2"], agent._pending_grid["target_ids"])
+
+    def test_smith_skips_upgraded_copy_and_keeps_unupgraded(self):
+        state = make_state(choice_list=["SmithOption"])
+        state.screen_type = "REST"
+        state.deck = [
+            Card.model_validate(card("Bash", index=0)),
+            Card.model_validate(card("Bash", "Bash+", index=1,
+                                     upgrades=1, can_upgrade=False)),
+        ]
+        engine = FakeValueEngine()
+
+        Harness(engine)._handle_rest_room(state)
+
+        self.assertEqual(["Bash"], [choice["target"] for choice in engine.choices
+                                    if choice["action"] == "upgrade_card"])
+
+    def test_smith_keeps_upgraded_searing_blow_without_can_upgrade(self):
+        state = make_state(choice_list=["SmithOption"])
+        state.screen_type = "REST"
+        legacy_card = card("Searing Blow", "Searing Blow+2", upgrades=2)
+        del legacy_card["can_upgrade"]
+        state.deck = [Card.model_validate(legacy_card)]
+        engine = FakeValueEngine()
+
+        Harness(engine)._handle_rest_room(state)
+
+        self.assertEqual(["Searing Blow+2"],
+                         [choice["target"] for choice in engine.choices
+                          if choice["action"] == "upgrade_card"])
+
+    def test_card_reward_prefers_structured_upgrades(self):
+        state = make_state(choice_list=["[Bash+] Cost: 2", "[Bash] Cost: 2"])
+        state.screen_type = "CARD_REWARD"
+        state.card_reward_cards = [
+            Card.model_validate(card("Bash", "Bash+", index=0, upgrades=1)),
+            Card.model_validate(card("Bash", "Bash", index=1)),
+        ]
+        state.reward_card_ids = ["Bash", "Bash"]
+        engine = FakeValueEngine()
+
+        Harness(engine)._get_model_card_decision(state)
+
+        self.assertEqual(["Bash+1", "Bash"],
+                         [choice["target"] for choice in engine.choices[:2]])
+        self.assertEqual({"action": "skip", "target": None, "index": -1},
+                         engine.choices[-1])
+
+    def test_card_reward_falls_back_to_reward_card_ids(self):
+        state = make_state(choice_list=["[Bash] Cost: 2"])
+        state.screen_type = "CARD_REWARD"
+        state.reward_card_ids = ["Bash"]
+        engine = FakeValueEngine()
+
+        Harness(engine)._get_model_card_decision(state)
+
+        self.assertEqual("Bash", engine.choices[0]["target"])
+
+    def test_card_reward_falls_back_to_visible_card(self):
+        state = make_state(choice_list=["[Defend+] Cost: 1"])
+        state.screen_type = "CARD_REWARD"
+        state.card_reward_cards = []
+        state.reward_card_ids = []
+        state.hand = [Card.model_validate(card(
+            "Defend_R", "Defend+", upgrades=1))]
+        engine = FakeValueEngine()
+
+        Harness(engine)._get_model_card_decision(state)
+
+        self.assertEqual("Defend_R+1", engine.choices[0]["target"])
+
+    def test_iter_visible_cards_includes_reward_and_grid(self):
+        state = make_state()
+        state.hand = [Card.model_validate(card("Bash"))]
+        state.card_reward_cards = [Card.model_validate(card("Defend_R"))]
+        state.grid_cards = [Card.model_validate(card(
+            "Strike_R", upgrades=1))]
+
+        visible = Harness()._iter_visible_cards(state)
+
+        self.assertEqual(["Bash", "Defend_R", "Strike_R"],
+                         [entry.id for entry in visible])
+
+    def test_visible_card_info_resolves_reward_card(self):
+        state = make_state(choice_list=["[Defend] Cost: 1"])
+        state.screen_type = "CARD_REWARD"
+        state.card_reward_cards = [Card.model_validate(card("Defend_R", "Defend"))]
+        agent = Harness()
+        agent.knowledge_base.cards["Defend_R"] = "Gain 5 Block."
+
+        self.assertEqual("Gain 5 Block.",
+                         agent._get_choice_card_info(state, state.choice_list[0]))
 
     def test_boss_value_model_cannot_choose_synthetic_skip(self):
         state = make_state(choice_list=["Black Star"])
