@@ -20,6 +20,21 @@ class Card(BaseModel):
     is_bottled: bool = False
     can_upgrade: bool = True
 
+    @property
+    def reference(self) -> str:
+        """Model-input form of this card: ``ID`` or ``ID+N``.
+
+        The Java bridge sends the base ``cardID`` (immutable under upgrade) and
+        ``timesUpgraded`` as separate fields, so the level must be folded back in
+        here.  This mirrors the training convention (``reconstructor``) and
+        ``selectcard.card_input.normalize_card_reference``; a parity test pins
+        the two together.  Deliberately a property, not a field, so the
+        serialized schema does not change.
+        """
+        if self.upgrades <= 0:
+            return self.id
+        return f"{self.id}+{self.upgrades}"
+
 class PlayerState(BaseModel):
     current_hp: int
     max_hp: int
