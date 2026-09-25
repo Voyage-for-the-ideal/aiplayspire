@@ -668,6 +668,143 @@ class ModelTests(unittest.TestCase):
         })
         self.assertEqual(result["deck"], ["Bash", "Inflame"])
 
+    def test_pandoras_box_is_suffix_tolerant(self):
+        engine = STSInferenceEngine.__new__(STSInferenceEngine)
+        state = {
+            "deck": ["Strike_R", "Defend_R+1", "Strike_P+2", "Bash"],
+            "relics": [],
+        }
+        result = engine._apply_choice(state, {
+            "action": "composite_event",
+            "effects": [{"type": "obtain_relic", "relic_id": "Pandora's Box"}],
+        })
+        self.assertEqual(result["deck"], ["Bash"])
+
+    def test_upgrade_card_resolves_bare_target_to_suffixed_entry(self):
+        engine = STSInferenceEngine.__new__(STSInferenceEngine)
+        state = {"deck": ["Strike_R", "Strike_R+1"], "relics": []}
+        result = engine._apply_choice(
+            state, {"action": "upgrade_card", "target": "Strike_R"}
+        )
+        self.assertEqual(result["deck"], ["Strike_R+1", "Strike_R+1"])
+
+    def test_upgrade_card_never_appends_phantom_target(self):
+        engine = STSInferenceEngine.__new__(STSInferenceEngine)
+        state = {"deck": ["Bash+1"], "relics": []}
+        result = engine._apply_choice(
+            state, {"action": "upgrade_card", "target": "Bash"}
+        )
+        self.assertEqual(result["deck"], ["Bash+1"])
+
+    def test_upgrade_card_ignores_target_absent_from_deck(self):
+        engine = STSInferenceEngine.__new__(STSInferenceEngine)
+        state = {"deck": ["Bash"], "relics": []}
+        result = engine._apply_choice(
+            state, {"action": "upgrade_card", "target": "Necronomicurse"}
+        )
+        self.assertEqual(result["deck"], ["Bash"])
+
+    def test_upgrade_card_advances_searing_blow_level(self):
+        engine = STSInferenceEngine.__new__(STSInferenceEngine)
+        state = {"deck": ["Searing Blow+2"], "relics": []}
+        result = engine._apply_choice(
+            state, {"action": "upgrade_card", "target": "Searing Blow+2"}
+        )
+        self.assertEqual(result["deck"], ["Searing Blow+3"])
+
+    def test_upgrade_card_bare_target_does_not_match_upgraded_copy(self):
+        # A bare reference means the level-0 copy specifically.  With only an
+        # upgraded copy present there is no unambiguous target, so the branch
+        # no-ops rather than guessing which copy was meant.
+        engine = STSInferenceEngine.__new__(STSInferenceEngine)
+        state = {"deck": ["Searing Blow+2"], "relics": []}
+        result = engine._apply_choice(
+            state, {"action": "upgrade_card", "target": "Searing Blow"}
+        )
+        self.assertEqual(result["deck"], ["Searing Blow+2"])
+
+    def test_upgrade_card_handles_display_form_target(self):
+        engine = STSInferenceEngine.__new__(STSInferenceEngine)
+        state = {"deck": ["Bash+1"], "relics": []}
+        result = engine._apply_choice(
+            state, {"action": "upgrade_card", "target": "Bash+"}
+        )
+        self.assertEqual(result["deck"], ["Bash+1"])
+
+    def test_composite_upgrade_does_not_corrupt_multi_level_target(self):
+        engine = STSInferenceEngine.__new__(STSInferenceEngine)
+        state = {"deck": ["Searing Blow+2"], "relics": []}
+        result = engine._apply_choice(state, {
+            "action": "composite_event",
+            "effects": [{"type": "upgrade_card", "card_id": "Searing Blow+2"}],
+        })
+        self.assertEqual(result["deck"], ["Searing Blow+3"])
+
+    def test_composite_upgrade_drops_target_absent_from_deck(self):
+        engine = STSInferenceEngine.__new__(STSInferenceEngine)
+        state = {"deck": ["Bash"], "relics": []}
+        result = engine._apply_choice(state, {
+            "action": "composite_event",
+            "effects": [{"type": "upgrade_card", "card_id": "Unknown"}],
+        })
+        self.assertEqual(result["deck"], ["Bash"])
+
+    def test_pick_card_canonicalizes_display_form_target(self):
+        engine = STSInferenceEngine.__new__(STSInferenceEngine)
+        state = {"deck": ["Bash"], "relics": []}
+        result = engine._apply_choice(
+            state, {"action": "pick_card", "target": "Bash+"}
+        )
+        self.assertEqual(result["deck"], ["Bash", "Bash+1"])
+
+    def test_replace_starter_strikes_removes_upgraded_strikes(self):
+        engine = STSInferenceEngine.__new__(STSInferenceEngine)
+        state = {
+            "deck": ["Strike_R", "Strike_R+1", "Defend_R", "Bash"],
+            "relics": [],
+        }
+        result = engine._apply_choice(state, {
+            "action": "composite_event",
+            "effects": [{"type": "replace_starter_strikes", "amount": 5}],
+        })
+        self.assertEqual(result["deck"], ["Defend_R", "Bash"] + ["Bite"] * 5)
+
+    def test_upgrade_matching_leaves_upgraded_starters_alone(self):
+        engine = STSInferenceEngine.__new__(STSInferenceEngine)
+        state = {"deck": ["Strike_R", "Defend_R+1", "Bash"], "relics": []}
+        result = engine._apply_choice(state, {
+            "action": "composite_event",
+            "effects": [{"type": "upgrade_matching"}],
+        })
+        self.assertEqual(result["deck"], ["Strike_R+1", "Defend_R+1", "Bash"])
+
+    def test_bare_remove_ladder_falls_through_to_upgraded_copy(self):
+        engine = STSInferenceEngine.__new__(STSInferenceEngine)
+        state = {"deck": ["Strike_R+1", "Strike_R"], "relics": []}
+        result = engine._apply_choice(state, {
+            "action": "composite_event",
+            "effects": [{"type": "remove_card", "amount": 2}],
+        })
+        self.assertEqual(result["deck"], [])
+
+    def test_rank_cards_for_purpose_respects_suffixed_exclusions(self):
+        engine = STSInferenceEngine.__new__(STSInferenceEngine)
+        engine.evaluate_state = lambda state: 1.0
+        state = {"deck": ["Defend_R", "Strike_R+2", "Bash"], "relics": []}
+        ranked = engine.rank_cards_for_purpose(
+            state, "purge", 1, exclude_ids={"Strike_R+2"}
+        )
+        self.assertEqual(ranked, ["Defend_R"])
+
+    def test_rank_cards_for_purpose_skips_upgraded_cards_for_upgrade(self):
+        engine = STSInferenceEngine.__new__(STSInferenceEngine)
+        engine.evaluate_state = lambda state: 1.0
+        state = {"deck": ["Strike_R+1", "Bash"], "relics": []}
+        ranked = engine.rank_cards_for_purpose(state, "upgrade", 2)
+        self.assertNotIn("Strike_R+1", ranked)
+        self.assertEqual(ranked, ["Bash"])
+
+
     def test_v9_checkpoint_round_trip(self):
         model = self._model()
         config = {

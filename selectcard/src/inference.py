@@ -3,7 +3,7 @@ import copy
 try:
     from .model import STSValueNetwork
     from .checkpointing import load_checkpoint
-    from .encoding import ItemVocabulary, encode_items
+    from .encoding import ItemVocabulary, encode_items, parse_item_name
     from .dataset import GlobalFeatureEncoder
     from .config import Config
     from .data_contract import HAZARD_ENDPOINTS, HAZARD_OUTPUT_DIM
@@ -13,17 +13,112 @@ try:
 except ImportError:
     from model import STSValueNetwork
     from checkpointing import load_checkpoint
-    from encoding import ItemVocabulary, encode_items
+    from encoding import ItemVocabulary, encode_items, parse_item_name
     from dataset import GlobalFeatureEncoder
     from config import Config
     from data_contract import HAZARD_ENDPOINTS, HAZARD_OUTPUT_DIM
     from boss_context import NUM_BOSS_IDS, boss_id, get_visible_boss
     from character_context import NUM_CHARACTER_IDS, character_id
     import map_context
-import re
 
 
 V2_ITEM_TOKEN_BUDGET = 64  # v2 checkpoints were trained with this item budget
+
+
+def resolve_deck_entry(deck, target):
+    """The deck entry ``target`` denotes, or None when the deck has no such card.
+
+    Deck entries carry the training convention's upgrade suffix (``Bash+1``),
+    while a target may arrive bare (``Bash``) or in the display form the shop
+    screen produces (``Bash+``).  An exact match wins, since the framework
+    sends references on both sides; otherwise match on ``(base, level)``, where
+    a bare target means the unupgraded copy.
+    """
+    if target in deck:
+        return target
+    if not isinstance(target, str) or not target:
+        return None
+    wanted = parse_item_name(target)
+    for entry in deck:
+        if parse_item_name(entry) == wanted:
+            return entry
+    return None
+
+
+def upgraded_reference(reference):
+    """The reference for one upgrade applied to ``reference``."""
+    base, level = parse_item_name(reference)
+    return f"{base}+{level + 1}"
+
+
+def upgrade_level(reference):
+    """Upgrade level encoded in a card reference (0 = unupgraded)."""
+    return parse_item_name(reference)[1]
+
+
+def canonical_reference(reference):
+    """Rewrite a card reference into the deck's canonical ``ID``/``ID+N`` form.
+
+    Targets can arrive in the shop screen's display spelling (``Bash+``); the
+    deck should only ever hold one spelling so exact-match lookups keep working.
+    Non-string and empty inputs are returned unchanged.
+    """
+    if not isinstance(reference, str) or not reference:
+        return reference
+    base_name, level = parse_item_name(reference)
+    if level <= 0:
+        return base_name
+    return f"{base_name}+{level}"
+
+
+def base_card_name(reference):
+    """Base name of a card reference, ignoring any upgrade level."""
+    return parse_item_name(reference)[0]
+
+
+STARTER_ORDER = (
+    "Strike_R", "Strike_G", "Strike_B", "Strike_P", "Strike",
+    "Defend_R", "Defend_G", "Defend_B", "Defend_P", "Defend",
+)
+
+STARTER_STRIKES = frozenset({"Strike_R", "Strike_G", "Strike_B", "Strike_P", "Strike"})
+
+STARTER_STRIKE_AND_DEFENDS = frozenset(STARTER_ORDER)
+
+
+def prefer_unupgraded_entry(deck, base_name):
+    """First deck entry named ``base_name``, preferring the unupgraded copy."""
+    fallback = None
+    for entry in deck:
+        entry_base, level = parse_item_name(entry)
+        if entry_base != base_name:
+            continue
+        if level == 0:
+            return entry
+        if fallback is None:
+            fallback = entry
+    return fallback
+
+
+def resolve_starter_entry(deck):
+    """The starter card an unqualified removal should take, or None."""
+    for base_name in STARTER_ORDER:
+        entry = prefer_unupgraded_entry(deck, base_name)
+        if entry is not None:
+            return entry
+    return None
+
+
+def _is_excluded(card, exclude_ids):
+    """Whether ``card`` is barred by ``exclude_ids``.
+
+    Exclusion sets and deck entries normally share a spelling, but tolerate the
+    display form (``Bash+``) so an exclusion can never silently miss.
+    """
+    if card in exclude_ids:
+        return True
+    wanted = parse_item_name(card)
+    return any(parse_item_name(excluded) == wanted for excluded in exclude_ids)
 
 
 def compose_hazard_value(hazards, heart_conditional, floor, heart_bonus_floors=None):
@@ -322,55 +417,48 @@ class STSInferenceEngine:
                     new_state["gold"] = 0
                 elif e_type == "remove_card":
                     card_id = effect.get("card_id")
-                    if card_id and card_id in new_state["deck"]:
-                        new_state["deck"].remove(card_id)
-                    elif not card_id:
+                    if card_id:
+                        entry = resolve_deck_entry(new_state["deck"], card_id)
+                        if entry is not None:
+                            new_state["deck"].remove(entry)
+                    else:
+                        # Unqualified removal: take the first starter still in the
+                        # deck, preferring its unupgraded copy.
                         for _ in range(effect.get("amount", 1)):
-                            if "Strike_R" in new_state["deck"]:
-                                new_state["deck"].remove("Strike_R")
-                            elif "Strike_G" in new_state["deck"]:
-                                new_state["deck"].remove("Strike_G")
-                            elif "Strike_B" in new_state["deck"]:
-                                new_state["deck"].remove("Strike_B")
-                            elif "Strike_P" in new_state["deck"]:
-                                new_state["deck"].remove("Strike_P")
-                            elif "Strike" in new_state["deck"]:
-                                new_state["deck"].remove("Strike")
-                            elif "Defend_R" in new_state["deck"]:
-                                new_state["deck"].remove("Defend_R")
-                            elif "Defend_G" in new_state["deck"]:
-                                new_state["deck"].remove("Defend_G")
-                            elif "Defend_B" in new_state["deck"]:
-                                new_state["deck"].remove("Defend_B")
-                            elif "Defend_P" in new_state["deck"]:
-                                new_state["deck"].remove("Defend_P")
-                            elif "Defend" in new_state["deck"]:
-                                new_state["deck"].remove("Defend")
+                            entry = resolve_starter_entry(new_state["deck"])
+                            if entry is None:
+                                break
+                            new_state["deck"].remove(entry)
                 elif e_type == "random_upgrade":
                     amount = effect.get("amount", 1)
                     chosen = self.rank_cards_for_purpose(new_state, "upgrade", amount)
                     for target_card in chosen:
-                        if target_card in new_state["deck"] and "+" not in target_card:
-                            new_state["deck"].remove(target_card)
-                            new_state["deck"].append(target_card + "+1")
+                        if upgrade_level(target_card) != 0:
+                            continue
+                        entry = resolve_deck_entry(new_state["deck"], target_card)
+                        if entry is not None:
+                            new_state["deck"].remove(entry)
+                            new_state["deck"].append(upgraded_reference(entry))
                 elif e_type == "upgrade_card":
-                    target_card = effect.get("card_id")
-                    if target_card and target_card in new_state["deck"]:
-                        new_state["deck"].remove(target_card)
-                        match = re.match(r"(Searing Blow)\+(\d+)", target_card)
-                        if match:
-                            new_state["deck"].append(f"Searing Blow+{int(match.group(2)) + 1}")
-                        elif target_card == "Searing Blow":
-                            new_state["deck"].append("Searing Blow+1")
-                        elif not target_card.endswith("+1"):
-                            new_state["deck"].append(target_card + "+1")
-                    else:
-                        new_state["deck"].append(target_card)
+                    entry = resolve_deck_entry(
+                        new_state["deck"], effect.get("card_id")
+                    )
+                    if entry is not None:
+                        base_name, level = parse_item_name(entry)
+                        new_state["deck"].remove(entry)
+                        if level == 0:
+                            new_state["deck"].append(f"{base_name}+1")
+                        elif base_name == "Searing Blow":
+                            # The only card that can be upgraded repeatedly.
+                            new_state["deck"].append(upgraded_reference(entry))
+                        else:
+                            new_state["deck"].append(entry)
                 elif e_type == "duplicate":
                     target_card = effect.get("card_id")
                     amount = effect.get("amount", 1)
-                    if target_card and target_card in new_state["deck"]:
-                        new_state["deck"].extend([target_card] * amount)
+                    entry = resolve_deck_entry(new_state["deck"], target_card)
+                    if entry is not None:
+                        new_state["deck"].extend([entry] * amount)
                 elif e_type == "obtain_relic":
                     relic_id = effect["relic_id"]
                     replacements = {
@@ -407,13 +495,9 @@ class STSInferenceEngine:
                             if card in new_state["deck"]:
                                 new_state["deck"].remove(card)
                     elif relic_id == "Pandora's Box":
-                        starters = {
-                            "Strike_R", "Strike_G", "Strike_B", "Strike_P", "Strike",
-                            "Defend_R", "Defend_G", "Defend_B", "Defend_P", "Defend",
-                        }
                         new_state["deck"] = [
                             card for card in new_state["deck"]
-                            if re.sub(r"\+\d*$", "", card) not in starters
+                            if base_card_name(card) not in STARTER_STRIKE_AND_DEFENDS
                         ]
                     elif relic_id == "Calling Bell" and not _should_block_curse_add("CurseOfTheBell"):
                         new_state["deck"].append("CurseOfTheBell")
@@ -442,19 +526,31 @@ class STSInferenceEngine:
                 elif e_type == "upgrade_all_cards":
                     new_state["deck"] = [card if "+" in card else card + "+1" for card in new_state["deck"]]
                 elif e_type == "upgrade_matching":
-                    starters = {"Strike_R", "Strike_G", "Strike_B", "Strike_P", "Strike", "Defend_R", "Defend_G", "Defend_B", "Defend_P", "Defend"}
-                    new_state["deck"] = [card + "+1" if card in starters else card for card in new_state["deck"]]
+                    # Upgrades starter Strike/Defend cards that can still upgrade.
+                    # Already upgraded copies stay put, matching the vanilla
+                    # effect, which only ever offers upgradeable cards.
+                    new_state["deck"] = [
+                        f"{base_card_name(card)}+1"
+                        if base_card_name(card) in STARTER_STRIKE_AND_DEFENDS
+                        and upgrade_level(card) == 0
+                        else card
+                        for card in new_state["deck"]
+                    ]
                 elif e_type == "replace_starter_strikes":
-                    starters = {"Strike_R", "Strike_G", "Strike_B", "Strike_P", "Strike"}
-                    new_state["deck"] = [card for card in new_state["deck"] if card not in starters]
+                    # Vampires replaces every starter Strike by tag, so the
+                    # upgrade level is deliberately ignored here.
+                    new_state["deck"] = [
+                        card for card in new_state["deck"]
+                        if base_card_name(card) not in STARTER_STRIKES
+                    ]
                     new_state["deck"].extend([effect.get("card_id", "Bite")] * effect.get("amount", 5))
         elif action == "singing_bowl":
             new_state["max_hp"] += 2
             new_state["hp"] += 2
         elif action == "pick_card" and target:
-            new_state["deck"].append(target)
+            new_state["deck"].append(canonical_reference(target))
         elif action == "buy_card" and target:
-            new_state["deck"].append(target)
+            new_state["deck"].append(canonical_reference(target))
             new_state["gold"] -= choice.get("cost", 0)
         elif action == "buy_relic" and target:
             new_state["relics"].append(target)
@@ -462,27 +558,32 @@ class STSInferenceEngine:
         elif action == "buy_potion":
             new_state["gold"] -= choice.get("cost", 0)
         elif action == "remove_card" and target:
-            if target in new_state["deck"]:
-                new_state["deck"].remove(target)
+            entry = resolve_deck_entry(new_state["deck"], target)
+            if entry is not None:
+                new_state["deck"].remove(entry)
             new_state["gold"] -= choice.get("cost", 0)
         elif action == "tosh" and target:
-            if target in new_state["deck"]:
-                new_state["deck"].remove(target)
+            entry = resolve_deck_entry(new_state["deck"], target)
+            if entry is not None:
+                new_state["deck"].remove(entry)
         elif action == "duplicate" and target:
-            if target in new_state["deck"]:
-                new_state["deck"].append(target)
+            entry = resolve_deck_entry(new_state["deck"], target)
+            if entry is not None:
+                new_state["deck"].append(entry)
         elif action == "upgrade_card" and target:
-            if target in new_state["deck"]:
-                new_state["deck"].remove(target)
-                match = re.match(r"(Searing Blow)\+(\d+)", target)
-                if match:
-                    new_state["deck"].append(f"Searing Blow+{int(match.group(2)) + 1}")
-                elif target == "Searing Blow":
-                    new_state["deck"].append("Searing Blow+1")
-                elif not target.endswith("+1"):
-                    new_state["deck"].append(target + "+1")
+            # A target the deck does not hold must not invent a card: every
+            # other branch here no-ops on a miss, and the framework only sends
+            # targets it resolved from the deck.
+            entry = resolve_deck_entry(new_state["deck"], target)
+            if entry is not None:
+                base_name, level = parse_item_name(entry)
+                new_state["deck"].remove(entry)
+                if level == 0:
+                    new_state["deck"].append(f"{base_name}+1")
+                elif base_name == "Searing Blow":
+                    new_state["deck"].append(upgraded_reference(entry))
                 else:
-                    new_state["deck"].append(target)
+                    new_state["deck"].append(entry)
         elif action == "rest":
             heal_amt = int(new_state["max_hp"] * 0.3)
             if "Regal Pillow" in new_state["relics"]:
@@ -568,7 +669,9 @@ class STSInferenceEngine:
                 best_card_to_upgrade = None
 
                 deck = current_state.get("deck", [])
-                unique_unupgraded = list(dict.fromkeys(c for c in deck if "+" not in c))
+                unique_unupgraded = list(
+                    dict.fromkeys(c for c in deck if upgrade_level(c) == 0)
+                )
 
                 if not unique_unupgraded:
                     hypothetical_state = self._apply_choice(current_state, choice)
@@ -660,8 +763,10 @@ class STSInferenceEngine:
         scored = []
 
         for card in unique_cards:
-            if exclude_ids and card in exclude_ids:
-                non_excluded = [c for c in unique_cards if c not in exclude_ids]
+            if exclude_ids and _is_excluded(card, exclude_ids):
+                non_excluded = [
+                    c for c in unique_cards if not _is_excluded(c, exclude_ids)
+                ]
                 if non_excluded:
                     continue
 
@@ -670,19 +775,11 @@ class STSInferenceEngine:
                 if card in hypo_state["deck"]:
                     hypo_state["deck"].remove(card)
             elif purpose == "upgrade":
-                if "+" in card:
+                if upgrade_level(card) > 0:
                     continue
                 if card in hypo_state["deck"]:
                     hypo_state["deck"].remove(card)
-                    match = re.match(r"(Searing Blow)\+(\d+)", card)
-                    if match:
-                        hypo_state["deck"].append(f"Searing Blow+{int(match.group(2)) + 1}")
-                    elif card == "Searing Blow":
-                        hypo_state["deck"].append("Searing Blow+1")
-                    elif not card.endswith("+1"):
-                        hypo_state["deck"].append(card + "+1")
-                    else:
-                        hypo_state["deck"].append(card)
+                    hypo_state["deck"].append(upgraded_reference(card))
             elif purpose == "duplicate":
                 if card in hypo_state["deck"]:
                     hypo_state["deck"].append(card)
