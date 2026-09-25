@@ -1,4 +1,4 @@
-"""Tests for the v3 map/key/plan context data layer."""
+"""Tests for the map/key/history context data layer."""
 
 import gzip
 import json
@@ -8,14 +8,12 @@ import unittest
 import sts_mapgen
 from map_context import (
     FLAG_BURNING,
-    FLAG_ON_PLAN,
     FLAG_REACHABLE,
     FLAG_VALID,
     FLAG_VISITED,
     HISTORY_HORIZON,
     MAP_CONTEXT_VERSION,
     MAP_GRID_CELLS,
-    PLAN_HORIZON,
     ROOM_SYMBOL_TO_ID,
     RunMapContextBuilder,
     build_run_contexts,
@@ -116,16 +114,9 @@ class RunMapContextBuilderTests(unittest.TestCase):
         self.assertEqual(context["act"], 1)
         self.assertEqual(len(context["map_rooms"]), MAP_GRID_CELLS)
         self.assertEqual(len(context["map_flags"]), MAP_GRID_CELLS)
-        self.assertEqual(len(context["plan_rooms"]), PLAN_HORIZON)
+        self.assertNotIn("plan_rooms", context)
         self.assertEqual(len(context["history_rooms"]), HISTORY_HORIZON)
         self.assertEqual(len(context["key_states"]), 3)
-
-    def test_plan_matches_realized_path_suffix(self):
-        # Floor 3 -> act 1, row 2; the next realized room only (horizon 1).
-        context = self.builder.context_for_floor(3)
-        self.assertEqual(
-            context["plan_rooms"], [ROOM_SYMBOL_TO_ID["M"]]
-        )
 
     def test_history_is_current_act_most_recent_first(self):
         # Floor 9 -> act 1, row 8; walked rooms = symbols[:8] reversed.
@@ -147,23 +138,12 @@ class RunMapContextBuilderTests(unittest.TestCase):
             [ROOM_SYMBOL_TO_ID["M"]] + [0] * (HISTORY_HORIZON - 1),
         )
 
-    def test_mid_act_death_does_not_shorten_plan(self):
-        # Anti-leak regression: a run that stops mid-act still has a full
-        # 1-room plan for every floor before its terminal floor (the player
-        # always enters the room they die in).  Padding length must not be a
-        # readable death signal.
+    def test_mid_act_death_history_contains_no_future_rooms(self):
         died = {
             "seed_played": "not-a-seed",
             "path_per_floor": ["M", "?", "$", "E", "R"],
         }
         builder = RunMapContextBuilder(died)
-        for floor in (1, 2, 3, 4):
-            context = builder.context_for_floor(floor)
-            self.assertEqual(len(context["plan_rooms"]), PLAN_HORIZON)
-            self.assertNotEqual(context["plan_rooms"][0], 0)
-        # Only the terminal floor itself has no next room.
-        terminal = builder.context_for_floor(5)
-        self.assertEqual(terminal["plan_rooms"], [0] * PLAN_HORIZON)
         # History is the walked prefix of this act, most recent first, and
         # never contains the current or any future room.
         expected_by_floor = {
@@ -214,14 +194,14 @@ class RunMapContextBuilderTests(unittest.TestCase):
         values = [self.builder.context_for_floor(f)["key_states"][1] for f in floors]
         self.assertEqual(values, sorted(values))
 
-    def test_missing_seed_degrades_to_plan_only(self):
+    def test_missing_seed_degrades_to_history_only(self):
         run = dict(self.event)
         run["seed_played"] = "not-a-seed"
         builder = RunMapContextBuilder(run)
         self.assertIsNone(builder.seed)
         context = builder.context_for_floor(3)
         self.assertFalse(any(context["map_rooms"]))
-        self.assertTrue(any(context["plan_rooms"]))
+        self.assertTrue(any(context["history_rooms"]))
         self.assertEqual(context["key_states"][0], 0)  # ruby needs recall only
 
     def test_build_run_contexts_matches_individual_calls(self):
@@ -244,7 +224,7 @@ class InferenceContextTests(unittest.TestCase):
              "children": [{"x": 4, "y": 5}]},
             {"x": 3, "y": 4, "symbol": "R", "burning": False, "children": []},
         ],
-        "plan": ["R", "E"],
+        "plan": ["R", "E"],  # ignored: router plans are not model input
         "history": ["M", "E", "R"],
         "keys": {"ruby": True, "emerald": False, "sapphire": False},
     }
@@ -258,10 +238,9 @@ class InferenceContextTests(unittest.TestCase):
         self.assertTrue(context["map_flags"][3 * 7 + 3] & FLAG_VISITED)
         self.assertTrue(context["map_flags"][4 * 7 + 4] & FLAG_REACHABLE)
         self.assertFalse(context["map_flags"][3 * 7 + 4] & FLAG_REACHABLE)
-        self.assertEqual(
-            context["plan_rooms"][:1],
-            [ROOM_SYMBOL_TO_ID["R"]],
-        )
+        self.assertEqual((context["map_flags"][3 * 7 + 3] >> 4) & 3, 2)
+        self.assertEqual((context["map_flags"][4 * 7 + 4] >> 6) & 3, 1)
+        self.assertNotIn("plan_rooms", context)
         # Chronological input becomes most-recent-first packing.
         self.assertEqual(
             context["history_rooms"][:3],
@@ -273,7 +252,7 @@ class InferenceContextTests(unittest.TestCase):
     def test_empty_state_degrades(self):
         context = inference_context({})
         self.assertEqual(context["map_rooms"], [0] * MAP_GRID_CELLS)
-        self.assertEqual(context["plan_rooms"], [0] * PLAN_HORIZON)
+        self.assertNotIn("plan_rooms", context)
         self.assertEqual(context["history_rooms"], [0] * HISTORY_HORIZON)
         self.assertEqual(context["key_states"], [0, 0, 0])
 
@@ -285,18 +264,18 @@ class FeatureDecodeTests(unittest.TestCase):
         index = 4 * 7 + 2
         map_rooms[index] = ROOM_SYMBOL_TO_ID["E"]
         map_flags[index] = (
-            FLAG_VALID | FLAG_BURNING | FLAG_VISITED | FLAG_REACHABLE | FLAG_ON_PLAN
-            | (2 << 5) | (1 << 7)
+            FLAG_VALID | FLAG_BURNING | FLAG_VISITED | FLAG_REACHABLE
+            | (2 << 4) | (1 << 6)
         )
         rooms, flags = decode_map_features(map_rooms, map_flags)
         self.assertEqual(len(rooms), MAP_GRID_CELLS)
-        self.assertEqual(len(flags[0]), 8)
+        self.assertEqual(len(flags[0]), 7)
         row = flags[index]
-        self.assertEqual(row[:4], [1.0, 1.0, 1.0, 1.0])
-        self.assertAlmostEqual(row[4], 2 / 6)
-        self.assertAlmostEqual(row[5], 4 / 14)
-        self.assertAlmostEqual(row[6], 2 / 3)
-        self.assertAlmostEqual(row[7], 1 / 3)
+        self.assertEqual(row[:3], [1.0, 1.0, 1.0])
+        self.assertAlmostEqual(row[3], 2 / 6)
+        self.assertAlmostEqual(row[4], 4 / 14)
+        self.assertAlmostEqual(row[5], 2 / 3)
+        self.assertAlmostEqual(row[6], 1 / 3)
 
     def test_keys_token_features(self):
         map_flags = [FLAG_BURNING] * 3

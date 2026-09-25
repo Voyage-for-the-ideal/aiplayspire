@@ -76,12 +76,14 @@ pip install -r sts_ai_framework/requirements.txt
 
 ```env
 STS_API_BASE_URL=http://localhost:5000
-LLM_MODEL=deepseek-v4-flash
+LLM_MODEL=deepseek-flash[1m]
 DEBUG_PROMPT_FILE=debug/latest_prompt.txt
 
 # DeepSeek API (OpenAI 兼容格式)
 DEEPSEEK_API_KEY=sk-...
 # DEEPSEEK_BASE_URL=https://api.deepseek.com
+# 默认绕过系统代理（Windows 注册表代理无法访问校内端点，会报 APIConnectionError）
+LLM_TRUST_ENV=false
 
 # 自动重开（对局结束后自动开始下一局，需要 CommunicationMod >= 1.4.0）
 AUTO_RESTART=true
@@ -108,7 +110,7 @@ BATTLE_STALL_WARN_SECONDS=300  # 战斗状态无变化的停摆告警阈值（�
 
 ```bash
 cd D:/code/aiplayspire
-python -m sts_ai_framework --model deepseek-v4-flash --interval 2.0
+python -m sts_ai_framework --model deepseek-flash[1m] --interval 2.0
 ```
 
 可用参数：

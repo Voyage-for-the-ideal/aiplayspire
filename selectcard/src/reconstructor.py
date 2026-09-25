@@ -247,6 +247,15 @@ class RunReconstructor:
     def _add_relic(self, relic):
         if self.content_catalog is not None and relic:
             relic = self.content_catalog.canonical_relic_id(relic)
+        replacements = {
+            'Black Blood': ('Burning Blood',),
+            'Ring of the Serpent': ('Ring of the Snake',),
+            'Frozen Core': ('Cracked Core',),
+            'Holy Water': ('PureWater', 'Pure Water'),
+        }
+        for starter in replacements.get(relic, ()):
+            if starter in self.relics:
+                self.relics.remove(starter)
         if relic and relic not in self.relics:
             self.relics.append(relic)
             if relic == 'Omamori':
@@ -419,6 +428,18 @@ class RunReconstructor:
         return True
         
     def replay(self) -> Generator[Dict, None, None]:
+        implicit_applied_floors = set()
+
+        def apply_implicit_changes(floor):
+            if self._is_dry_run or floor <= 0 or floor in implicit_applied_floors:
+                return
+            for card in self._implicit_removals.get(floor, []):
+                self._remove_card(card)
+            for card in self._implicit_additions.get(floor, []):
+                self.deck.append(card)
+                self._handle_egg_upgrade(card)
+            implicit_applied_floors.add(floor)
+
         purchases = {}
         for i, floor in enumerate(self.raw_data.get('item_purchase_floors', [])):
             if i < len(self.raw_data.get('items_purchased', [])):
@@ -465,6 +486,7 @@ class RunReconstructor:
                 boss_relic = boss_choice.get('picked')
                 if boss_relic:
                     self._add_relic(boss_relic)
+                    apply_implicit_changes(floor)
                     if not getattr(self, '_is_dry_run', False):
                         candidates = (boss_choice.get('not_picked', []) or []) + [boss_relic]
                         yield {
@@ -472,12 +494,14 @@ class RunReconstructor:
                             'hp': self.hp, 'max_hp': self.max_hp, 'gold': self.gold,
                             'ascension': self.ascension, 'candidates': candidates,
                             'picked': boss_relic, 'decision_type': 'boss_relic',
+                            'state_timing': 'post_action',
                         }
             if floor == 34 and len(self.raw_data.get('boss_relics', [])) > 1:
                 boss_choice = self.raw_data['boss_relics'][1]
                 boss_relic = boss_choice.get('picked')
                 if boss_relic:
                     self._add_relic(boss_relic)
+                    apply_implicit_changes(floor)
                     if not getattr(self, '_is_dry_run', False):
                         candidates = (boss_choice.get('not_picked', []) or []) + [boss_relic]
                         yield {
@@ -485,6 +509,7 @@ class RunReconstructor:
                             'hp': self.hp, 'max_hp': self.max_hp, 'gold': self.gold,
                             'ascension': self.ascension, 'candidates': candidates,
                             'picked': boss_relic, 'decision_type': 'boss_relic',
+                            'state_timing': 'post_action',
                         }
 
             if floor in relics_obtained:
@@ -547,12 +572,7 @@ class RunReconstructor:
                         if relic in self.relics:
                             self.relics.remove(relic)
 
-            if not getattr(self, '_is_dry_run', False) and floor > 0:
-                for c in self._implicit_removals.get(floor, []):
-                    self._remove_card(c)
-                for c in self._implicit_additions.get(floor, []):
-                    self.deck.append(c)
-                    self._handle_egg_upgrade(c)
+            apply_implicit_changes(floor)
 
             if floor in card_choices:
                 # 战利品选牌逻辑：已经在最上方先拿了 relics_obtained，所以这里直接判定
@@ -582,6 +602,10 @@ class RunReconstructor:
                 # ==========================================
 
                 for choice in card_choices[floor]:
+                    picked = choice.get('picked')
+                    if picked and picked not in {'SKIP', 'Singing Bowl'}:
+                        self.deck.append(picked)
+                        self._handle_egg_upgrade(picked)
                     if not getattr(self, '_is_dry_run', False):
                         yield {
                             'floor': floor,
@@ -594,11 +618,8 @@ class RunReconstructor:
                             'candidates': (choice.get('not_picked', []) or []) + [choice.get('picked')],
                             'picked': choice.get('picked'),
                             'decision_type': 'card_reward',
+                            'state_timing': 'post_action',
                         }
-                    picked = choice.get('picked')
-                    if picked and picked not in {'SKIP', 'Singing Bowl'}:
-                        self.deck.append(picked)
-                        self._handle_egg_upgrade(picked)
 
     def _purchased_item_type(self, item, all_relics):
         if self.content_catalog is not None:

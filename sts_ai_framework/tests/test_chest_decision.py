@@ -18,7 +18,7 @@ def make_chest_state(relics=None, choice_list=None, can_proceed=True,
         deck=[], hand=[], draw_pile=[], discard_pile=[], exhaust_pile=[],
         draw_pile_size=0, discard_pile_size=0, exhaust_pile_size=0,
         monsters=[], floor=14, act=act, room_phase="COMPLETE", screen_type="CHEST",
-        choice_list=choice_list or ["open"],
+        choice_list=choice_list or ["open"], character="DEFECT",
     )
     state.relics = relics or []
     state.can_proceed = can_proceed

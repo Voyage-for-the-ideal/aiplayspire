@@ -21,8 +21,8 @@ score(choice) = Σ pᵢ·V(S′ᵢ)。随机效果（random_relic / random_upgra
 from typing import Dict, List, Optional, Tuple
 
 from ..event_pools import relic_pool
-from ..models import ActionType, GameAction, GameState, visible_boss_of
-from .map_payload import map_context_fields
+from ..models import ActionType, GameAction, GameState
+from .value_payload import relic_state_payload, value_state_payload
 
 # inference.py _apply_choice 的 composite_event 分支支持的效果类型
 SUPPORTED_EFFECT_TYPES = {
@@ -60,33 +60,9 @@ COMBAT = "COMBAT"
 UNSUPPORTED = "UNSUPPORTED"
 
 
-def relic_state_payload(state: GameState) -> List[dict]:
-    """构造带 Omamori 计数修正的遗物 payload（与 DecisionMixin._build_relic_state_payload 一致）。"""
-    payload = []
-    for relic in getattr(state, "relics", []) or []:
-        relic_id = getattr(relic, "id", "")
-        relic_name = getattr(relic, "name", relic_id)
-        counter = getattr(relic, "counter", -1)
-        if (relic_id == "Omamori" or relic_name == "Omamori") and (counter is None or counter < 0):
-            counter = 2
-        payload.append({"id": relic_id, "name": relic_name, "counter": counter})
-    return payload
-
-
 def event_state_payload(state: GameState) -> dict:
     """事件打分用的价值网络输入状态（与 DecisionMixin._event_current_state 一致）。"""
-    return {
-        "hp": state.player.current_hp,
-        "max_hp": state.player.max_hp,
-        "gold": state.player.gold,
-        "floor": state.floor,
-        "ascension": 20,
-        "visible_boss": visible_boss_of(state),
-        **map_context_fields(state),
-        "deck": [card.id for card in state.deck],
-        "relics": [relic.id for relic in state.relics],
-        "relic_states": relic_state_payload(state),
-    }
+    return value_state_payload(state)
 
 
 def guaranteed_hp_loss(choice) -> Optional[int]:

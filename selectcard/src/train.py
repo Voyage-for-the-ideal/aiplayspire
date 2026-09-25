@@ -22,6 +22,7 @@ try:
     )
     from .dataset import (
         ChunkShuffleSampler,
+        CONTEXTUAL_BASELINE_SCHEMA,
         STSDataset,
         build_training_artifacts,
         load_dataset_manifest,
@@ -39,6 +40,7 @@ except ImportError:
     )
     from dataset import (
         ChunkShuffleSampler,
+        CONTEXTUAL_BASELINE_SCHEMA,
         STSDataset,
         build_training_artifacts,
         load_dataset_manifest,
@@ -202,6 +204,119 @@ def weighted_hazard_loss(logits, targets, masks, floors, global_features, band_w
     return hazard_loss + Config.HEART_HEAD_LOSS_WEIGHT * heart_loss
 
 
+def _binary_entropy(rates, *, dtype, device):
+    rates = torch.as_tensor(rates, dtype=dtype, device=device)
+    if rates.shape != (HAZARD_OUTPUT_DIM + 1,):
+        raise ValueError("baseline rates must define every hazard and Heart target")
+    if not torch.isfinite(rates).all() or torch.any((rates < 0.0) | (rates > 1.0)):
+        raise ValueError("baseline rates must be finite probabilities")
+    probabilities = rates.clamp(1e-7, 1.0 - 1e-7)
+    entropy = -(
+        probabilities * torch.log(probabilities)
+        + (1.0 - probabilities) * torch.log1p(-probabilities)
+    )
+    return entropy.clamp_min(Config.BASELINE_ENTROPY_FLOOR)
+
+
+def value_loss_components(
+    logits,
+    targets,
+    masks,
+    floors,
+    global_features,
+    band_weights,
+    baseline_rates,
+    *,
+    key_logits=None,
+    key_labels=None,
+    key_masks=None,
+    loss_mode=None,
+):
+    """Return the training objective and independently inspectable components."""
+    mode = Config.VALUE_LOSS_MODE if loss_mode is None else loss_mode
+    if mode not in {"macro_relative_nll", "micro_nll"}:
+        raise ValueError(f"Unsupported value loss mode: {mode}")
+
+    hazard_targets = targets[:, :HAZARD_OUTPUT_DIM]
+    hazard_masks = masks[:, :HAZARD_OUTPUT_DIM]
+    hazard_elements = nn.functional.binary_cross_entropy_with_logits(
+        logits[:, :HAZARD_OUTPUT_DIM], hazard_targets, reduction="none"
+    )
+    sample_weights = band_weights[ascension_band_tensor(global_features)]
+    weighted_hazard_masks = hazard_masks * sample_weights.unsqueeze(1)
+    hazard_numerators = (hazard_elements * weighted_hazard_masks).sum(dim=0)
+    hazard_denominators = weighted_hazard_masks.sum(dim=0)
+    supervised_heads = hazard_denominators > 0
+    if not supervised_heads.any():
+        raise ValueError("Batch has no supervised hazard targets")
+    per_hazard_nll = hazard_numerators[supervised_heads] / hazard_denominators[
+        supervised_heads
+    ]
+    hazard_micro_nll = hazard_numerators.sum() / hazard_denominators.sum().clamp_min(1.0)
+    hazard_macro_nll = per_hazard_nll.mean()
+
+    entropy = _binary_entropy(
+        baseline_rates, dtype=logits.dtype, device=logits.device
+    )
+    hazard_relative_nll = (
+        per_hazard_nll / entropy[:HAZARD_OUTPUT_DIM][supervised_heads]
+    ).mean()
+
+    heart_target = targets[:, HAZARD_OUTPUT_DIM]
+    heart_mask = masks[:, HAZARD_OUTPUT_DIM]
+    endpoints = torch.as_tensor(
+        HAZARD_ENDPOINTS, dtype=floors.dtype, device=floors.device
+    ).unsqueeze(0)
+    future = endpoints > floors.unsqueeze(1)
+    log_survival = torch.where(
+        future,
+        nn.functional.logsigmoid(-logits[:, :HAZARD_OUTPUT_DIM]),
+        torch.zeros_like(logits[:, :HAZARD_OUTPUT_DIM]),
+    ).sum(dim=1)
+    log_heart_probability = log_survival + nn.functional.logsigmoid(
+        logits[:, HAZARD_OUTPUT_DIM]
+    )
+    negative_heart_nll = -torch.log1p(
+        -torch.exp(log_heart_probability).clamp(max=1.0 - 1e-7)
+    )
+    heart_elements = torch.where(
+        heart_target.bool(), -log_heart_probability, negative_heart_nll
+    )
+    weighted_heart_mask = heart_mask * sample_weights
+    heart_joint_nll = (heart_elements * weighted_heart_mask).sum() / (
+        weighted_heart_mask.sum().clamp_min(1.0)
+    )
+    heart_relative_nll = heart_joint_nll / entropy[HAZARD_OUTPUT_DIM]
+
+    legacy_value = (
+        hazard_micro_nll + Config.HEART_HEAD_LOSS_WEIGHT * heart_joint_nll
+    )
+    relative_value = (
+        hazard_relative_nll
+        + Config.HEART_HEAD_LOSS_WEIGHT * heart_relative_nll
+    ) / (1.0 + Config.HEART_HEAD_LOSS_WEIGHT)
+    value = relative_value if mode == "macro_relative_nll" else legacy_value
+
+    key_bce = logits.sum() * 0.0
+    if key_logits is not None:
+        if key_labels is None or key_masks is None:
+            raise ValueError("key labels and masks are required with key logits")
+        key_bce = _key_head_loss(key_logits, key_labels, key_masks)
+    total = value + Config.KEY_HEAD_LOSS_WEIGHT * key_bce
+    return {
+        "total": total,
+        "value": value,
+        "hazard_micro_nll": hazard_micro_nll,
+        "hazard_macro_nll": hazard_macro_nll,
+        "hazard_relative_nll": hazard_relative_nll,
+        "heart_joint_nll": heart_joint_nll,
+        "heart_relative_nll": heart_relative_nll,
+        "key_bce": key_bce,
+        "legacy_value": legacy_value,
+        "relative_value": relative_value,
+    }
+
+
 def save_training_report(history, output_path):
     """Save epoch-level loss and learning-rate history as a PNG report."""
     if not history:
@@ -223,22 +338,99 @@ def save_training_report(history, output_path):
     import matplotlib.pyplot as plt
 
     epochs = [entry["epoch"] for entry in history]
-    train_losses = [entry["train_loss"] for entry in history]
-    val_losses = [entry["val_loss"] for entry in history]
+    train_losses = [entry.get("train_total", entry.get("train_loss")) for entry in history]
+    train_values = [entry.get("train_value", entry.get("train_loss")) for entry in history]
+    val_losses = [
+        entry.get("val_relative_value_nll", entry.get("val_loss")) for entry in history
+    ]
+    baseline_losses = [
+        entry.get("contextual_baseline_relative_nll", 1.0) for entry in history
+    ]
     learning_rates = [entry["learning_rate"] for entry in history]
-    best_index = min(range(len(val_losses)), key=val_losses.__getitem__)
+    eligible = [
+        index for index, entry in enumerate(history)
+        if entry.get("checkpoint_eligible", True)
+    ]
+    best_index = min(eligible, key=lambda index: val_losses[index]) if eligible else None
 
-    figure, (loss_axis, lr_axis) = plt.subplots(1, 2, figsize=(14, 5))
-    loss_axis.plot(epochs, train_losses, marker="o", label="Train Loss (weighted)")
-    loss_axis.plot(epochs, val_losses, marker="o", label="Validation Loss")
-    loss_axis.scatter(
-        [epochs[best_index]], [val_losses[best_index]], color="tab:red",
-        marker="*", s=160, zorder=3,
-        label=f"Best Validation Loss (Epoch {epochs[best_index]})",
+    figure, axes = plt.subplots(2, 2, figsize=(14, 10))
+    loss_axis, component_axis, mae_axis, lr_axis = axes.flat
+    loss_axis.plot(epochs, train_losses, marker="o", label="Train Total")
+    loss_axis.plot(epochs, train_values, marker="o", label="Train Value")
+    loss_axis.plot(epochs, val_losses, marker="o", label="Validation Relative NLL")
+    loss_axis.plot(
+        epochs, baseline_losses, linestyle="--", label="Contextual Baseline"
     )
-    loss_axis.set(title="Loss History", xlabel="Epoch", ylabel="Loss")
+    if best_index is not None:
+        loss_axis.scatter(
+            [epochs[best_index]], [val_losses[best_index]], color="tab:red",
+            marker="*", s=160, zorder=3,
+            label=f"Best Eligible Checkpoint (Epoch {epochs[best_index]})",
+        )
+    loss_axis.set(title="Objective History", xlabel="Epoch", ylabel="NLL / Relative NLL")
     loss_axis.legend()
     loss_axis.grid(alpha=0.25)
+
+    component_axis.plot(
+        epochs,
+        [entry.get("train_hazard_relative_nll", float("nan")) for entry in history],
+        marker="o",
+        label="Train Hazard Relative NLL",
+    )
+    component_axis.plot(
+        epochs,
+        [entry.get("val_hazard_relative_nll", float("nan")) for entry in history],
+        marker="o",
+        label="Validation Hazard Relative NLL",
+    )
+    component_axis.plot(
+        epochs,
+        [entry.get("train_heart_relative_nll", float("nan")) for entry in history],
+        marker="o",
+        label="Train Heart Relative NLL",
+    )
+    component_axis.plot(
+        epochs,
+        [entry.get("val_heart_relative_nll", float("nan")) for entry in history],
+        marker="o",
+        label="Validation Heart Relative NLL",
+    )
+    component_axis.plot(
+        epochs,
+        [entry.get("train_key_bce", float("nan")) for entry in history],
+        marker="o",
+        label="Train Key BCE",
+    )
+    component_axis.plot(
+        epochs,
+        [entry.get("val_key_bce", float("nan")) for entry in history],
+        marker="o",
+        label="Validation Key BCE",
+    )
+    component_axis.set(
+        title="Objective Components", xlabel="Epoch", ylabel="NLL / BCE"
+    )
+    component_axis.legend(fontsize="small")
+    component_axis.grid(alpha=0.25)
+
+    mae_axis.plot(
+        epochs,
+        [entry.get("terminal_floor_mae", float("nan")) for entry in history],
+        marker="o",
+        label="Model Terminal-floor MAE",
+    )
+    mae_axis.plot(
+        epochs,
+        [
+            entry.get("contextual_baseline_terminal_floor_mae", float("nan"))
+            for entry in history
+        ],
+        linestyle="--",
+        label="Contextual Baseline MAE",
+    )
+    mae_axis.set(title="Terminal-floor MAE", xlabel="Epoch", ylabel="Floors")
+    mae_axis.legend()
+    mae_axis.grid(alpha=0.25)
 
     lr_axis.plot(
         epochs, learning_rates, color="green", marker="s", label="Learning Rate"
@@ -274,8 +466,10 @@ def _classification_metrics(labels, probabilities):
 def model_config(vocab_size):
     try:
         from .boss_context import NUM_BOSS_IDS
+        from .character_context import NUM_CHARACTER_IDS
     except ImportError:
         from boss_context import NUM_BOSS_IDS
+        from character_context import NUM_CHARACTER_IDS
     return {
         "vocab_size": vocab_size,
         "max_upgrade": Config.MAX_UPGRADE,
@@ -284,6 +478,7 @@ def model_config(vocab_size):
         "n_heads": Config.N_HEADS,
         "n_layers": Config.N_LAYERS,
         "num_global_features": Config.NUM_GLOBAL_FEATURES,
+        "num_characters": NUM_CHARACTER_IDS,
         "num_bosses": NUM_BOSS_IDS,
         "dropout": Config.DROPOUT,
         "global_conditioning": Config.GLOBAL_CONDITIONING,
@@ -293,7 +488,6 @@ def model_config(vocab_size):
 
 
 def make_dataset(split, vocabulary, feature_encoder, progress=None):
-    is_train = split == "train"
     return STSDataset(
         Config.DATA_DIR,
         vocabulary,
@@ -304,26 +498,23 @@ def make_dataset(split, vocabulary, feature_encoder, progress=None):
         max_count=Config.MAX_COUNT,
         progress=progress,
         use_map_context=Config.USE_MAP_CONTEXT,
-        # Hindsight-plan dropout is train-only noise; val/test always see it.
-        plan_dropout=Config.PLAN_TOKEN_DROPOUT if is_train else 0.0,
     )
 
 
 def _split_batch(batch, use_map):
     """Unpack a (v2 or v3) dataset batch into common and context parts."""
     if use_map:
-        if len(batch) != 17:
-            raise ValueError("v3 dataset batches must carry 17 tensors")
-        (seq, upgrades, counts, globals_, boss_ids, floors, targets, masks,
-         keys_features, map_rooms, map_flags, plan_rooms, plan_dist,
+        if len(batch) != 16:
+            raise ValueError("map-context dataset batches must carry 16 tensors")
+        (seq, upgrades, counts, globals_, character_ids, boss_ids, floors, targets, masks,
+         keys_features, map_rooms, map_flags,
          history_rooms, history_dist, key_labels, key_masks) = batch
         context = (
-            keys_features, map_rooms, map_flags, plan_rooms, plan_dist,
-            history_rooms, history_dist,
+            keys_features, map_rooms, map_flags, history_rooms, history_dist,
         )
-        return (seq, upgrades, counts, globals_, boss_ids, floors, targets, masks), context, (key_labels, key_masks)
-    if len(batch) != 8:
-        raise ValueError("v2 dataset batches must carry 8 tensors")
+        return (seq, upgrades, counts, globals_, character_ids, boss_ids, floors, targets, masks), context, (key_labels, key_masks)
+    if len(batch) != 9:
+        raise ValueError("non-map dataset batches must carry 9 tensors")
     return tuple(batch), None, None
 
 
@@ -336,10 +527,184 @@ def _key_head_loss(key_logits, key_labels, key_masks):
     return weighted.sum() / key_masks.sum().clamp_min(1.0)
 
 
-def evaluate(model, loader, device, progress=None, name="Evaluation", baseline_rates=None,
-             use_map=False):
+def _numpy_entropy(rates):
+    probabilities = np.clip(np.asarray(rates, dtype=np.float64), 1e-7, 1.0 - 1e-7)
+    entropy = -(
+        probabilities * np.log(probabilities)
+        + (1.0 - probabilities) * np.log1p(-probabilities)
+    )
+    return np.maximum(entropy, Config.BASELINE_ENTROPY_FLOOR)
+
+
+def _nll_metrics(
+    probabilities, targets, masks, baseline_rates, sample_weights=None
+):
+    probabilities = np.clip(np.asarray(probabilities, dtype=np.float64), 1e-7, 1.0 - 1e-7)
+    targets = np.asarray(targets, dtype=np.float64)
+    masks = np.asarray(masks).astype(bool)
+    if sample_weights is None:
+        sample_weights = np.ones(targets.shape[0], dtype=np.float64)
+    sample_weights = np.asarray(sample_weights, dtype=np.float64)
+    if sample_weights.shape != (targets.shape[0],):
+        raise ValueError("sample weights must define every evaluation sample")
+    if not np.isfinite(sample_weights).all() or (sample_weights <= 0.0).any():
+        raise ValueError("sample weights must be finite and greater than zero")
+    entropy = _numpy_entropy(baseline_rates)
+    elements = -(
+        targets * np.log(probabilities)
+        + (1.0 - targets) * np.log1p(-probabilities)
+    )
+    hazard_nlls = []
+    hazard_relative = []
+    for index in range(HAZARD_OUTPUT_DIM):
+        include = masks[:, index]
+        value = (
+            float(
+                np.sum(elements[include, index] * sample_weights[include])
+                / np.sum(sample_weights[include])
+            )
+            if include.any()
+            else float("nan")
+        )
+        hazard_nlls.append(value)
+        hazard_relative.append(float(value / entropy[index]))
+    hazard_mask = masks[:, :HAZARD_OUTPUT_DIM]
+    weighted_hazard_mask = hazard_mask * sample_weights[:, None]
+    hazard_micro = float(
+        np.sum(elements[:, :HAZARD_OUTPUT_DIM] * weighted_hazard_mask)
+        / np.sum(weighted_hazard_mask)
+    )
+    hazard_macro = float(np.nanmean(hazard_nlls))
+    hazard_relative_nll = float(np.nanmean(hazard_relative))
+    heart_include = masks[:, HAZARD_OUTPUT_DIM]
+    heart_nll = float(
+        np.sum(
+            elements[heart_include, HAZARD_OUTPUT_DIM]
+            * sample_weights[heart_include]
+        )
+        / np.sum(sample_weights[heart_include])
+    )
+    heart_relative_nll = float(heart_nll / entropy[HAZARD_OUTPUT_DIM])
+    relative_value = float(
+        hazard_relative_nll
+        + Config.HEART_HEAD_LOSS_WEIGHT * heart_relative_nll
+    ) / float(1.0 + Config.HEART_HEAD_LOSS_WEIGHT)
+    legacy_value = float(
+        hazard_micro + Config.HEART_HEAD_LOSS_WEIGHT * heart_nll
+    )
+    return {
+        "hazard_micro_nll": hazard_micro,
+        "hazard_macro_nll": hazard_macro,
+        "hazard_relative_nll": hazard_relative_nll,
+        "hazard_nll_by_target": hazard_nlls,
+        "hazard_relative_nll_by_target": hazard_relative,
+        "heart_joint_nll": heart_nll,
+        "heart_relative_nll": heart_relative_nll,
+        "relative_value_nll": relative_value,
+        "legacy_value_nll": legacy_value,
+    }
+
+
+def training_objective_metadata(baseline_rates, baseline_statistics, selection=None):
+    metadata = {
+        "schema_version": "macro-relative-nll-v1",
+        "mode": Config.VALUE_LOSS_MODE,
+        "baseline_entropy_floor": Config.BASELINE_ENTROPY_FLOOR,
+        "heart_loss_weight": Config.HEART_HEAD_LOSS_WEIGHT,
+        "key_loss_weight": Config.KEY_HEAD_LOSS_WEIGHT,
+        "global_baseline_rates": [float(value) for value in baseline_rates],
+        "contextual_baseline_schema": baseline_statistics["schema_version"],
+        "contextual_baseline_prior_strength": baseline_statistics["prior_strength"],
+    }
+    if selection is not None:
+        metadata["selection"] = dict(selection)
+    return metadata
+
+
+def checkpoint_eligibility(use_map_context, warmup, model_mae, baseline_mae):
+    """Return deployment-checkpoint eligibility and a stable rejection reason."""
+    if use_map_context and warmup:
+        return False, "warm-up context"
+    if not math.isfinite(model_mae) or not math.isfinite(baseline_mae):
+        return False, "non-finite terminal-floor MAE"
+    if model_mae > baseline_mae:
+        return False, "terminal-floor MAE guard"
+    return True, None
+
+
+def configure_context_curriculum(datasets, epoch, use_map_context, curriculum_epochs):
+    """Keep train/validation context aligned while test remains full-context."""
+    warmup = bool(use_map_context and epoch < curriculum_epochs)
+    if use_map_context:
+        datasets["train"].context_enabled = not warmup
+        datasets["val"].context_enabled = not warmup
+        datasets["test"].context_enabled = True
+    return warmup
+
+
+def _contextual_baseline_probabilities(baseline_statistics, floors, bands):
+    if baseline_statistics.get("schema_version") != CONTEXTUAL_BASELINE_SCHEMA:
+        raise ValueError("Contextual baseline schema is incompatible")
+    global_rates = np.asarray(
+        baseline_statistics["global"]["rates"], dtype=np.float64
+    )
+    if global_rates.shape != (HAZARD_OUTPUT_DIM + 1,):
+        raise ValueError("Contextual baseline global rates are incomplete")
+    predictions = np.broadcast_to(global_rates, (len(floors), len(global_rates))).copy()
+    strata = baseline_statistics.get("strata", {})
+    for row, (floor, band) in enumerate(zip(floors, bands)):
+        key = f"{int(round(float(floor)))}:{int(band)}"
+        entry = strata.get(key)
+        if entry is not None:
+            rates = np.asarray(entry["rates"], dtype=np.float64)
+            if rates.shape != global_rates.shape:
+                raise ValueError(f"Contextual baseline stratum {key} is incomplete")
+            predictions[row] = rates
+    return predictions
+
+
+def _baseline_summary(
+    probabilities,
+    targets,
+    masks,
+    floors,
+    realized_floors,
+    rates,
+    sample_weights=None,
+):
+    values = _nll_metrics(
+        probabilities, targets, masks, rates, sample_weights=sample_weights
+    )
+    future = np.asarray(HAZARD_ENDPOINTS)[None, :] > floors[:, None]
+    survival = np.cumprod(
+        np.where(future, 1.0 - probabilities[:, :HAZARD_OUTPUT_DIM], 1.0), axis=1
+    )
+    previous = np.concatenate(([0.0], np.asarray(HAZARD_ENDPOINTS[:-1])))
+    widths = np.maximum(
+        np.asarray(HAZARD_ENDPOINTS)[None, :]
+        - np.maximum(previous[None, :], floors[:, None]),
+        0.0,
+    )
+    predicted_floors = floors + (widths * survival).sum(axis=1)
+    terminal = masks[:, HAZARD_OUTPUT_DIM].astype(bool)
+    values["terminal_floor_mae"] = float(
+        np.abs(predicted_floors[terminal] - realized_floors[terminal]).mean()
+    )
+    return values
+
+
+def evaluate(
+    model,
+    loader,
+    device,
+    progress=None,
+    name="Evaluation",
+    baseline_rates=None,
+    baseline_statistics=None,
+    band_weights=None,
+    use_map=False,
+):
     model.eval()
-    total_loss = 0.0
     targets = []
     masks = []
     hazard_probabilities = []
@@ -348,22 +713,24 @@ def evaluate(model, loader, device, progress=None, name="Evaluation", baseline_r
     realized_floors = []
     snapshot_floors = []
     ascension_bands = []
+    key_probabilities = []
+    key_targets = []
+    key_target_masks = []
     started = time.monotonic()
     last_progress = started
     with torch.no_grad():
         for batch_index, batch in enumerate(loader, start=1):
-            (seq, upgrades, counts, globals_, boss_ids, floors,
+            (seq, upgrades, counts, globals_, character_ids, boss_ids, floors,
              batch_targets, batch_masks), context, key_batch = _split_batch(batch, use_map)
-            seq, upgrades, counts, globals_, boss_ids, floors, batch_targets, batch_masks = (
+            seq, upgrades, counts, globals_, character_ids, boss_ids, floors, batch_targets, batch_masks = (
                 value.to(device, non_blocking=device.type == "cuda")
                 for value in (
-                    seq, upgrades, counts, globals_, boss_ids, floors,
+                    seq, upgrades, counts, globals_, character_ids, boss_ids, floors,
                     batch_targets, batch_masks,
                 )
             )
             if use_map:
-                (keys_features, map_rooms, map_flags, plan_rooms, plan_dist,
-                 history_rooms, history_dist) = (
+                (keys_features, map_rooms, map_flags, history_rooms, history_dist) = (
                     value.to(device, non_blocking=device.type == "cuda")
                     for value in context
                 )
@@ -372,27 +739,17 @@ def evaluate(model, loader, device, progress=None, name="Evaluation", baseline_r
                     for value in key_batch
                 )
                 logits, key_logits = model(
-                    seq, upgrades, counts, globals_, boss_ids,
+                    seq, upgrades, counts, globals_, character_ids, boss_ids,
                     keys_features=keys_features, map_rooms=map_rooms,
-                    map_flags=map_flags, plan_rooms=plan_rooms,
-                    plan_dist=plan_dist, history_rooms=history_rooms,
+                    map_flags=map_flags, history_rooms=history_rooms,
                     history_dist=history_dist, return_keys=True,
                 )
             else:
-                logits = model(seq, upgrades, counts, globals_, boss_ids)
-            raw_loss = weighted_hazard_loss(
-                logits,
-                batch_targets,
-                batch_masks,
-                floors,
-                globals_,
-                torch.ones(6, dtype=torch.float32, device=device),
-            )
+                logits = model(seq, upgrades, counts, globals_, character_ids, boss_ids)
             if use_map:
-                raw_loss = raw_loss + Config.KEY_HEAD_LOSS_WEIGHT * _key_head_loss(
-                    key_logits, key_labels, key_masks
-                )
-            total_loss += raw_loss.item()
+                key_probabilities.append(torch.sigmoid(key_logits).cpu().numpy())
+                key_targets.append(key_labels.cpu().numpy())
+                key_target_masks.append(key_masks.cpu().numpy())
             hazards, survival, heart_probability = hazard_predictions(logits, floors)
             future = torch.as_tensor(
                 HAZARD_ENDPOINTS, dtype=floors.dtype, device=device
@@ -403,16 +760,18 @@ def evaluate(model, loader, device, progress=None, name="Evaluation", baseline_r
                 torch.ones_like(batch_targets[:, :HAZARD_OUTPUT_DIM]),
             )
             realized_survival = torch.cumprod(realized_factors, dim=1)
-            hazard_probabilities.extend(hazards.cpu().numpy())
-            heart_probabilities.extend(heart_probability.cpu().numpy())
-            predicted_floors.extend(expected_terminal_floor(survival, floors).cpu().numpy())
-            realized_floors.extend(
+            hazard_probabilities.append(hazards.cpu().numpy())
+            heart_probabilities.append(heart_probability.cpu().numpy())
+            predicted_floors.append(
+                expected_terminal_floor(survival, floors).cpu().numpy()
+            )
+            realized_floors.append(
                 expected_terminal_floor(realized_survival, floors).cpu().numpy()
             )
-            snapshot_floors.extend(floors.cpu().numpy())
-            targets.extend(batch_targets.cpu().numpy())
-            masks.extend(batch_masks.cpu().numpy())
-            ascension_bands.extend(
+            snapshot_floors.append(floors.cpu().numpy())
+            targets.append(batch_targets.cpu().numpy())
+            masks.append(batch_masks.cpu().numpy())
+            ascension_bands.append(
                 ascension_band_tensor(globals_).cpu().numpy().reshape(-1)
             )
             now = time.monotonic()
@@ -425,79 +784,139 @@ def evaluate(model, loader, device, progress=None, name="Evaluation", baseline_r
                 progress(
                     f"{name}: {batch_index:,}/{len(loader):,} batches "
                     f"({batch_index / len(loader):.1%}), "
-                    f"loss={total_loss / batch_index:.4f}, "
                     f"rate={batch_index / elapsed:.1f} batches/s"
                 )
                 last_progress = now
     if not targets:
         raise ValueError("Evaluation split has no valid samples")
-    metrics = {"loss": total_loss / len(loader)}
-    targets_array = np.asarray(targets)
-    hazards_array = np.asarray(hazard_probabilities)
-    heart_array = np.asarray(heart_probabilities)
-    masks_array = np.asarray(masks).astype(bool)
-    bands_array = np.asarray(ascension_bands)
+    targets_array = np.concatenate(targets)
+    hazards_array = np.concatenate(hazard_probabilities)
+    heart_array = np.concatenate(heart_probabilities)
+    masks_array = np.concatenate(masks).astype(bool)
+    bands_array = np.concatenate(ascension_bands)
+    if band_weights is None:
+        evaluation_weights = np.ones(len(bands_array), dtype=np.float64)
+    else:
+        raw_weights = np.asarray(band_weights, dtype=np.float64)
+        if raw_weights.shape != (len(ASCENSION_BAND_NAMES),):
+            raise ValueError("band weights must define every ascension band")
+        evaluation_weights = raw_weights[bands_array]
+    floors_array = np.concatenate(snapshot_floors).astype(np.float64)
+    realized_floors_array = np.concatenate(realized_floors).astype(np.float64)
+    if baseline_rates is None:
+        baseline_rates = np.full(HAZARD_OUTPUT_DIM + 1, 0.5, dtype=np.float64)
+    baseline_rates = np.asarray(baseline_rates, dtype=np.float64)
+    joint_probabilities = np.concatenate(
+        [hazards_array, heart_array.reshape(-1, 1)], axis=1
+    )
+    value_metrics = _nll_metrics(
+        joint_probabilities,
+        targets_array,
+        masks_array,
+        baseline_rates,
+        sample_weights=evaluation_weights,
+    )
+    metrics = dict(value_metrics)
     metrics["hazards"] = {}
     for index, component in enumerate(HAZARD_NAMES):
         include = masks_array[:, index]
         component_metrics = _classification_metrics(
             targets_array[include, index], hazards_array[include, index]
         )
+        component_metrics["positive_rate"] = float(targets_array[include, index].mean())
+        component_metrics["nll"] = value_metrics["hazard_nll_by_target"][index]
+        component_metrics["relative_nll"] = value_metrics[
+            "hazard_relative_nll_by_target"
+        ][index]
         component_metrics["samples"] = int(include.sum())
         metrics["hazards"][component] = component_metrics
     heart_include = masks_array[:, HAZARD_OUTPUT_DIM]
     metrics["heart_win"] = _classification_metrics(
         targets_array[heart_include, HAZARD_OUTPUT_DIM], heart_array[heart_include]
     )
+    metrics["heart_win"]["positive_rate"] = float(
+        targets_array[heart_include, HAZARD_OUTPUT_DIM].mean()
+    )
+    metrics["heart_win"]["nll"] = value_metrics["heart_joint_nll"]
+    metrics["heart_win"]["relative_nll"] = value_metrics["heart_relative_nll"]
     metrics["heart_win"]["samples"] = int(heart_include.sum())
-    predicted_floors_array = np.asarray(predicted_floors)
-    realized_floors_array = np.asarray(realized_floors)
+    predicted_floors_array = np.concatenate(predicted_floors)
     metrics["terminal_floor_mae"] = float(
         np.abs(predicted_floors_array[heart_include] - realized_floors_array[heart_include]).mean()
     )
+    if use_map:
+        key_array = np.concatenate(key_probabilities)
+        key_labels_array = np.concatenate(key_targets)
+        key_masks_array = np.concatenate(key_target_masks).astype(bool)
+        key_elements = -(
+            key_labels_array * np.log(np.clip(key_array, 1e-7, 1.0 - 1e-7))
+            + (1.0 - key_labels_array)
+            * np.log1p(-np.clip(key_array, 1e-7, 1.0 - 1e-7))
+        )
+        metrics["key_bce"] = (
+            float(key_elements[key_masks_array].mean())
+            if key_masks_array.any()
+            else 0.0
+        )
+        metrics["keys"] = {}
+        for index, key_name in enumerate(("ruby", "emerald", "sapphire")):
+            include = key_masks_array[:, index]
+            values = _classification_metrics(
+                key_labels_array[include, index], key_array[include, index]
+            )
+            values["positive_rate"] = (
+                float(key_labels_array[include, index].mean())
+                if include.any()
+                else float("nan")
+            )
+            values["nll"] = (
+                float(key_elements[include, index].mean())
+                if include.any()
+                else float("nan")
+            )
+            values["samples"] = int(include.sum())
+            metrics["keys"][key_name] = values
+    else:
+        metrics["key_bce"] = 0.0
+        metrics["keys"] = {}
+    selected_value = (
+        metrics["relative_value_nll"]
+        if Config.VALUE_LOSS_MODE == "macro_relative_nll"
+        else metrics["legacy_value_nll"]
+    )
+    metrics["value"] = selected_value
+    metrics["total"] = selected_value + Config.KEY_HEAD_LOSS_WEIGHT * metrics["key_bce"]
+    metrics["loss"] = metrics["total"]
     if baseline_rates is not None:
-        baseline = np.clip(np.asarray(baseline_rates, dtype=np.float64), 1e-7, 1.0 - 1e-7)
-        if baseline.shape != (HAZARD_OUTPUT_DIM + 1,):
-            raise ValueError("constant baseline must define every hazard and Heart rate")
-        hazard_targets = targets_array[:, :HAZARD_OUTPUT_DIM]
-        hazard_masks = masks_array[:, :HAZARD_OUTPUT_DIM]
-        element_nll = -(
-            hazard_targets * np.log(baseline[:HAZARD_OUTPUT_DIM])
-            + (1.0 - hazard_targets) * np.log(1.0 - baseline[:HAZARD_OUTPUT_DIM])
+        global_predictions = np.broadcast_to(
+            baseline_rates, joint_probabilities.shape
+        ).copy()
+        metrics["constant_baseline"] = _baseline_summary(
+            global_predictions,
+            targets_array,
+            masks_array,
+            floors_array,
+            realized_floors_array,
+            baseline_rates,
+            sample_weights=evaluation_weights,
         )
-        hazard_nll = float(element_nll[hazard_masks].mean())
-        heart_targets = targets_array[heart_include, HAZARD_OUTPUT_DIM]
-        heart_rate = baseline[HAZARD_OUTPUT_DIM]
-        heart_nll = float(
-            -(
-                heart_targets * np.log(heart_rate)
-                + (1.0 - heart_targets) * np.log(1.0 - heart_rate)
-            ).mean()
+    if baseline_statistics is not None:
+        contextual_predictions = _contextual_baseline_probabilities(
+            baseline_statistics, floors_array, bands_array
         )
-        baseline_hazards = np.broadcast_to(
-            baseline[:HAZARD_OUTPUT_DIM], hazards_array.shape
+        metrics["contextual_baseline"] = _baseline_summary(
+            contextual_predictions,
+            targets_array,
+            masks_array,
+            floors_array,
+            realized_floors_array,
+            baseline_rates,
+            sample_weights=evaluation_weights,
         )
-        endpoints = np.asarray(HAZARD_ENDPOINTS, dtype=np.float64)
-        floors_array = np.asarray(snapshot_floors)
-        future = endpoints[None, :] > floors_array[:, None]
-        factors = np.where(future, 1.0 - baseline_hazards, 1.0)
-        baseline_survival = np.cumprod(factors, axis=1)
-        previous = np.concatenate(([0.0], endpoints[:-1]))
-        widths = np.maximum(
-            endpoints[None, :] - np.maximum(previous[None, :], floors_array[:, None]),
-            0.0,
+        baseline_score = metrics["contextual_baseline"]["relative_value_nll"]
+        metrics["skill"] = float(
+            1.0 - metrics["relative_value_nll"] / baseline_score
         )
-        baseline_floors = floors_array + (widths * baseline_survival).sum(axis=1)
-        metrics["constant_baseline"] = {
-            "loss": hazard_nll + Config.HEART_HEAD_LOSS_WEIGHT * heart_nll,
-            "hazard_nll": hazard_nll,
-            "heart_nll": heart_nll,
-            "terminal_floor_mae": float(
-                np.abs(
-                    baseline_floors[heart_include] - realized_floors_array[heart_include]
-                ).mean()
-            ),
-        }
     metrics["by_ascension_band"] = {}
     for band, name in enumerate(ASCENSION_BAND_NAMES):
         include = bands_array == band
@@ -534,6 +953,7 @@ def finish_training(
     vocabulary,
     feature_encoder,
     baseline_rates,
+    baseline_statistics,
     history,
 ):
     """Save the training report, then evaluate the best checkpoint on test.
@@ -555,17 +975,34 @@ def finish_training(
         progress=log,
         name="Test",
         baseline_rates=baseline_rates,
+        baseline_statistics=baseline_statistics,
+        band_weights=raw_band_weights,
         use_map=Config.USE_MAP_CONTEXT,
     )
-    save_checkpoint(
-        final_path,
-        model,
-        architecture,
-        vocabulary,
-        feature_encoder,
+    final_metadata = dict(best_checkpoint.get("metadata", {}))
+    objective = dict(
+        final_metadata.get(
+            "training_objective",
+            training_objective_metadata(baseline_rates, baseline_statistics),
+        )
+    )
+    selection = dict(objective.get("selection", {}))
+    selection.update(
+        {
+            "test_score": test_metrics["relative_value_nll"],
+            "test_skill": test_metrics.get("skill"),
+            "test_terminal_floor_mae": test_metrics["terminal_floor_mae"],
+            "test_contextual_baseline_terminal_floor_mae": test_metrics[
+                "contextual_baseline"
+            ]["terminal_floor_mae"],
+        }
+    )
+    objective["selection"] = selection
+    final_metadata.update(
         {
             "seed": Config.RANDOM_SEED,
             "test_metrics": test_metrics,
+            "training_objective": objective,
             "dataset": {
                 "filter_version": FILTER_VERSION,
                 "content_catalog": manifest["content_catalog"],
@@ -574,10 +1011,18 @@ def finish_training(
                 ]["train_valid_samples_by_ascension_band"],
                 "difficulty_weights": raw_band_weights,
             },
-        },
+        }
+    )
+    save_checkpoint(
+        final_path,
+        model,
+        architecture,
+        vocabulary,
+        feature_encoder,
+        final_metadata,
     )
     log(f"Test metrics: {test_metrics}")
-    log(f"Saved v6 bucket-hazard checkpoints to {Config.CHECKPOINT_DIR}")
+    log(f"Saved bucket-hazard checkpoints to {Config.CHECKPOINT_DIR}")
 
 
 def train_model(test_only=False):
@@ -614,8 +1059,8 @@ def train_model(test_only=False):
         f"val={int(valid_samples.get('val', 0)):,}, "
         f"test={int(valid_samples.get('test', 0)):,} valid samples"
     )
-    vocabulary, feature_encoder = build_training_artifacts(
-        Config.DATA_DIR, progress=log
+    vocabulary, feature_encoder, baseline_statistics = build_training_artifacts(
+        Config.DATA_DIR, progress=log, include_baselines=True
     )
     log(f"Training artifacts ready; vocabulary_size={len(vocabulary):,}")
     datasets = {
@@ -682,12 +1127,22 @@ def train_model(test_only=False):
     )
     raw_band_weights = difficulty_weights(manifest)
     band_weights = torch.tensor(raw_band_weights, dtype=torch.float32, device=device)
-    baseline_rates = constant_hazard_baseline(manifest)
+    baseline_rates = baseline_statistics["global"]["rates"]
+    if Config.VALUE_LOSS_MODE not in {"macro_relative_nll", "micro_nll"}:
+        raise ValueError(f"Unsupported VALUE_LOSS_MODE: {Config.VALUE_LOSS_MODE}")
+    if not 0.0 < Config.BASELINE_ENTROPY_FLOOR:
+        raise ValueError("BASELINE_ENTROPY_FLOOR must be greater than zero")
+    log(
+        f"Training objective: mode={Config.VALUE_LOSS_MODE}; "
+        f"entropy_floor={Config.BASELINE_ENTROPY_FLOOR}; "
+        f"contextual_baseline={baseline_statistics['schema_version']}"
+    )
 
     os.makedirs(Config.CHECKPOINT_DIR, exist_ok=True)
     best_path = os.path.join(Config.CHECKPOINT_DIR, "best_" + Config.CHECKPOINT_NAME)
     final_path = os.path.join(Config.CHECKPOINT_DIR, Config.CHECKPOINT_NAME)
-    best_val_loss = float("inf")
+    best_val_score = float("inf")
+    best_checkpoint_saved = False
     patience_counter = 0
     history = []
 
@@ -706,6 +1161,7 @@ def train_model(test_only=False):
             vocabulary,
             feature_encoder,
             baseline_rates,
+            baseline_statistics,
             history=[],
         )
         return
@@ -716,31 +1172,40 @@ def train_model(test_only=False):
         last_progress = epoch_started
         if device.type == "cuda":
             torch.cuda.reset_peak_memory_stats()
+        warmup = configure_context_curriculum(
+            datasets,
+            epoch,
+            Config.USE_MAP_CONTEXT,
+            Config.CONTEXT_CURRICULUM_EPOCHS,
+        )
         if Config.USE_MAP_CONTEXT:
-            # Curriculum: mask [MAP]/[PLAN] for the warm-up epochs (5.).
-            warmup = epoch < Config.CONTEXT_CURRICULUM_EPOCHS
-            datasets["train"].context_enabled = not warmup
+            # Curriculum: mask map/history context for warm-up epochs.
             log(
-                f"Epoch {epoch + 1}/{Config.EPOCHS}: map/plan context "
-                f"{'masked (curriculum)' if warmup else 'enabled'}"
+                f"Epoch {epoch + 1}/{Config.EPOCHS}: context="
+                f"{'masked' if warmup else 'full'}; "
+                f"checkpoint_eligible={'false' if warmup else 'pending_mae_guard'}"
             )
         log(f"Epoch {epoch + 1}/{Config.EPOCHS}: training started")
         model.train()
-        running_loss = 0.0
+        running = {name: 0.0 for name in (
+            "total", "value", "hazard_micro_nll", "hazard_macro_nll",
+            "hazard_relative_nll", "heart_joint_nll", "heart_relative_nll",
+            "key_bce",
+        )}
+        running_samples = 0
         for batch_index, batch in enumerate(loaders["train"], start=1):
-            (seq, upgrades, counts, globals_, boss_ids, floors, targets, masks), context, key_batch = (
+            (seq, upgrades, counts, globals_, character_ids, boss_ids, floors, targets, masks), context, key_batch = (
                 _split_batch(batch, Config.USE_MAP_CONTEXT)
             )
-            seq, upgrades, counts, globals_, boss_ids, floors, targets, masks = (
+            seq, upgrades, counts, globals_, character_ids, boss_ids, floors, targets, masks = (
                 value.to(device, non_blocking=device.type == "cuda")
                 for value in (
-                    seq, upgrades, counts, globals_, boss_ids, floors, targets, masks,
+                    seq, upgrades, counts, globals_, character_ids, boss_ids, floors, targets, masks,
                 )
             )
             optimizer.zero_grad()
             if Config.USE_MAP_CONTEXT:
-                (keys_features, map_rooms, map_flags, plan_rooms, plan_dist,
-                 history_rooms, history_dist) = (
+                (keys_features, map_rooms, map_flags, history_rooms, history_dist) = (
                     value.to(device, non_blocking=device.type == "cuda")
                     for value in context
                 )
@@ -749,30 +1214,42 @@ def train_model(test_only=False):
                     for value in key_batch
                 )
                 logits, key_logits = model(
-                    seq, upgrades, counts, globals_, boss_ids,
+                    seq, upgrades, counts, globals_, character_ids, boss_ids,
                     keys_features=keys_features, map_rooms=map_rooms,
-                    map_flags=map_flags, plan_rooms=plan_rooms,
-                    plan_dist=plan_dist, history_rooms=history_rooms,
+                    map_flags=map_flags, history_rooms=history_rooms,
                     history_dist=history_dist, return_keys=True,
                 )
-                loss = weighted_hazard_loss(
-                    logits, targets, masks, floors, globals_, band_weights
-                ) + Config.KEY_HEAD_LOSS_WEIGHT * _key_head_loss(
-                    key_logits, key_labels, key_masks
-                )
-            else:
-                loss = weighted_hazard_loss(
-                    model(seq, upgrades, counts, globals_, boss_ids),
+                components = value_loss_components(
+                    logits,
                     targets,
                     masks,
                     floors,
                     globals_,
                     band_weights,
+                    baseline_rates,
+                    key_logits=key_logits,
+                    key_labels=key_labels,
+                    key_masks=key_masks,
                 )
+            else:
+                logits = model(seq, upgrades, counts, globals_, character_ids, boss_ids)
+                components = value_loss_components(
+                    logits,
+                    targets,
+                    masks,
+                    floors,
+                    globals_,
+                    band_weights,
+                    baseline_rates,
+                )
+            loss = components["total"]
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
-            running_loss += loss.item()
+            batch_samples = targets.shape[0]
+            running_samples += batch_samples
+            for component in running:
+                running[component] += components[component].item() * batch_samples
             now = time.monotonic()
             if (
                 batch_index == 1
@@ -788,7 +1265,8 @@ def train_model(test_only=False):
                     f"Epoch {epoch + 1}/{Config.EPOCHS}: "
                     f"{batch_index:,}/{len(loaders['train']):,} batches "
                     f"({batch_index / len(loaders['train']):.1%}), "
-                    f"loss={running_loss / batch_index:.4f}, "
+                    f"total={running['total'] / running_samples:.4f}, "
+                    f"value={running['value'] / running_samples:.4f}, "
                     f"rate={batch_index / epoch_elapsed:.1f} batches/s"
                     f"{gpu_memory}"
                 )
@@ -803,19 +1281,58 @@ def train_model(test_only=False):
             progress=log,
             name=f"Epoch {epoch + 1}/{Config.EPOCHS} validation",
             baseline_rates=baseline_rates,
+            baseline_statistics=baseline_statistics,
+            band_weights=raw_band_weights,
             use_map=Config.USE_MAP_CONTEXT,
         )
-        train_loss = running_loss / len(loaders["train"])
+        train_metrics = {
+            name: value / running_samples for name, value in running.items()
+        }
+        contextual_mae = val_metrics["contextual_baseline"]["terminal_floor_mae"]
+        context_eligible = not (Config.USE_MAP_CONTEXT and warmup)
+        checkpoint_eligible, rejection_reason = checkpoint_eligibility(
+            Config.USE_MAP_CONTEXT,
+            warmup,
+            val_metrics["terminal_floor_mae"],
+            contextual_mae,
+        )
+        mae_guard = val_metrics["terminal_floor_mae"] <= contextual_mae
+        selection_score = val_metrics["relative_value_nll"]
         log(
-            f"Epoch {epoch + 1}/{Config.EPOCHS}: train_loss={train_loss:.4f} "
-            f"val_loss={val_metrics['loss']:.4f} hazards={val_metrics['hazards']} "
-            f"heart={val_metrics['heart_win']}"
+            f"Epoch {epoch + 1}/{Config.EPOCHS}: "
+            f"train_total={train_metrics['total']:.4f} "
+            f"train_value={train_metrics['value']:.4f} "
+            f"train_hazard_rel={train_metrics['hazard_relative_nll']:.4f} "
+            f"train_heart_rel={train_metrics['heart_relative_nll']:.4f} "
+            f"train_key_bce={train_metrics['key_bce']:.4f} "
+            f"val_relative_nll={selection_score:.4f} "
+            f"val_hazard_rel={val_metrics['hazard_relative_nll']:.4f} "
+            f"val_heart_rel={val_metrics['heart_relative_nll']:.4f} "
+            f"val_key_bce={val_metrics['key_bce']:.4f} "
+            f"contextual_baseline={val_metrics['contextual_baseline']['relative_value_nll']:.4f} "
+            f"skill={val_metrics['skill']:.4f} "
+            f"terminal_floor_mae={val_metrics['terminal_floor_mae']:.4f} "
+            f"baseline_mae={contextual_mae:.4f} "
+            f"checkpoint_eligible={str(checkpoint_eligible).lower()}"
         )
         metadata = {
             "epoch": epoch + 1,
             "seed": Config.RANDOM_SEED,
             "split_seed": Config.SPLIT_SEED,
             "validation_metrics": val_metrics,
+            "training_objective": training_objective_metadata(
+                baseline_rates,
+                baseline_statistics,
+                selection={
+                    "score": selection_score,
+                    "skill": val_metrics["skill"],
+                    "terminal_floor_mae": val_metrics["terminal_floor_mae"],
+                    "contextual_baseline_terminal_floor_mae": contextual_mae,
+                    "mae_guard_passed": mae_guard,
+                    "context_eligible": context_eligible,
+                    "checkpoint_eligible": checkpoint_eligible,
+                },
+            ),
             "dataset": {
                 "filter_version": FILTER_VERSION,
                 "content_catalog": manifest["content_catalog"],
@@ -825,22 +1342,50 @@ def train_model(test_only=False):
                 "difficulty_weights": raw_band_weights,
             },
         }
-        is_best = val_metrics["loss"] < best_val_loss
+        is_best = checkpoint_eligible and selection_score < best_val_score
         history.append(
             {
                 "epoch": epoch + 1,
-                "train_loss": train_loss,
-                "val_loss": val_metrics["loss"],
+                "train_total": train_metrics["total"],
+                "train_value": train_metrics["value"],
+                "train_hazard_relative_nll": train_metrics[
+                    "hazard_relative_nll"
+                ],
+                "train_heart_relative_nll": train_metrics[
+                    "heart_relative_nll"
+                ],
+                "train_key_bce": train_metrics["key_bce"],
+                "val_relative_value_nll": selection_score,
+                "contextual_baseline_relative_nll": val_metrics[
+                    "contextual_baseline"
+                ]["relative_value_nll"],
+                "val_hazard_relative_nll": val_metrics["hazard_relative_nll"],
+                "val_heart_relative_nll": val_metrics["heart_relative_nll"],
+                "val_key_bce": val_metrics["key_bce"],
+                "terminal_floor_mae": val_metrics["terminal_floor_mae"],
+                "contextual_baseline_terminal_floor_mae": contextual_mae,
+                "checkpoint_eligible": checkpoint_eligible,
                 "learning_rate": learning_rate,
             }
         )
         if is_best:
-            best_val_loss = val_metrics["loss"]
+            best_val_score = selection_score
+            best_checkpoint_saved = True
             patience_counter = 0
             save_checkpoint(
                 best_path, model, architecture, vocabulary, feature_encoder, metadata
             )
-            log(f"Saved new best checkpoint to {best_path}")
+            log(
+                f"Saved new best checkpoint to {best_path}; "
+                f"selection_score={selection_score:.4f}"
+            )
+        elif not checkpoint_eligible:
+            log(f"Checkpoint rejected: {rejection_reason}")
+        elif not is_best:
+            log(
+                "Checkpoint not selected: eligible but validation relative NLL "
+                f"did not improve best={best_val_score:.4f}"
+            )
         elif epoch + 1 > Config.EARLY_STOPPING_START_EPOCH:
             patience_counter += 1
             if patience_counter >= Config.EARLY_STOPPING_PATIENCE:
@@ -848,6 +1393,29 @@ def train_model(test_only=False):
                     f"Early stopping after {patience_counter} epochs without improvement"
                 )
                 break
+
+    if not best_checkpoint_saved:
+        diagnostic_metadata = {
+            "seed": Config.RANDOM_SEED,
+            "training_objective": training_objective_metadata(
+                baseline_rates,
+                baseline_statistics,
+                selection={"checkpoint_eligible": False, "reason": "no eligible epoch"},
+            ),
+            "diagnostic_only": True,
+        }
+        save_checkpoint(
+            final_path,
+            model,
+            architecture,
+            vocabulary,
+            feature_encoder,
+            diagnostic_metadata,
+        )
+        raise RuntimeError(
+            "No full-context epoch passed the contextual-baseline terminal-floor "
+            f"MAE guard; saved diagnostic checkpoint to {final_path}"
+        )
 
     finish_training(
         model,
@@ -862,6 +1430,7 @@ def train_model(test_only=False):
         vocabulary,
         feature_encoder,
         baseline_rates,
+        baseline_statistics,
         history,
     )
 

@@ -18,11 +18,20 @@ from data_contract import (
 from dataset import STSDataset
 from encoding import ItemVocabulary
 from map_context import (
-    MAP_GRID_CELLS, PLAN_HORIZON, HISTORY_HORIZON, ROOM_SYMBOL_TO_ID,
+    MAP_GRID_CELLS, HISTORY_HORIZON, ROOM_SYMBOL_TO_ID,
 )
 from model import STSValueNetwork
-from train import _key_head_loss, _split_batch
+from train import (
+    _binary_entropy,
+    _contextual_baseline_probabilities,
+    _key_head_loss,
+    _split_batch,
+    checkpoint_eligibility,
+    configure_context_curriculum,
+    value_loss_components,
+)
 from boss_context import NUM_BOSS_IDS
+from character_context import CHARACTER_VOCABULARY, NUM_CHARACTER_IDS, character_id
 
 
 def _v2_model(**overrides):
@@ -32,6 +41,7 @@ def _v2_model(**overrides):
         n_heads=4,
         n_layers=1,
         num_global_features=9,
+        num_characters=NUM_CHARACTER_IDS,
         num_bosses=NUM_BOSS_IDS,
         dropout=0.0,
     )
@@ -49,8 +59,9 @@ def _item_batch(batch=3, items=6):
     upgrades = torch.zeros((batch, items), dtype=torch.long)
     counts = torch.ones((batch, items), dtype=torch.long)
     globals_ = torch.rand((batch, 9))
+    character = torch.zeros((batch,), dtype=torch.long)
     boss = torch.zeros((batch,), dtype=torch.long)
-    return seq, upgrades, counts, globals_, boss
+    return seq, upgrades, counts, globals_, character, boss
 
 
 def _context_batch(batch=3):
@@ -59,71 +70,73 @@ def _context_batch(batch=3):
     map_flags = torch.zeros((batch, MAP_GRID_CELLS), dtype=torch.long)
     map_rooms[:, 0] = ROOM_SYMBOL_TO_ID["M"]
     map_rooms[:, 7] = ROOM_SYMBOL_TO_ID["E"]
-    map_flags[:, 0] = 1 | (2 << 5)
-    map_flags[:, 7] = 1 | 1 | (1 << 2) | (1 << 7)
-    plan_rooms = torch.zeros((batch, PLAN_HORIZON), dtype=torch.long)
-    plan_dist = torch.full((batch, PLAN_HORIZON), PLAN_HORIZON, dtype=torch.long)
-    plan_rooms[:, 0] = ROOM_SYMBOL_TO_ID["R"]
-    plan_dist[:, 0] = 0
+    map_flags[:, 0] = 1 | (2 << 4)
+    map_flags[:, 7] = 1 | (1 << 2) | (1 << 6)
     history_rooms = torch.zeros((batch, HISTORY_HORIZON), dtype=torch.long)
     history_dist = torch.full((batch, HISTORY_HORIZON), HISTORY_HORIZON, dtype=torch.long)
     history_rooms[:, 0] = ROOM_SYMBOL_TO_ID["E"]
     history_dist[:, 0] = 0
     keys_features = torch.rand((batch, 6))
-    return (keys_features, map_rooms, map_flags, plan_rooms, plan_dist,
-            history_rooms, history_dist)
+    return keys_features, map_rooms, map_flags, history_rooms, history_dist
 
 
 class ModelTests(unittest.TestCase):
+    def test_character_vocabulary_is_stable_and_strict(self):
+        self.assertEqual(
+            CHARACTER_VOCABULARY,
+            {"IRONCLAD": 0, "THE_SILENT": 1, "DEFECT": 2, "WATCHER": 3},
+        )
+        self.assertEqual(character_id("WATCHER"), 3)
+        for invalid in (None, "SILENT", "UNKNOWN"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                character_id(invalid)
+
     def test_v2_forward_shape_unchanged(self):
         model = _v2_model()
-        seq, upgrades, counts, globals_, boss = _item_batch()
-        logits = model(seq, upgrades, counts, globals_, boss)
+        seq, upgrades, counts, globals_, character, boss = _item_batch()
+        logits = model(seq, upgrades, counts, globals_, character, boss)
         self.assertEqual(logits.shape, (3, 21))
 
     def test_v3_forward_with_context_and_key_head(self):
         model = _v3_model()
-        seq, upgrades, counts, globals_, boss = _item_batch()
+        seq, upgrades, counts, globals_, character, boss = _item_batch()
         context = _context_batch()
         logits, key_logits = model(
-            seq, upgrades, counts, globals_, boss,
+            seq, upgrades, counts, globals_, character, boss,
             keys_features=context[0], map_rooms=context[1],
-            map_flags=context[2], plan_rooms=context[3],
-            plan_dist=context[4], history_rooms=context[5],
-            history_dist=context[6], return_keys=True,
+            map_flags=context[2], history_rooms=context[3],
+            history_dist=context[4], return_keys=True,
         )
         self.assertEqual(logits.shape, (3, 21))
         self.assertEqual(key_logits.shape, (3, 3))
 
     def test_v3_forward_falls_back_to_missing_context(self):
         model = _v3_model()
-        seq, upgrades, counts, globals_, boss = _item_batch()
-        logits = model(seq, upgrades, counts, globals_, boss)
+        seq, upgrades, counts, globals_, character, boss = _item_batch()
+        logits = model(seq, upgrades, counts, globals_, character, boss)
         self.assertEqual(logits.shape, (3, 21))
 
     def test_return_keys_rejected_without_context(self):
         model = _v2_model()
-        seq, upgrades, counts, globals_, boss = _item_batch()
+        seq, upgrades, counts, globals_, character, boss = _item_batch()
         with self.assertRaises(ValueError):
-            model(seq, upgrades, counts, globals_, boss, return_keys=True)
+            model(seq, upgrades, counts, globals_, character, boss, return_keys=True)
 
     def test_v3_backward_pass_updates_context_parameters(self):
         model = _v3_model()
-        seq, upgrades, counts, globals_, boss = _item_batch()
+        seq, upgrades, counts, globals_, character, boss = _item_batch()
         context = _context_batch()
         logits, key_logits = model(
-            seq, upgrades, counts, globals_, boss,
+            seq, upgrades, counts, globals_, character, boss,
             keys_features=context[0], map_rooms=context[1],
-            map_flags=context[2], plan_rooms=context[3],
-            plan_dist=context[4], history_rooms=context[5],
-            history_dist=context[6], return_keys=True,
+            map_flags=context[2], history_rooms=context[3],
+            history_dist=context[4], return_keys=True,
         )
         (logits.sum() + key_logits.sum()).backward()
         grads = [
             p.grad for p in (
                 *self._params(model.map_room_emb),
                 *self._params(model.map_flag_proj),
-                *self._params(model.plan_dist_emb),
                 *self._params(model.hist_dist_emb),
                 *self._params(model.keys_mlp),
                 *self._params(model.key_head),
@@ -154,7 +167,8 @@ class CheckpointCompatTests(unittest.TestCase):
         config = {
             "vocab_size": 32, "max_upgrade": 15, "max_count": 10,
             "d_model": 32, "n_heads": 4, "n_layers": 1,
-            "num_global_features": 9, "num_bosses": NUM_BOSS_IDS,
+            "num_global_features": 9, "num_characters": NUM_CHARACTER_IDS,
+            "num_bosses": NUM_BOSS_IDS,
             "dropout": 0.0, "global_conditioning": "token", "norm_position": "pre",
         }
         restored = self._roundtrip(_v2_model(), config)
@@ -164,7 +178,8 @@ class CheckpointCompatTests(unittest.TestCase):
         config = {
             "vocab_size": 32, "max_upgrade": 15, "max_count": 10,
             "d_model": 32, "n_heads": 4, "n_layers": 1,
-            "num_global_features": 9, "num_bosses": NUM_BOSS_IDS,
+            "num_global_features": 9, "num_characters": NUM_CHARACTER_IDS,
+            "num_bosses": NUM_BOSS_IDS,
             "dropout": 0.0, "global_conditioning": "token", "norm_position": "pre",
             "use_map_context": True,
         }
@@ -193,6 +208,8 @@ class DatasetContextTests(unittest.TestCase):
                 "deck": "Strike_R,Bash",
                 "relics": "Burning Blood",
                 "ascension_band": 3,
+                "character": "IRONCLAD",
+                "state_timing": "post_action",
                 "visible_boss": "NO_BOSS",
                 "preprocessing_version": PREPROCESSING_VERSION,
                 "filter_version": FILTER_VERSION,
@@ -201,7 +218,6 @@ class DatasetContextTests(unittest.TestCase):
                 "act": 1,
                 "map_rooms": [ROOM_SYMBOL_TO_ID["M"]] + [0] * (MAP_GRID_CELLS - 1),
                 "map_flags": [1] * MAP_GRID_CELLS,
-                "plan_rooms": [ROOM_SYMBOL_TO_ID["R"]],
                 "history_rooms": [ROOM_SYMBOL_TO_ID["M"], ROOM_SYMBOL_TO_ID["$"]]
                                  + [0] * (HISTORY_HORIZON - 2),
                 "key_states": [0, 0, 0],
@@ -221,14 +237,13 @@ class DatasetContextTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             dataset = self._dataset(self._write_parquet(tmp, self._rows()))
             sample = dataset[0]
-            self.assertEqual(len(sample), 17)
-            (keys_features, map_rooms, map_flags, plan_rooms, plan_dist,
-             history_rooms, history_dist, key_labels, key_masks) = sample[8:]
+            self.assertEqual(len(sample), 16)
+            self.assertEqual(sample[4].item(), 0)  # IRONCLAD
+            (keys_features, map_rooms, map_flags,
+             history_rooms, history_dist, key_labels, key_masks) = sample[9:]
             self.assertEqual(keys_features.shape, (6,))
             self.assertEqual(map_rooms.shape, (MAP_GRID_CELLS,))
             self.assertEqual(map_flags.shape, (MAP_GRID_CELLS,))
-            self.assertEqual(plan_rooms.shape, (PLAN_HORIZON,))
-            self.assertEqual(plan_dist.tolist(), [0])
             self.assertEqual(history_rooms.shape, (HISTORY_HORIZON,))
             self.assertEqual(
                 history_rooms.tolist(),
@@ -242,31 +257,16 @@ class DatasetContextTests(unittest.TestCase):
             self.assertEqual(key_labels.tolist(), [0.0, 0.0, 0.0])
             self.assertEqual(key_masks.tolist(), [1.0, 1.0, 0.0])
 
-    def test_curriculum_masking_drops_map_plan_and_history(self):
+    def test_curriculum_masking_drops_map_and_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             dataset = self._dataset(self._write_parquet(tmp, self._rows()))
             dataset.context_enabled = False
             sample = dataset[0]
-            (_, map_rooms, map_flags, plan_rooms, plan_dist,
-             history_rooms, history_dist, _, _) = sample[8:]
+            (_, map_rooms, map_flags, history_rooms, history_dist, _, _) = sample[9:]
             self.assertFalse(map_rooms.any())
             self.assertFalse(map_flags.any())
-            self.assertFalse(plan_rooms.any())
-            self.assertTrue((plan_dist == PLAN_HORIZON).all())
             self.assertFalse(history_rooms.any())
             self.assertTrue((history_dist == HISTORY_HORIZON).all())
-
-    def test_plan_dropout_rate_one_always_drops(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            dataset = self._dataset(
-                self._write_parquet(tmp, self._rows()), plan_dropout=1.0
-            )
-            for index in range(3):
-                plan_rooms = dataset[index][11]
-                self.assertFalse(plan_rooms.any())
-                # History carries no future information and is never dropped.
-                history_rooms = dataset[index][13]
-                self.assertTrue(history_rooms.any())
 
     def test_missing_columns_degrade_to_missing_context(self):
         rows = self._rows()
@@ -277,7 +277,7 @@ class DatasetContextTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             dataset = self._dataset(self._write_parquet(tmp, rows))
             sample = dataset[0]
-            (_, map_rooms, _, _, _, _, _, _, key_masks) = sample[8:]
+            (_, map_rooms, _, _, _, _, key_masks) = sample[9:]
             self.assertFalse(map_rooms.any())
             self.assertEqual(key_masks.tolist(), [1.0, 0.0, 0.0])
 
@@ -294,22 +294,153 @@ class TrainingHelperTests(unittest.TestCase):
         self.assertAlmostEqual(loss.item(), expected.item(), places=6)
 
     def test_split_batch_shapes(self):
-        v2_batch = tuple(torch.zeros(2) for _ in range(8))
+        v2_batch = tuple(torch.zeros(2) for _ in range(9))
         base, context, keys = _split_batch(v2_batch, use_map=False)
         self.assertIsNone(context)
         self.assertIsNone(keys)
-        v3_batch = tuple(torch.zeros(2) for _ in range(17))
+        v3_batch = tuple(torch.zeros(2) for _ in range(16))
         base, context, keys = _split_batch(v3_batch, use_map=True)
-        self.assertEqual(len(context), 7)
+        self.assertEqual(len(context), 5)
         self.assertEqual(len(keys), 2)
         with self.assertRaises(ValueError):
             _split_batch(v2_batch, use_map=True)
+
+    @staticmethod
+    def _loss_inputs(batch_size=4):
+        logits = torch.zeros((batch_size, 21), requires_grad=True)
+        labels = torch.zeros((batch_size, 21))
+        masks = torch.zeros((batch_size, 21))
+        floors = torch.full((batch_size,), 57.0)
+        globals_ = torch.zeros((batch_size, 9))
+        return logits, labels, masks, floors, globals_
+
+    def test_macro_loss_gives_supervised_heads_equal_weight(self):
+        logits, labels, masks, floors, globals_ = self._loss_inputs(2)
+        with torch.no_grad():
+            logits[0, 0] = 0.0
+            logits[:, 1] = 2.0
+        labels[0, 0] = 1.0
+        labels[:, 1] = 1.0
+        masks[0, 0] = 1.0
+        masks[:, 1] = 1.0
+        masks[:, -1] = 1.0
+        components = value_loss_components(
+            logits, labels, masks, floors, globals_, torch.ones(6), [0.5] * 21
+        )
+        first = torch.nn.functional.binary_cross_entropy_with_logits(
+            torch.tensor(0.0), torch.tensor(1.0)
+        )
+        second = torch.nn.functional.binary_cross_entropy_with_logits(
+            torch.tensor(2.0), torch.tensor(1.0)
+        )
+        self.assertAlmostEqual(
+            components["hazard_macro_nll"].item(), ((first + second) / 2).item(), places=6
+        )
+        self.assertNotAlmostEqual(
+            components["hazard_micro_nll"].item(), components["hazard_macro_nll"].item()
+        )
+        self.assertTrue(torch.isfinite(components["total"]))
+
+    def test_prior_prediction_has_unit_relative_nll(self):
+        batch_size = 10
+        logits, labels, masks, floors, globals_ = self._loss_inputs(batch_size)
+        rate = 0.2
+        prior_logit = torch.logit(torch.tensor(rate))
+        with torch.no_grad():
+            logits[:, 0] = prior_logit
+        labels[:2, 0] = 1.0
+        masks[:, 0] = 1.0
+        labels[:5, -1] = 1.0
+        masks[:, -1] = 1.0
+        rates = [rate] + [0.5] * 20
+        components = value_loss_components(
+            logits, labels, masks, floors, globals_, torch.ones(6), rates
+        )
+        self.assertAlmostEqual(components["hazard_relative_nll"].item(), 1.0, places=5)
+        self.assertAlmostEqual(components["heart_relative_nll"].item(), 1.0, places=5)
+        self.assertAlmostEqual(components["relative_value"].item(), 1.0, places=5)
+
+    def test_entropy_floor_keeps_extreme_priors_and_gradients_finite(self):
+        entropy = _binary_entropy([0.0] * 21, dtype=torch.float32, device="cpu")
+        torch.testing.assert_close(entropy, torch.full((21,), Config.BASELINE_ENTROPY_FLOOR))
+        logits, labels, masks, floors, globals_ = self._loss_inputs(1)
+        masks[0, 0] = 1.0
+        masks[0, -1] = 1.0
+        components = value_loss_components(
+            logits, labels, masks, floors, globals_, torch.ones(6), [0.0] * 21
+        )
+        components["total"].backward()
+        self.assertTrue(torch.isfinite(logits.grad).all())
+
+    def test_micro_mode_matches_legacy_loss(self):
+        logits, labels, masks, floors, globals_ = self._loss_inputs(3)
+        masks[:, :2] = 1.0
+        masks[:, -1] = 1.0
+        labels[0, 0] = 1.0
+        from train import weighted_hazard_loss
+
+        expected = weighted_hazard_loss(
+            logits, labels, masks, floors, globals_, torch.ones(6)
+        )
+        expected_gradient = torch.autograd.grad(expected, logits, retain_graph=True)[0]
+        actual = value_loss_components(
+            logits,
+            labels,
+            masks,
+            floors,
+            globals_,
+            torch.ones(6),
+            [0.5] * 21,
+            loss_mode="micro_nll",
+        )["value"]
+        actual_gradient = torch.autograd.grad(actual, logits)[0]
+        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(actual_gradient, expected_gradient)
+
+    def test_contextual_baseline_smooths_and_falls_back(self):
+        rates = [0.25] * 21
+        statistics = {
+            "schema_version": "floor-ascension-band-v1",
+            "global": {"rates": rates},
+            "strata": {"5:2": {"rates": [0.75] * 21}},
+        }
+        result = _contextual_baseline_probabilities(
+            statistics, [5.0, 6.0], [2, 2]
+        )
+        self.assertTrue((result[0] == 0.75).all())
+        self.assertTrue((result[1] == 0.25).all())
+
+    def test_checkpoint_eligibility_enforces_context_and_mae(self):
+        self.assertEqual(
+            checkpoint_eligibility(True, True, 1.0, 2.0),
+            (False, "warm-up context"),
+        )
+        self.assertEqual(
+            checkpoint_eligibility(True, False, 3.0, 2.0),
+            (False, "terminal-floor MAE guard"),
+        )
+        self.assertEqual(checkpoint_eligibility(True, False, 2.0, 2.0), (True, None))
+
+    def test_curriculum_aligns_train_and_val_but_never_masks_test(self):
+        class Split:
+            context_enabled = True
+
+        datasets = {name: Split() for name in ("train", "val", "test")}
+        self.assertTrue(configure_context_curriculum(datasets, 0, True, 3))
+        self.assertFalse(datasets["train"].context_enabled)
+        self.assertFalse(datasets["val"].context_enabled)
+        self.assertTrue(datasets["test"].context_enabled)
+
+        self.assertFalse(configure_context_curriculum(datasets, 3, True, 3))
+        self.assertTrue(datasets["train"].context_enabled)
+        self.assertTrue(datasets["val"].context_enabled)
+        self.assertTrue(datasets["test"].context_enabled)
 
 
 class InferenceEngineTests(unittest.TestCase):
     BASE_STATE = {
         "hp": 50.0, "max_hp": 75.0, "gold": 120.0, "floor": 5.0,
-        "ascension": 10.0, "visible_boss": "NO_BOSS",
+        "ascension": 10.0, "character": "IRONCLAD", "visible_boss": "NO_BOSS",
         "deck": ["Strike_R", "Bash"], "relics": ["Burning Blood"],
     }
     MAP_STATE = {
@@ -322,7 +453,6 @@ class InferenceEngineTests(unittest.TestCase):
              "children": [{"x": 3, "y": 5}]},
             {"x": 3, "y": 5, "symbol": "E", "burning": True, "children": []},
         ],
-        "plan": ["E"],
         "history": ["M", "$", "M"],
         "keys": {"ruby": False, "emerald": False, "sapphire": False},
     }
@@ -337,12 +467,21 @@ class InferenceEngineTests(unittest.TestCase):
         self.assertEqual(len(keys), 3)
         self.assertTrue(all(0.0 <= key <= 1.0 for key in keys))
 
+    def test_inference_rejects_missing_or_unknown_character(self):
+        from inference import STSInferenceEngine
+        engine = STSInferenceEngine.__new__(STSInferenceEngine)
+        with self.assertRaises(ValueError):
+            engine._character_id({})
+        with self.assertRaises(ValueError):
+            engine._character_id({"character": "SILENT"})
+
     def test_v2_checkpoint_engine_ignores_map_fields(self):
         from inference import STSInferenceEngine
         config = {
             "vocab_size": 2, "max_upgrade": 15, "max_count": 10,
             "d_model": 32, "n_heads": 4, "n_layers": 1,
-            "num_global_features": 9, "num_bosses": NUM_BOSS_IDS,
+            "num_global_features": 9, "num_characters": NUM_CHARACTER_IDS,
+            "num_bosses": NUM_BOSS_IDS,
             "dropout": 0.0, "global_conditioning": "token", "norm_position": "pre",
         }
         model = STSValueNetwork(**config)

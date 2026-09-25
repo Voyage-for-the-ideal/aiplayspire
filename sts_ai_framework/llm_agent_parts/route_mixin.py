@@ -254,10 +254,8 @@ class RouteMixin:
         mode = candidate["mode"]
         choice_index = candidate["choice_index"]
         score = candidate["score"]
-        # Anchor the route to the floor it was computed on: map_payload shifts
-        # it by the floors elapsed since, so every later payload's [PLAN]
-        # token is the room after the current position instead of a stale
-        # route whose first room was already entered.
+        # Keep the chosen route for router diagnostics only. Value-network
+        # payloads deliberately do not consume this transient planner output.
         self._last_plan_symbols = (
             int(state.floor or 0),
             self._extract_plan_symbols(state, decision, choice_index),
@@ -309,7 +307,7 @@ class RouteMixin:
 
     @staticmethod
     def _extract_plan_symbols(state: GameState, decision: RouteDecision, choice_index) -> List[str]:
-        """Upcoming room symbols along the chosen route ([PLAN] token source)."""
+        """Upcoming room symbols along the chosen route for router diagnostics."""
         if choice_index is None:
             return []
         try:

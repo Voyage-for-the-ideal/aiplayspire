@@ -30,6 +30,7 @@ try:
         ascension_band,
     )
     from .reconstructor import RunReconstructor
+    from .map_context import MAP_CONTEXT_VERSION, RunMapContextBuilder
 except ImportError:
     from config import Config
     from content_catalog import VanillaContentCatalog, canonical_card_id
@@ -384,6 +385,8 @@ def validate_raw_run(event_data, catalog):
 
 def _validate_snapshot(snapshot, expected_ascension):
     floor = _require_int(snapshot.get("floor"), "invalid_snapshot_floor", 0, 57)
+    if snapshot.get("state_timing") != "post_action":
+        _reject("invalid_snapshot_state_timing")
     if snapshot.get("ascension") != expected_ascension:
         _reject("invalid_snapshot_ascension")
     for name in ("hp", "max_hp", "gold"):
@@ -449,6 +452,8 @@ def process_run(event_data, catalog):
                 "preprocessing_version": PREPROCESSING_VERSION,
                 "filter_version": FILTER_VERSION,
                 "ascension_band": validated["ascension_band"],
+                "character": validated["character"],
+                "state_timing": "post_action",
                 # A0 samples carry no resolved boss by product policy; A1+
                 # identity is supplied only by the sidecar enrichment workflow,
                 # never inferred from combat outcomes.
@@ -463,7 +468,6 @@ def process_run(event_data, catalog):
                 "act": context["act"] if context else None,
                 "map_rooms": context["map_rooms"] if has_map else None,
                 "map_flags": context["map_flags"] if has_map else None,
-                "plan_rooms": context["plan_rooms"] if context else None,
                 "history_rooms": context["history_rooms"] if context else None,
                 "key_states": context["key_states"] if context else None,
             }
@@ -629,6 +633,8 @@ def _validate_staging(staging, expected_samples):
         "preprocessing_version",
         "filter_version",
         "ascension_band",
+        "character",
+        "state_timing",
         "visible_boss",
     }
     columns = set(pd.read_parquet(parquet_files[0]).columns)
@@ -770,6 +776,7 @@ def build_dataset(
             "preprocessing_version": PREPROCESSING_VERSION,
             "filter_version": FILTER_VERSION,
             "map_context_version": MAP_CONTEXT_VERSION,
+            "state_timing": "post_action",
             "value_target_schema": VALUE_TARGET_SCHEMA,
             "hazard_endpoints": list(HAZARD_ENDPOINTS),
             "created_at_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",

@@ -17,6 +17,7 @@ try:
     )
     from .encoding import ItemVocabulary, encode_items, split_items
     from .boss_context import boss_id
+    from .character_context import character_id
     from . import map_context
 except ImportError:
     from data_contract import (
@@ -25,6 +26,7 @@ except ImportError:
     )
     from encoding import ItemVocabulary, encode_items, split_items
     from boss_context import boss_id
+    from character_context import character_id
     import map_context
 
 
@@ -36,12 +38,16 @@ REQUIRED_COLUMNS = {
     "preprocessing_version",
     "filter_version",
     "ascension_band",
+    "character",
+    "state_timing",
     "visible_boss",
 }
 
 TRAINING_ARTIFACT_CACHE_NAME = "training_artifacts.json"
-TRAINING_ARTIFACT_CACHE_VERSION = 1
+TRAINING_ARTIFACT_CACHE_VERSION = 2
 ARTIFACT_PROGRESS_INTERVAL = 25
+CONTEXTUAL_BASELINE_SCHEMA = "floor-ascension-band-v1"
+CONTEXTUAL_BASELINE_PRIOR_STRENGTH = 100.0
 
 
 class GlobalFeatureEncoder:
@@ -213,6 +219,10 @@ def load_dataset_manifest(parquet_dir):
         raise ValueError("Dataset manifest value target is incompatible")
     if tuple(manifest.get("hazard_endpoints", ())) != HAZARD_ENDPOINTS:
         raise ValueError("Dataset manifest hazard endpoints are incompatible")
+    if manifest.get("map_context_version") != map_context.MAP_CONTEXT_VERSION:
+        raise ValueError("Dataset manifest map-context version is incompatible")
+    if manifest.get("state_timing") != "post_action":
+        raise ValueError("Dataset manifest state timing is incompatible")
     return manifest
 
 
@@ -241,11 +251,12 @@ def _load_training_artifact_cache(cache_path, source_fingerprint):
     return (
         ItemVocabulary.from_dict(cached["vocabulary"]),
         GlobalFeatureEncoder.from_dict(cached["global_feature_encoder"]),
+        cached["baseline_statistics"],
     )
 
 
 def _save_training_artifact_cache(
-    cache_path, source_fingerprint, vocabulary, feature_encoder
+    cache_path, source_fingerprint, vocabulary, feature_encoder, baseline_statistics
 ):
     payload = {
         "cache_version": TRAINING_ARTIFACT_CACHE_VERSION,
@@ -254,6 +265,7 @@ def _save_training_artifact_cache(
         "source_fingerprint": source_fingerprint,
         "vocabulary": vocabulary.to_dict(),
         "global_feature_encoder": feature_encoder.to_dict(),
+        "baseline_statistics": baseline_statistics,
     }
     temporary_path = f"{cache_path}.{os.getpid()}.tmp"
     try:
@@ -265,7 +277,49 @@ def _save_training_artifact_cache(
             os.remove(temporary_path)
 
 
-def build_training_artifacts(parquet_dir, progress=None, use_cache=True):
+def _baseline_statistics(global_positive, global_valid, strata_counts):
+    """Finalize smoothed floor/ascension target rates for evaluation baselines."""
+    target_names = [column.removeprefix("target_") for column in TARGET_COLUMNS]
+    rates = []
+    for name, positive, valid in zip(target_names, global_positive, global_valid):
+        if valid < 0 or not 0 <= positive <= valid:
+            raise ValueError(f"Invalid training baseline counts for {name}")
+        # Tiny smoke-test datasets may not put every future endpoint at risk.
+        # Use an uninformative fallback; production datasets supervise all heads.
+        rates.append(float(positive) / float(valid) if valid else 0.5)
+
+    strata = {}
+    prior = CONTEXTUAL_BASELINE_PRIOR_STRENGTH
+    for (floor, band), counts in sorted(strata_counts.items()):
+        positive = counts["positive"]
+        valid = counts["valid"]
+        smoothed = [
+            (float(pos) + prior * rate) / (float(count) + prior)
+            for pos, count, rate in zip(positive, valid, rates)
+        ]
+        strata[f"{floor}:{band}"] = {
+            "floor": floor,
+            "ascension_band": band,
+            "positive": positive,
+            "valid": valid,
+            "rates": smoothed,
+        }
+    return {
+        "schema_version": CONTEXTUAL_BASELINE_SCHEMA,
+        "prior_strength": prior,
+        "target_names": target_names,
+        "global": {
+            "positive": global_positive,
+            "valid": global_valid,
+            "rates": rates,
+        },
+        "strata": strata,
+    }
+
+
+def build_training_artifacts(
+    parquet_dir, progress=None, use_cache=True, include_baselines=False
+):
     files = sorted(glob.glob(os.path.join(parquet_dir, "train_valid_chunk_*.parquet")))
     if not files:
         raise ValueError(f"No parquet files found in {parquet_dir}")
@@ -283,7 +337,7 @@ def build_training_artifacts(parquet_dir, progress=None, use_cache=True):
         else:
             if progress:
                 progress(f"Loaded training artifacts from {cache_path}")
-            return artifacts
+            return artifacts if include_baselines else artifacts[:2]
 
     if progress:
         progress(
@@ -292,6 +346,10 @@ def build_training_artifacts(parquet_dir, progress=None, use_cache=True):
 
     vocabulary = ItemVocabulary()
     feature_frames = []
+    target_count = len(TARGET_COLUMNS)
+    global_positive = [0] * target_count
+    global_valid = [0] * target_count
+    strata_counts = {}
     for file_index, path in enumerate(files, start=1):
         frame = _read_frame(path)
         train_frame = frame[
@@ -299,6 +357,38 @@ def build_training_artifacts(parquet_dir, progress=None, use_cache=True):
             & frame[list(MASK_COLUMNS)].astype(bool).any(axis=1)
         ]
         feature_frames.append(train_frame[list(GlobalFeatureEncoder.source_feature_names)])
+        target_values = train_frame[list(TARGET_COLUMNS)].astype("int64")
+        mask_values = train_frame[list(MASK_COLUMNS)].astype("bool")
+        valid_counts = mask_values.sum(axis=0).tolist()
+        positive_counts = target_values.where(mask_values, 0).sum(axis=0).tolist()
+        global_valid = [left + int(right) for left, right in zip(global_valid, valid_counts)]
+        global_positive = [
+            left + int(right) for left, right in zip(global_positive, positive_counts)
+        ]
+        for (raw_floor, raw_band), indices in train_frame.groupby(
+            ["floor", "ascension_band"], sort=False
+        ).groups.items():
+            floor = int(raw_floor)
+            band = int(raw_band)
+            if float(raw_floor) != floor or not 0 <= floor <= HAZARD_ENDPOINTS[-1]:
+                raise ValueError(f"Training baseline floor is invalid: {raw_floor}")
+            if float(raw_band) != band or not 0 <= band <= 5:
+                raise ValueError(f"Training baseline ascension band is invalid: {raw_band}")
+            group_targets = target_values.loc[indices]
+            group_masks = mask_values.loc[indices]
+            entry = strata_counts.setdefault(
+                (floor, band),
+                {"positive": [0] * target_count, "valid": [0] * target_count},
+            )
+            group_valid = group_masks.sum(axis=0).tolist()
+            group_positive = group_targets.where(group_masks, 0).sum(axis=0).tolist()
+            entry["valid"] = [
+                left + int(right) for left, right in zip(entry["valid"], group_valid)
+            ]
+            entry["positive"] = [
+                left + int(right)
+                for left, right in zip(entry["positive"], group_positive)
+            ]
         for column in ("deck", "relics"):
             for raw_items in train_frame[column]:
                 for item in split_items(raw_items):
@@ -316,12 +406,19 @@ def build_training_artifacts(parquet_dir, progress=None, use_cache=True):
     if progress:
         progress("Computing global feature quantiles")
     feature_encoder = GlobalFeatureEncoder.fit(feature_frames)
+    baseline_statistics = _baseline_statistics(
+        global_positive, global_valid, strata_counts
+    )
     if progress:
         progress("Global feature quantiles ready")
     if use_cache:
         try:
             _save_training_artifact_cache(
-                cache_path, source_fingerprint, vocabulary, feature_encoder
+                cache_path,
+                source_fingerprint,
+                vocabulary,
+                feature_encoder,
+                baseline_statistics,
             )
         except OSError as exc:
             if progress:
@@ -329,7 +426,8 @@ def build_training_artifacts(parquet_dir, progress=None, use_cache=True):
         else:
             if progress:
                 progress(f"Saved training artifacts to {cache_path}")
-    return vocabulary, feature_encoder
+    artifacts = (vocabulary, feature_encoder, baseline_statistics)
+    return artifacts if include_baselines else artifacts[:2]
 
 
 class STSDataset(Dataset):
@@ -344,7 +442,6 @@ class STSDataset(Dataset):
         max_count=10,
         progress=None,
         use_map_context=False,
-        plan_dropout=0.0,
     ):
         self.vocabulary = vocabulary
         self.feature_encoder = feature_encoder
@@ -353,8 +450,7 @@ class STSDataset(Dataset):
         self.max_upgrade = max_upgrade
         self.max_count = max_count
         self.use_map_context = use_map_context
-        self.plan_dropout_rate = float(plan_dropout)
-        # Curriculum switch: while False, map/plan tokens are masked out so a
+        # Curriculum switch: while False, map/history tokens are masked out so a
         # v3 run warms up on the pure v2 objective (MODEL_V3_DESIGN.md 5).
         self.context_enabled = True
         self.files = sorted(
@@ -374,11 +470,15 @@ class STSDataset(Dataset):
                     "preprocessing_version",
                     "filter_version",
                     "ascension_band",
+                    "character",
+                    "state_timing",
                     "visible_boss",
                 ],
             )
             if set(metadata["split"].unique()) != {split}:
                 raise ValueError(f"Dataset shard has unexpected split: {path}")
+            if set(metadata["state_timing"].unique()) != {"post_action"}:
+                raise ValueError(f"Dataset shard is not post-action: {path}")
             if not metadata[list(MASK_COLUMNS)].astype(bool).any(axis=1).all():
                 raise ValueError(f"Dataset shard contains censored samples: {path}")
             total += len(metadata)
@@ -416,17 +516,11 @@ class STSDataset(Dataset):
 
     def _map_context_tensors(self, row):
         """Decode the packed v3 context columns of one row."""
-        plan = self._column_list(row, "plan_rooms")
         key_states = self._column_list(row, "key_states") or [0, 0, 0]
         act = row.get("act")
         act = int(act) if isinstance(act, (int, float)) and not (
             isinstance(act, float) and math.isnan(act)
         ) else 0
-
-        if not self.context_enabled:
-            plan = None
-        elif plan is not None and torch.rand(()).item() < self.plan_dropout_rate:
-            plan = None
 
         map_rooms = self._column_list(row, "map_rooms")
         map_flags = self._column_list(row, "map_flags")
@@ -435,19 +529,8 @@ class STSDataset(Dataset):
             map_rooms = [0] * map_context.MAP_GRID_CELLS
             map_flags = [0] * map_context.MAP_GRID_CELLS
 
-        raw_plan = list(plan or [])
-        if 0 in raw_plan:  # pipeline pads missing plan slots with room id 0
-            raw_plan = raw_plan[: raw_plan.index(0)]
-        plan_ids = raw_plan[: map_context.PLAN_HORIZON]
-        plan_dist = list(range(len(plan_ids)))
-        plan_ids = plan_ids + [0] * (map_context.PLAN_HORIZON - len(plan_ids))
-        plan_dist = plan_dist + [map_context.PLAN_HORIZON] * (
-            map_context.PLAN_HORIZON - len(plan_dist)
-        )
-
         # History is most-recent-first (index 0 = the room just left) and
-        # right-padded, mirroring the plan layout.  No dropout: it carries no
-        # future information.
+        # right-padded. It carries no future information.
         history = self._column_list(row, "history_rooms")
         if not self.context_enabled:
             history = None
@@ -472,8 +555,6 @@ class STSDataset(Dataset):
             torch.tensor(keys_features, dtype=torch.float32),
             torch.tensor(map_rooms, dtype=torch.long),
             torch.tensor(map_flags, dtype=torch.long),
-            torch.tensor(plan_ids, dtype=torch.long),
-            torch.tensor(plan_dist, dtype=torch.long),
             torch.tensor(history_ids, dtype=torch.long),
             torch.tensor(history_dist, dtype=torch.long),
             torch.tensor(key_labels, dtype=torch.float32),
@@ -498,6 +579,7 @@ class STSDataset(Dataset):
             self.max_count,
         )
         global_features = self.feature_encoder.transform_row(row)
+        encoded_character = character_id(row["character"])
         encoded_boss = boss_id(row["visible_boss"])
         targets = [float(row[column]) for column in TARGET_COLUMNS]
         masks = [float(bool(row[column])) for column in MASK_COLUMNS]
@@ -506,6 +588,7 @@ class STSDataset(Dataset):
             torch.tensor(upgrades, dtype=torch.long),
             torch.tensor(counts, dtype=torch.long),
             torch.tensor(global_features, dtype=torch.float32),
+            torch.tensor(encoded_character, dtype=torch.long),
             torch.tensor(encoded_boss, dtype=torch.long),
             torch.tensor(float(row["floor"]), dtype=torch.float32),
             torch.tensor(targets, dtype=torch.float32),

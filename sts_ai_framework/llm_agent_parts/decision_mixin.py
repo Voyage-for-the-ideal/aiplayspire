@@ -6,10 +6,10 @@ from colorama import Fore, Style
 
 from ..config import EVENT_DECISION_POLICY
 from ..event_pools import CHEST_CURSE_POOL, chest_relic_pool
-from ..models import ActionType, GameAction, GameState, visible_boss_of
+from ..models import ActionType, GameAction, GameState
 from ..run_log import log_event
 from .event_expectimax import decide_event, event_state_payload, relic_state_payload
-from .map_payload import map_context_fields
+from .value_payload import value_state_payload
 
 
 class DecisionMixin:
@@ -225,17 +225,7 @@ class DecisionMixin:
         return None
 
     def _get_model_shop_decision(self, state: GameState) -> Optional[GameAction]:
-        current_state = {
-            "hp": state.player.current_hp,
-            "max_hp": state.player.max_hp,
-            "gold": state.player.gold,
-            "floor": state.floor,
-            "ascension": 20,
-            "visible_boss": visible_boss_of(state),
-            **map_context_fields(state, getattr(self, "_last_plan_symbols", None)),
-            "deck": [card.id for card in state.deck] if hasattr(state, "deck") else [],
-            "relics": [relic.id for relic in state.relics] if hasattr(state, "relics") else [],
-        }
+        current_state = value_state_payload(state)
 
         choices = []
         unified_choices = self._build_unified_choices(state)
@@ -288,18 +278,7 @@ class DecisionMixin:
         return None
 
     def _get_model_card_decision(self, state: GameState) -> Optional[GameAction]:
-        current_state = {
-            "hp": state.player.current_hp,
-            "max_hp": state.player.max_hp,
-            "gold": state.player.gold,
-            "floor": state.floor,
-            "ascension": 20,
-            "visible_boss": visible_boss_of(state),
-            **map_context_fields(state, getattr(self, "_last_plan_symbols", None)),
-            "deck": [card.id for card in state.deck] if hasattr(state, "deck") else [],
-            "relics": [relic.id for relic in state.relics] if hasattr(state, "relics") else [],
-            "relic_states": self._build_relic_state_payload(state),
-        }
+        current_state = value_state_payload(state)
 
         choices = []
         grid_card_ids = {
@@ -312,7 +291,7 @@ class DecisionMixin:
             if "skip" in choice_text.lower() or "cancel" in choice_text.lower() or "leave" in choice_text.lower():
                 choices.append({"action": "skip", "target": None, "index": i})
             elif "bowl" in choice_text.lower() or "singing bowl" in choice_text.lower():
-                choices.append({"action": "skip", "target": None, "index": i})
+                choices.append({"action": "singing_bowl", "target": None, "index": i})
             else:
                 card_id = choice_text
                 if i in grid_card_ids:
@@ -945,17 +924,7 @@ class DecisionMixin:
         return GameAction(type=ActionType.CHOOSE, choice_index=target[1])
 
     def _get_model_event_decision(self, state: GameState) -> Optional[GameAction]:
-        current_state = {
-            "hp": state.player.current_hp,
-            "max_hp": state.player.max_hp,
-            "gold": state.player.gold,
-            "floor": state.floor,
-            "ascension": 20,
-            "visible_boss": visible_boss_of(state),
-            **map_context_fields(state, getattr(self, "_last_plan_symbols", None)),
-            "deck": [card.id for card in state.deck] if hasattr(state, "deck") else [],
-            "relics": [relic.id for relic in state.relics] if hasattr(state, "relics") else [],
-        }
+        current_state = value_state_payload(state)
 
         # Detect transform choices and collect curse IDs for transform filtering
         transform_indices = set()
@@ -1050,17 +1019,7 @@ class DecisionMixin:
                 Style.RESET_ALL)
 
     def _get_model_boss_reward_decision(self, state: GameState) -> Optional[GameAction]:
-        current_state = {
-            "hp": state.player.current_hp,
-            "max_hp": state.player.max_hp,
-            "gold": state.player.gold,
-            "floor": state.floor,
-            "ascension": 20,
-            "visible_boss": visible_boss_of(state),
-            **map_context_fields(state, getattr(self, "_last_plan_symbols", None)),
-            "deck": [card.id for card in state.deck] if hasattr(state, "deck") else [],
-            "relics": [relic.id for relic in state.relics] if hasattr(state, "relics") else [],
-        }
+        current_state = value_state_payload(state)
 
         choices = []
         unified_choices = self._build_unified_choices(state)

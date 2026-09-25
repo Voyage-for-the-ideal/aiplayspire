@@ -2,8 +2,8 @@ from typing import List, Optional, Tuple
 
 from colorama import Fore, Style
 
-from ..models import ActionType, GameAction, GameState, visible_boss_of
-from .map_payload import map_context_fields
+from ..models import ActionType, GameAction, GameState
+from .value_payload import value_state_payload
 
 
 class ChoiceMixin:
@@ -47,17 +47,7 @@ class ChoiceMixin:
                     print(Fore.MAGENTA + "尚未取得红宝石钥匙，优先在营火回忆..." + Style.RESET_ALL)
                     return GameAction(type=ActionType.CHOOSE, choice_index=i)
 
-        current_state = {
-            "hp": state.player.current_hp,
-            "max_hp": state.player.max_hp,
-            "gold": state.player.gold,
-            "floor": state.floor,
-            "ascension": 20,
-            "visible_boss": visible_boss_of(state),
-            **map_context_fields(state, getattr(self, "_last_plan_symbols", None)),
-            "deck": [card.id for card in state.deck] if hasattr(state, "deck") else [],
-            "relics": [relic.id for relic in state.relics] if hasattr(state, "relics") else [],
-        }
+        current_state = value_state_payload(state)
 
         choices = []
         for i, choice_text in enumerate(state.choice_list):
@@ -272,17 +262,7 @@ class ChoiceMixin:
         if self.value_engine is None:
             return state.act >= 2
 
-        current_state = {
-            "hp": state.player.current_hp,
-            "max_hp": state.player.max_hp,
-            "gold": state.player.gold,
-            "floor": state.floor,
-            "ascension": 20,
-            "visible_boss": visible_boss_of(state),
-            **map_context_fields(state, getattr(self, "_last_plan_symbols", None)),
-            "deck": [card.id for card in state.deck],
-            "relics": [relic.id for relic in state.relics],
-        }
+        current_state = value_state_payload(state)
         try:
             current_value = self.value_engine.evaluate_state(current_state)
             relic_state = self.value_engine._apply_choice(

@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import DataLoader
@@ -30,8 +31,16 @@ from encoding import (
 )
 from model import STSValueNetwork
 from inference import STSInferenceEngine, compose_hazard_value
-from train import evaluate, hazard_predictions, save_training_report, weighted_hazard_loss
+from train import (
+    ascension_band_tensor,
+    evaluate,
+    hazard_predictions,
+    save_training_report,
+    training_objective_metadata,
+    weighted_hazard_loss,
+)
 from boss_context import NUM_BOSS_IDS
+from character_context import NUM_CHARACTER_IDS
 
 
 def supervision_fields(valid=True, label=0.0):
@@ -242,6 +251,8 @@ class GlobalFeatureEncoderTests(unittest.TestCase):
                     "preprocessing_version": PREPROCESSING_VERSION,
                     "filter_version": FILTER_VERSION,
                     "ascension_band": 5,
+                    "character": "IRONCLAD",
+                    "state_timing": "post_action",
                     "visible_boss": "Time Eater",
                     "floor": 10,
                     "hp": 50.0,
@@ -271,6 +282,8 @@ class GlobalFeatureEncoderTests(unittest.TestCase):
                     "preprocessing_version": PREPROCESSING_VERSION,
                     "filter_version": FILTER_VERSION,
                     "ascension_band": 0,
+                    "character": "IRONCLAD",
+                    "state_timing": "post_action",
                     "visible_boss": "UNKNOWN_BOSS",
                     "floor": 1,
                     "hp": 70.0,
@@ -309,6 +322,8 @@ class GlobalFeatureEncoderTests(unittest.TestCase):
                     "preprocessing_version": PREPROCESSING_VERSION,
                     "filter_version": FILTER_VERSION,
                     "ascension_band": 0,
+                    "character": "IRONCLAD",
+                    "state_timing": "post_action",
                     "visible_boss": "UNKNOWN_BOSS",
                     "floor": index + 1,
                     "hp": 70.0,
@@ -343,6 +358,8 @@ class GlobalFeatureEncoderTests(unittest.TestCase):
                     "preprocessing_version": PREPROCESSING_VERSION,
                     "filter_version": FILTER_VERSION,
                     "ascension_band": 0,
+                    "character": "IRONCLAD",
+                    "state_timing": "post_action",
                     "floor": 1,
                     "hp": 70.0,
                     "max_hp": 80.0,
@@ -363,15 +380,44 @@ class GlobalFeatureEncoderTests(unittest.TestCase):
 
 class ModelTests(unittest.TestCase):
     def test_training_report_is_written(self):
-        history = [
+        old_history = [
             {"epoch": 1, "train_loss": 0.4, "val_loss": 0.5, "learning_rate": 2e-4},
             {"epoch": 2, "train_loss": 0.3, "val_loss": 0.35, "learning_rate": 1e-4},
         ]
+        new_history = [
+            {
+                "epoch": 1,
+                "train_total": 1.1,
+                "train_value": 1.0,
+                "train_hazard_relative_nll": 0.9,
+                "train_heart_relative_nll": 1.1,
+                "train_key_bce": 0.5,
+                "val_relative_value_nll": 0.95,
+                "contextual_baseline_relative_nll": 1.0,
+                "val_hazard_relative_nll": 0.9,
+                "val_heart_relative_nll": 1.0,
+                "val_key_bce": 0.45,
+                "terminal_floor_mae": 4.0,
+                "contextual_baseline_terminal_floor_mae": 4.5,
+                "checkpoint_eligible": True,
+                "learning_rate": 2e-4,
+            }
+        ]
         with tempfile.TemporaryDirectory() as directory:
-            path = os.path.join(directory, "training_report.png")
-            save_training_report(history, path)
-            self.assertTrue(os.path.isfile(path))
-            self.assertGreater(os.path.getsize(path), 0)
+            for index, history in enumerate((old_history, new_history)):
+                path = os.path.join(directory, f"training_report_{index}.png")
+                save_training_report(history, path)
+                self.assertTrue(os.path.isfile(path))
+                self.assertGreater(os.path.getsize(path), 0)
+
+    def test_normalized_ascension_feature_recovers_band_boundaries(self):
+        levels = torch.tensor([0, 1, 5, 6, 10, 11, 15, 16, 19, 20])
+        globals_ = torch.zeros((len(levels), 9))
+        globals_[:, 8] = levels / 20.0
+        self.assertEqual(
+            ascension_band_tensor(globals_).tolist(),
+            [0, 1, 1, 2, 2, 3, 3, 4, 4, 5],
+        )
 
     def _model(self, global_conditioning="token", norm_position="pre"):
         model = STSValueNetwork(
@@ -382,6 +428,7 @@ class ModelTests(unittest.TestCase):
             n_heads=4,
             n_layers=2,
             num_global_features=9,
+            num_characters=NUM_CHARACTER_IDS,
             num_bosses=NUM_BOSS_IDS,
             dropout=0.0,
             global_conditioning=global_conditioning,
@@ -398,6 +445,7 @@ class ModelTests(unittest.TestCase):
                 torch.tensor([[0, 1, 0]]),
                 torch.tensor([[2, 1, 0]]),
                 globals_,
+                torch.tensor([0]),
                 torch.tensor([8]),
             )
             permuted = model(
@@ -405,6 +453,7 @@ class ModelTests(unittest.TestCase):
                 torch.tensor([[1, 0, 0, 0]]),
                 torch.tensor([[1, 2, 0, 0]]),
                 globals_,
+                torch.tensor([0]),
                 torch.tensor([8]),
             )
         torch.testing.assert_close(first, permuted, rtol=1e-5, atol=1e-6)
@@ -415,6 +464,7 @@ class ModelTests(unittest.TestCase):
             torch.tensor([[0, 0]]),
             torch.tensor([[1, 0]]),
             torch.zeros((1, 9)),
+            torch.tensor([0]),
             torch.tensor([0]),
         )
         for conditioning in ("token", "late_concat"):
@@ -442,7 +492,13 @@ class ModelTests(unittest.TestCase):
             torch.tensor([[2, 0]]), torch.tensor([[0, 0]]),
             torch.tensor([[1, 0]]), torch.zeros((1, 9)),
         )
-        self.assertEqual(model(*inputs, torch.tensor([0])).shape, (1, 21))
+        self.assertEqual(model(*inputs, torch.tensor([0]), torch.tensor([0])).shape, (1, 21))
+
+    def test_character_ids_follow_distinct_embedding_paths(self):
+        model = self._model()
+        self.assertFalse(
+            torch.equal(model.character_emb.weight[0], model.character_emb.weight[1])
+        )
 
     def test_hazard_survival_is_monotone_and_heart_is_bounded(self):
         logits = torch.linspace(-2.0, 2.0, 21).unsqueeze(0)
@@ -462,6 +518,7 @@ class ModelTests(unittest.TestCase):
             torch.tensor([[1, 0], [1, 0]]),
             torch.zeros((batch_size, 9)),
             torch.zeros(batch_size, dtype=torch.long),
+            torch.zeros(batch_size, dtype=torch.long),
             torch.ones(batch_size),
             targets,
             masks,
@@ -473,6 +530,57 @@ class ModelTests(unittest.TestCase):
         self.assertIn("heart_win", metrics)
         self.assertTrue(torch.isfinite(torch.tensor(metrics["terminal_floor_mae"])))
         self.assertIn("constant_baseline", metrics)
+
+    def test_evaluation_loss_is_independent_of_batch_partition(self):
+        batch_size = 4
+        targets = torch.zeros((batch_size, 21))
+        targets[0, 0] = 1.0
+        targets[1, 1] = 1.0
+        targets[2, -1] = 1.0
+        masks = torch.ones((batch_size, 21))
+        batch = (
+            torch.tensor([[2, 0]] * batch_size),
+            torch.zeros((batch_size, 2), dtype=torch.long),
+            torch.tensor([[1, 0]] * batch_size),
+            torch.zeros((batch_size, 9)),
+            torch.zeros(batch_size, dtype=torch.long),
+            torch.zeros(batch_size, dtype=torch.long),
+            torch.ones(batch_size),
+            targets,
+            masks,
+        )
+        split_batches = [
+            tuple(value[:1] for value in batch),
+            tuple(value[1:] for value in batch),
+        ]
+        model = self._model()
+        together = evaluate(
+            model, [batch], torch.device("cpu"), baseline_rates=[0.25] * 21
+        )
+        partitioned = evaluate(
+            model, split_batches, torch.device("cpu"), baseline_rates=[0.25] * 21
+        )
+        self.assertAlmostEqual(
+            together["relative_value_nll"],
+            partitioned["relative_value_nll"],
+            delta=1e-6,
+        )
+        self.assertAlmostEqual(
+            together["terminal_floor_mae"],
+            partitioned["terminal_floor_mae"],
+            delta=1e-6,
+        )
+
+        def assert_checkpoint_safe(value):
+            self.assertNotIsInstance(value, np.generic)
+            if isinstance(value, dict):
+                for nested in value.values():
+                    assert_checkpoint_safe(nested)
+            elif isinstance(value, (list, tuple)):
+                for nested in value:
+                    assert_checkpoint_safe(nested)
+
+        assert_checkpoint_safe(together)
 
     def test_scalar_value_rewards_act4_progress_and_heart_win(self):
         normal_hazards = {endpoint: 0.0 for endpoint in HAZARD_ENDPOINTS}
@@ -510,6 +618,12 @@ class ModelTests(unittest.TestCase):
         state = {"deck": ["Strike_R"], "relics": [], "visible_boss": "Time Eater"}
         result = engine._apply_choice(state, {"action": "skip"})
         self.assertEqual(result["visible_boss"], "Time Eater")
+
+    def test_singing_bowl_increases_current_and_max_hp(self):
+        engine = STSInferenceEngine.__new__(STSInferenceEngine)
+        state = {"deck": [], "relics": [], "hp": 50, "max_hp": 75}
+        result = engine._apply_choice(state, {"action": "singing_bowl"})
+        self.assertEqual((result["hp"], result["max_hp"]), (52, 77))
 
     def test_calling_bell_adds_known_curse_without_fake_random_relics(self):
         engine = STSInferenceEngine.__new__(STSInferenceEngine)
@@ -554,7 +668,7 @@ class ModelTests(unittest.TestCase):
         })
         self.assertEqual(result["deck"], ["Bash", "Inflame"])
 
-    def test_v8_checkpoint_round_trip(self):
+    def test_v9_checkpoint_round_trip(self):
         model = self._model()
         config = {
             "vocab_size": 12,
@@ -564,6 +678,7 @@ class ModelTests(unittest.TestCase):
             "n_heads": 4,
             "n_layers": 2,
             "num_global_features": 9,
+            "num_characters": NUM_CHARACTER_IDS,
             "num_bosses": NUM_BOSS_IDS,
             "dropout": 0.0,
             "global_conditioning": "token",
@@ -581,14 +696,54 @@ class ModelTests(unittest.TestCase):
             path = os.path.join(directory, "model.pth")
             save_checkpoint(path, model, config, vocabulary, feature_encoder)
             checkpoint, loaded_vocab, loaded_encoder = load_checkpoint(path)
-        self.assertEqual(checkpoint["format_version"], 8)
+        self.assertEqual(checkpoint["format_version"], 9)
         self.assertEqual(loaded_vocab.to_dict(), vocabulary.to_dict())
         self.assertEqual(loaded_encoder.to_dict(), feature_encoder.to_dict())
+
+    def test_checkpoint_round_trip_preserves_training_objective_metadata(self):
+        model = self._model()
+        config = {
+            "vocab_size": 12,
+            "max_upgrade": 5,
+            "max_count": 6,
+            "d_model": 16,
+            "n_heads": 4,
+            "n_layers": 2,
+            "num_global_features": 9,
+            "num_characters": NUM_CHARACTER_IDS,
+            "num_bosses": NUM_BOSS_IDS,
+            "dropout": 0.0,
+            "global_conditioning": "token",
+            "norm_position": "pre",
+        }
+        vocabulary = ItemVocabulary().freeze()
+        feature_encoder = GlobalFeatureEncoder()
+        rates = [0.25] * (HAZARD_OUTPUT_DIM + 1)
+        statistics = {
+            "schema_version": "floor-ascension-band-v1",
+            "prior_strength": 100.0,
+        }
+        objective = training_objective_metadata(
+            rates, statistics, selection={"score": 0.9, "mae_guard_passed": True}
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "model.pth")
+            save_checkpoint(
+                path,
+                model,
+                config,
+                vocabulary,
+                feature_encoder,
+                {"training_objective": objective},
+            )
+            checkpoint, _, _ = load_checkpoint(path)
+        self.assertEqual(checkpoint["format_version"], 9)
+        self.assertEqual(checkpoint["metadata"]["training_objective"], objective)
 
     def test_wrong_checkpoint_format_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "model.pth")
-            torch.save({"format_version": 3}, path)
+            torch.save({"format_version": 8}, path)
             with self.assertRaisesRegex(ValueError, "bucket hazard model"):
                 load_checkpoint(path)
 

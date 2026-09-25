@@ -9,6 +9,12 @@ try:
     from .encoding import PREPROCESSING_VERSION, ItemVocabulary
     from .dataset import GlobalFeatureEncoder
     from .boss_context import BOSS_VOCABULARY, NUM_BOSS_IDS
+    from .character_context import (
+        CHARACTER_SCHEMA_VERSION,
+        CHARACTER_VOCABULARY,
+        NUM_CHARACTER_IDS,
+        validate_character_vocabulary,
+    )
     from .config import Config
     from .map_context import context_schema
 except ImportError:
@@ -16,18 +22,29 @@ except ImportError:
     from encoding import PREPROCESSING_VERSION, ItemVocabulary
     from dataset import GlobalFeatureEncoder
     from boss_context import BOSS_VOCABULARY, NUM_BOSS_IDS
+    from character_context import (
+        CHARACTER_SCHEMA_VERSION,
+        CHARACTER_VOCABULARY,
+        NUM_CHARACTER_IDS,
+        validate_character_vocabulary,
+    )
     from config import Config
     from map_context import context_schema
 
 
-CHECKPOINT_FORMAT_VERSION = 8
+CHECKPOINT_FORMAT_VERSION = 9
 LEGACY_VALUE_TARGET_ERROR = (
     "Checkpoint uses a legacy or incompatible value target. "
-    "Rebuild processed_data_v2 and retrain the bucket hazard model."
+    "Rebuild the processed dataset and retrain the character-conditioned bucket hazard model."
 )
 
 
 def create_checkpoint(model, model_config, vocabulary, feature_encoder, metadata=None):
+    model_config = dict(model_config)
+    if model_config.get("num_characters") != NUM_CHARACTER_IDS:
+        raise ValueError(
+            "model_config.num_characters must equal the character vocabulary size"
+        )
     return {
         "format_version": CHECKPOINT_FORMAT_VERSION,
         "preprocessing_version": PREPROCESSING_VERSION,
@@ -37,6 +54,8 @@ def create_checkpoint(model, model_config, vocabulary, feature_encoder, metadata
         "global_feature_schema_version": feature_encoder.schema_version,
         "boss_schema_version": BOSS_SCHEMA_VERSION,
         "boss_vocabulary": dict(BOSS_VOCABULARY),
+        "character_schema_version": CHARACTER_SCHEMA_VERSION,
+        "character_vocabulary": dict(CHARACTER_VOCABULARY),
         "context_schema": context_schema(),
         "model_config": dict(model_config),
         "model_state_dict": model.state_dict(),
@@ -76,6 +95,8 @@ def load_checkpoint(path, map_location="cpu"):
         "default_heart_bonus_floors",
         "boss_schema_version",
         "boss_vocabulary",
+        "character_schema_version",
+        "character_vocabulary",
     }
     missing = required.difference(checkpoint)
     if missing:
@@ -94,6 +115,11 @@ def load_checkpoint(path, map_location="cpu"):
         raise ValueError("Checkpoint boss schema is incompatible; retraining required")
     if checkpoint["model_config"].get("num_bosses") != NUM_BOSS_IDS:
         raise ValueError("Checkpoint boss vocabulary size is incompatible; retraining required")
+    if checkpoint["character_schema_version"] != CHARACTER_SCHEMA_VERSION:
+        raise ValueError("Checkpoint character schema is incompatible; retraining required")
+    validate_character_vocabulary(checkpoint["character_vocabulary"])
+    if checkpoint["model_config"].get("num_characters") != NUM_CHARACTER_IDS:
+        raise ValueError("Checkpoint character vocabulary size is incompatible; retraining required")
     if checkpoint["model_config"].get("use_map_context"):
         if checkpoint.get("context_schema") != context_schema():
             raise ValueError(

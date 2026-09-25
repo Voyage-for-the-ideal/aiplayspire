@@ -8,6 +8,7 @@ try:
     from .config import Config
     from .data_contract import HAZARD_ENDPOINTS, HAZARD_OUTPUT_DIM
     from .boss_context import NUM_BOSS_IDS, boss_id, get_visible_boss
+    from .character_context import NUM_CHARACTER_IDS, character_id
     from . import map_context
 except ImportError:
     from model import STSValueNetwork
@@ -17,6 +18,7 @@ except ImportError:
     from config import Config
     from data_contract import HAZARD_ENDPOINTS, HAZARD_OUTPUT_DIM
     from boss_context import NUM_BOSS_IDS, boss_id, get_visible_boss
+    from character_context import NUM_CHARACTER_IDS, character_id
     import map_context
 import re
 
@@ -104,6 +106,7 @@ class STSInferenceEngine:
                 "n_heads": Config.N_HEADS,
                 "n_layers": Config.N_LAYERS,
                 "num_global_features": Config.NUM_GLOBAL_FEATURES,
+                "num_characters": NUM_CHARACTER_IDS,
                 "num_bosses": NUM_BOSS_IDS,
                 "dropout": Config.DROPOUT,
                 "global_conditioning": Config.GLOBAL_CONDITIONING,
@@ -130,22 +133,22 @@ class STSInferenceEngine:
     def _boss_id(self, state):
         return torch.tensor([boss_id(get_visible_boss(state))], dtype=torch.long)
 
+    def _character_id(self, state):
+        if not isinstance(state, dict):
+            raise ValueError("state must be a dictionary with a character field")
+        return torch.tensor([character_id(state.get("character"))], dtype=torch.long)
+
     def _context_tensors(self, state):
-        """Pack optional map/plan/key fields of ``state`` into model tensors.
+        """Pack optional map/history/key fields of ``state`` into model tensors.
 
         ``_apply_choice`` deep-copies the state dict, so hypothetical next
-        states inherit the same act map; only keys/plan that the choice
-        itself changes need updating by the caller.
+        states inherit the same act map; only keys changed by the choice need
+        updating by the caller.
         """
         context = map_context.inference_context(state if isinstance(state, dict) else {})
         keys_features = map_context.keys_token_features(
             context["key_states"], context["map_flags"], context["act"]
         )
-        plan_ids = context["plan_rooms"]
-        plan_dist = [
-            index if room else map_context.PLAN_HORIZON
-            for index, room in enumerate(plan_ids)
-        ]
         history_ids = context["history_rooms"]
         history_dist = [
             index if room else map_context.HISTORY_HORIZON
@@ -155,8 +158,6 @@ class STSInferenceEngine:
             torch.tensor([keys_features], dtype=torch.float32),
             torch.tensor([context["map_rooms"]], dtype=torch.long),
             torch.tensor([context["map_flags"]], dtype=torch.long),
-            torch.tensor([plan_ids], dtype=torch.long),
-            torch.tensor([plan_dist], dtype=torch.long),
             torch.tensor([history_ids], dtype=torch.long),
             torch.tensor([history_dist], dtype=torch.long),
         )
@@ -164,16 +165,18 @@ class STSInferenceEngine:
     def _model_logits(self, state):
         seq_tokens, upgrades, counts = self.tokenizer.encode(state['deck'], state['relics'])
         global_feats = self._global_features(state)
+        character_ids = self._character_id(state)
         boss_ids = self._boss_id(state)
         if not self.uses_map_context:
-            return self.model(seq_tokens, upgrades, counts, global_feats, boss_ids)
+            return self.model(
+                seq_tokens, upgrades, counts, global_feats, character_ids, boss_ids
+            )
         context = self._context_tensors(state)
         logits, key_logits = self.model(
-            seq_tokens, upgrades, counts, global_feats, boss_ids,
+            seq_tokens, upgrades, counts, global_feats, character_ids, boss_ids,
             keys_features=context[0], map_rooms=context[1],
-            map_flags=context[2], plan_rooms=context[3],
-            plan_dist=context[4], history_rooms=context[5],
-            history_dist=context[6], return_keys=True,
+            map_flags=context[2], history_rooms=context[3],
+            history_dist=context[4], return_keys=True,
         )
         self._last_key_logits = key_logits
         return logits
@@ -445,6 +448,9 @@ class STSInferenceEngine:
                     starters = {"Strike_R", "Strike_G", "Strike_B", "Strike_P", "Strike"}
                     new_state["deck"] = [card for card in new_state["deck"] if card not in starters]
                     new_state["deck"].extend([effect.get("card_id", "Bite")] * effect.get("amount", 5))
+        elif action == "singing_bowl":
+            new_state["max_hp"] += 2
+            new_state["hp"] += 2
         elif action == "pick_card" and target:
             new_state["deck"].append(target)
         elif action == "buy_card" and target:

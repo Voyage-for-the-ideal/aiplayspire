@@ -1,3 +1,4 @@
+import collections
 import glob
 import gzip
 import json
@@ -29,7 +30,12 @@ from data_pipeline import (
     stable_run_id,
     validate_raw_run,
 )
-from dataset import ChunkShuffleSampler, STSDataset, build_training_artifacts
+from dataset import (
+    CONTEXTUAL_BASELINE_SCHEMA,
+    ChunkShuffleSampler,
+    STSDataset,
+    build_training_artifacts,
+)
 from train import dataloader_worker_count, difficulty_weights, weighted_hazard_loss
 
 
@@ -144,6 +150,29 @@ class FilteringTests(unittest.TestCase):
         self.assertNotIn("PowerPotion", deck)
         self.assertIn("Vajra", relics)
 
+    def test_card_reward_snapshot_is_post_action(self):
+        run = standard_run(
+            card_choices=[
+                {"floor": 1, "picked": "Anger", "not_picked": ["Cleave", "Flex"]}
+            ],
+            master_deck=STARTER_DECK + ["Anger"],
+        )
+        row = process_run(run, self.catalog)["rows"][0]
+        self.assertIn("Anger", row["deck"].split(","))
+        self.assertEqual(row["state_timing"], "post_action")
+
+    def test_singing_bowl_snapshot_uses_recorded_post_action_resources(self):
+        run = standard_run(
+            card_choices=[
+                {"floor": 1, "picked": "Singing Bowl", "not_picked": ["Cleave", "Flex"]}
+            ],
+            current_hp_per_floor=[72],
+            max_hp_per_floor=[82],
+        )
+        row = process_run(run, self.catalog)["rows"][0]
+        self.assertEqual((row["hp"], row["max_hp"]), (72, 82))
+        self.assertEqual(row["deck"].split(","), STARTER_DECK)
+
     def test_boss_relic_snapshots_use_next_act_floors(self):
         floors = 34
         run = standard_run(
@@ -164,6 +193,48 @@ class FilteringTests(unittest.TestCase):
         self.assertEqual([row["floor"] for row in boss_rows], [17, 34])
         self.assertIn("Coffee Dripper", boss_rows[0]["relics"].split(","))
         self.assertIn("Sozu", boss_rows[1]["relics"].split(","))
+
+    def test_boss_relic_replaces_starter_before_snapshot(self):
+        floors = 17
+        run = standard_run(
+            floor_reached=floors,
+            boss_relics=[
+                {"picked": "Black Blood", "not_picked": ["Sozu", "Ectoplasm"]}
+            ],
+            relics=["Black Blood"],
+            current_hp_per_floor=[70] * floors,
+            max_hp_per_floor=[80] * floors,
+            gold_per_floor=[99] * floors,
+            path_per_floor=["M"] * floors,
+            path_taken=["M"] * floors,
+        )
+        rows = process_run(run, self.catalog)["rows"]
+        boss_row = next(row for row in rows if row["decision_type"] == "boss_relic")
+        self.assertIn("Black Blood", boss_row["relics"].split(","))
+        self.assertNotIn("Burning Blood", boss_row["relics"].split(","))
+
+    def test_empty_cage_implicit_removals_precede_boss_snapshot(self):
+        floors = 17
+        final_deck = STARTER_DECK[2:]
+        run = standard_run(
+            floor_reached=floors,
+            boss_relics=[
+                {"picked": "Empty Cage", "not_picked": ["Sozu", "Ectoplasm"]}
+            ],
+            relics=["Burning Blood", "Empty Cage"],
+            master_deck=final_deck,
+            current_hp_per_floor=[70] * floors,
+            max_hp_per_floor=[80] * floors,
+            gold_per_floor=[99] * floors,
+            path_per_floor=["M"] * floors,
+            path_taken=["M"] * floors,
+        )
+        rows = process_run(run, self.catalog)["rows"]
+        boss_row = next(row for row in rows if row["decision_type"] == "boss_relic")
+        self.assertEqual(
+            collections.Counter(boss_row["deck"].split(",")),
+            collections.Counter(final_deck),
+        )
 
     def test_final_deck_must_match_exactly(self):
         run = standard_run(master_deck=STARTER_DECK + ["Anger"])
@@ -217,7 +288,9 @@ class DatasetBuildTests(unittest.TestCase):
                 encoding="utf-8",
             ) as handle:
                 stored_manifest = json.load(handle)
-            vocabulary, encoder = build_training_artifacts(output_dir)
+            vocabulary, encoder, baseline_statistics = build_training_artifacts(
+                output_dir, include_baselines=True
+            )
             dataset = STSDataset(output_dir, vocabulary, encoder, split="train")
             shuffled_indices = list(
                 ChunkShuffleSampler(dataset, torch.Generator().manual_seed(7))
@@ -229,18 +302,26 @@ class DatasetBuildTests(unittest.TestCase):
         self.assertEqual(stored_manifest["hazard_endpoints"], list(HAZARD_ENDPOINTS))
         self.assertTrue(stored_manifest["distributions"]["at_risk_samples_by_hazard"])
         self.assertTrue(stored_manifest["distributions"]["stop_samples_by_hazard"])
+        self.assertEqual(
+            baseline_statistics["schema_version"], CONTEXTUAL_BASELINE_SCHEMA
+        )
+        self.assertEqual(len(baseline_statistics["global"]["rates"]), len(TARGET_COLUMNS))
+        self.assertTrue(baseline_statistics["strata"])
         self.assertEqual(set(frame["preprocessing_version"]), {PREPROCESSING_VERSION})
         self.assertEqual(set(frame["filter_version"]), {FILTER_VERSION})
         self.assertEqual(set(frame["ascension_band"]), {0})
+        self.assertEqual(set(frame["character"]), {"IRONCLAD"})
+        self.assertEqual(set(frame["state_timing"]), {"post_action"})
         # v3 map context columns ride along with every accepted sample.
         self.assertEqual(set(frame["map_context_version"]), {MAP_CONTEXT_VERSION})
         self.assertEqual(len(frame["map_rooms"].iloc[0]), 105)
         self.assertEqual(len(frame["map_flags"].iloc[0]), 105)
-        self.assertEqual(len(frame["plan_rooms"].iloc[0]), 1)
+        self.assertNotIn("plan_rooms", frame.columns)
         self.assertEqual(len(frame["history_rooms"].iloc[0]), 8)
         self.assertEqual(list(frame["key_states"].iloc[0]), [0, 0, 0])
         self.assertTrue(any(room for room in frame["map_rooms"].iloc[0]))
         self.assertEqual(stored_manifest["map_context_version"], MAP_CONTEXT_VERSION)
+        self.assertEqual(stored_manifest["state_timing"], "post_action")
         self.assertEqual(
             stored_manifest["distributions"]["runs_with_map_context"], {"true": 1}
         )

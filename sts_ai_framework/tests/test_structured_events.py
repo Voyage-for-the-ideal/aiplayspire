@@ -16,7 +16,7 @@ def make_state(event=None, hp=50, choice_list=None):
         deck=[], hand=[], draw_pile=[], discard_pile=[], exhaust_pile=[],
         draw_pile_size=0, discard_pile_size=0, exhaust_pile_size=0,
         monsters=[], floor=10, act=1, room_phase="EVENT", screen_type="EVENT",
-        choice_list=choice_list or [], event=event,
+        choice_list=choice_list or [], event=event, character="IRONCLAD",
     )
 
 

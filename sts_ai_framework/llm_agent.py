@@ -2,6 +2,7 @@ import os
 import sys
 from typing import Optional
 
+import httpx
 from openai import OpenAI
 
 from .agent_base import Agent
@@ -19,7 +20,7 @@ except ImportError:
 class LLMAgent(ActionMixin, DecisionMixin, InfoPromptMixin, ChoiceMixin, RouteMixin, Agent):
     def __init__(
         self,
-        model_name: str = "deepseek-v4-flash",
+        model_name: str = "deepseek-flash",
         knowledge_base: Optional[KnowledgeBase] = None,
         game_client=None,
         debug_prompt_file: Optional[str] = None,
@@ -34,11 +35,17 @@ class LLMAgent(ActionMixin, DecisionMixin, InfoPromptMixin, ChoiceMixin, RouteMi
         # Initialize DeepSeek LLM client via OpenAI SDK
         api_key = os.getenv("DEEPSEEK_API_KEY", "")
         base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+        # Bypass any system proxy (e.g. a local Clash/VPN at 127.0.0.1:7897).
+        # httpx honours the Windows registry proxy by default, which cannot
+        # reach the on-campus endpoint and fails with APIConnectionError.
+        # Set LLM_TRUST_ENV=true to opt back in to environment proxies.
+        trust_env = os.getenv("LLM_TRUST_ENV", "false").strip().lower() in ("1", "true", "yes", "on")
         self.llm_client = OpenAI(
             api_key=api_key,
             base_url=base_url,
             timeout=10.0,
             max_retries=0,
+            http_client=httpx.Client(trust_env=trust_env),
         )
 
         # 加载本地选卡决策模型

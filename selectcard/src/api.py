@@ -1,8 +1,9 @@
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, validator
 from typing import List, Optional, Dict, Any
 from src.inference import STSInferenceEngine
 from src.card_input import normalize_card_reference
+from src.character_context import character_id
 
 app = FastAPI(title="Slay the Spire AI Playspire Integration", description="AI Playspire Card/Shop Evaluator")
 
@@ -18,7 +19,13 @@ class PlayerState(BaseModel):
     gold: int
     floor: int
     ascension: int
+    character: str
     visible_boss: str = "NO_BOSS"
+
+    @validator("character")
+    def validate_character(cls, value):
+        character_id(value)
+        return value
     
 class Choice(BaseModel):
     action: str

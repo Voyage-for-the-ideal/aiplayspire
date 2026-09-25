@@ -11,10 +11,9 @@ STS_API_ACTION_URL = f"{STS_API_BASE_URL}/action"
 # DeepSeek API (OpenAI 兼容格式)
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
 
 # Model name (CLI --model flag default)
-LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-v4-flash")
+LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-flash")
 
 # Logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

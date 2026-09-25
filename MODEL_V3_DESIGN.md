@@ -1,6 +1,6 @@
 # 下一代模型设计方案：v3 地图条件化统一价值网络
 
-> 创建日期: 2026-09-11 | 更新日期: 2026-09-12 | 状态: **P0/P1 已实现**（数据层 `map_context.py`、模型层 [MAP]/[PLAN]/[KEYS] token + key 头、
+> 创建日期: 2026-09-11 | 更新日期: 2026-09-21 | 状态: **纠偏方案已实现**（数据层 `map_context.py`、模型层 [MAP]/[CHARACTER]/[KEYS] token + key 头、
 > 目标：让非战斗决策模型覆盖 **选路、选牌、商店、事件、钥匙**（含带火精英），
 > 并通过「后续地图上下文」让模型学会 **为未来投资**（先拿牌/攒钱/惜血，兑现于后面的商店、精英、钥匙）。
 
@@ -12,8 +12,8 @@
    （`V(S) = E[终止楼层] + HEART_WIN_BONUS_FLOORS × P(Heart)`，标签契约 `bucket-hazard-v1` 不变），只扩输入与辅助头。
 2. **一个 backbone，五类决策一个入口**：所有非战斗决策统一为「枚举候选 → 局部模拟下一状态 S′ → V(S′) → argmax」；
    MAP 决策不再走手工权重，改为 **限定深度 expectimax 树搜索 + V(S) 截断**（把战斗侧「真引擎 + 树搜索 + 价值截断」的成功模式复刻到地图上）。
-3. **地图上下文 token 化**：新增 `[MAP]`（当前幕全图节点 token，含 burning 标记）、`[PLAN]`（当前位置到 boss 的计划路径 token）、
-   全局特征加钥匙状态。选牌模型第一次能「看见」后面有商店/带火精英/宝箱。
+3. **地图上下文 token 化**：新增 `[CHARACTER]`（四角色稳定编码）、`[MAP]`（当前幕全图节点 token，含 burning 标记）和 `[KEYS]`，
+   并保留 history 视野；不把 router 的临时计划注入价值模型。选牌模型能「看见」后面有商店/带火精英/宝箱。
 4. **钥匙显式建模，退役硬规则**：Ruby(休息点 Recall)/Emerald(带火精英)/Sapphire(宝箱) 三来源全部进入候选集；
    钥匙价值由 P(Heart) 头端到端学出，另加 key-progress 辅助头加速收敛。`choice_mixin.py` 里「Act3 强制 Recall」「CHEST 自动打开」等硬规则逐个替换。
 5. **数据分三层**：本地月度归档人类 run（约 2,000 万条，含 `seed_played`）→ **种子→地图重建（✅ 已实现并验证 99.97%，见 §4.2）**
@@ -86,7 +86,7 @@
   LLM 智能体（[balatrollm](https://github.com/coder/balatrollm)）为另一极。启示：**重写引擎 + RL** 适合战斗复杂度高的游戏；
   StS 战斗我们已用真引擎树搜索解决，非战斗决策稀疏、状态可完整结构化、样本少，**离线 value function + 候选模拟**比 PPO 更匹配（不需要不可微战斗的梯度近似）。
 - **Decision Transformer**（[Chen et al., NeurIPS 2021](https://proceedings.neurips.cc/paper/2021/hash/7f489f642a0ddb10272b5c31057f0663-Abstract.html)）：
-  不采用序列建模出动作（我们的数据规模与可枚举候选结构不适合），但采纳其核心思想——**条件化于未来信息做当前决策**（我们的 [PLAN] token 即 returns-to-go 的结构性等价物）。
+   不采用序列建模出动作（我们的数据规模与可枚举候选结构不适合），但保留由真实地图与 history 提供的可观测上下文。
 - **Distributional RL**（C51 一系）：v2 的 20 桶 stopping-hazard 本质是分布价值头，保留并扩展为 v3 的主头；
   hazard 表示还天然给出「风险敞口」——路径风险可用桶上 `P(stop_before_floor+k)` 的变化量表达，替代手工 risk 权重。
 
@@ -114,10 +114,10 @@
 
 ### 3.2 输入表示（token schema）
 
-序列总预算 `MAX_SEQ_LEN: 64 → 192`：
+序列总预算按当前实现配置，item token 上限为 73：
 
 ```
-[CLS] + [GLOBAL] + [BOSS] + [KEYS] + [MAP×N_map] + [PLAN×N_plan] + item tokens（≤96）
+[CLS] + [GLOBAL] + [CHARACTER] + [BOSS] + [KEYS] + [MAP×N_map] + [HISTORY×8] + item tokens（≤73）
 ```
 
 | token 组 | 内容 | 说明 |
@@ -125,12 +125,13 @@
 | `[GLOBAL]` | 现有 9 维 + 新增：`act`、`floor_in_act`、`floors_left_in_act`、`ruby/emerald/sapphire`（3×onehot）、`burning_key_pending_act1..3`（当前幕是否还有带火精英未打）、`deck_size`、`curse_count`、`potion_count` | `NUM_GLOBAL_FEATURES: 9 → ~18` |
 | `[BOSS]` | 当前幕可见 Boss（保留 v2 设计） | 不变 |
 | `[KEYS]` | 钥匙汇总上下文 token：已集齐数量 + 当前幕带火精英存在性 + Recall 可用性 | 给钥匙信号一个高带宽的 attention 锚点 |
-| `[MAP]×N` | **当前幕全图每个节点一个 token**（StS 当前幕全图始终可见）：房间类型 onehot(M/E/R/$/T/?/Boss)、`burning` 标记、楼层 y、归一化列位置 x、出度、入度、`reachable_from_current`、`visited`、`on_plan`。外部数据经 §4.2 重建后全量带图；learned missing-embedding 仅兜底约 0.03% 重建异常样本 | N ≈ 16–23/幕；三幕只放当前幕（后续幕地图未生成），跨幕先验由 `act` 全局特征 + `[BOSS]` 学习 |
-| `[PLAN]×N` | 当前 router 给出的「当前位置 → boss」计划路径，每层一个房间类型 token + 距离 embedding，**固定视野 D=8 截断**（见 §4.3） | 训练期外部数据用 **realized path**（hindsight）+ dropout 0.5；自对弈数据用 router 真实 plan。这是「投资未来」最直接的对齐通道 |
+| `[CHARACTER]` | 当前角色的稳定 ID：`IRONCLAD=0`、`THE_SILENT=1`、`DEFECT=2`、`WATCHER=3` | 训练、推理均必填；未知或缺失角色直接拒绝 |
+| `[MAP]×N` | **当前幕全图每个节点一个 token**（StS 当前幕全图始终可见）：房间类型 onehot(M/E/R/$/T/?/Boss)、`burning` 标记、楼层 y、归一化列位置 x、出度、入度、`reachable_from_current`、`visited`。外部数据经 §4.2 重建后全量带图；learned missing-embedding 仅兜底约 0.03% 重建异常样本 | N ≈ 16–23/幕；三幕只放当前幕（后续幕地图未生成），跨幕先验由 `act` 全局特征 + `[BOSS]` 学习 |
+| `[HISTORY]×8` | 当前幕已走过路径的历史房间上下文 | 只表示已发生信息；不包含 router 计划或 hindsight future |
 | items | 卡组/遗物/药水（现有编码，升级/数量 embedding 不变） | 不变 |
 
 架构调整（`selectcard/src/config.py`）：`D_MODEL: 128 → 192`，`N_LAYERS: 3 → 5`，`MAX_SEQ_LEN: 64 → 192`；
-新增 **token 类型 embedding**（目前只有 item 一种，需区分 global/boss/keys/map/plan/item 五类），其余（Pre-LN、早期 Global token、CLS pooling）不动。
+新增 **token 类型 embedding**（区分 CLS/global/character/boss/keys/map/history/item 八类），其余（Pre-LN、早期 Global token、CLS pooling）不动。
 参数量约 3–5M，RTX 5090 上训练小时级，推理 batch 一次前向毫秒级。
 
 ### 3.3 输出头
@@ -149,7 +150,7 @@
 | 决策 | 候选 | S′ 构造 | 打分 |
 |---|---|---|---|
 | MAP | 下一步房间选择（`current_map_choices`） | **限定深度 expectimax**（见 3.5），叶状态 = 模拟推进 D 个房间后的状态 | 叶 V(S′) 期望，取 argmax；不可用时回退现有 `RoutePlanner` |
-| CARD_REWARD / BOSS_REWARD / GRID | 现有枚举 | 现有局部模拟（`_apply_choice`） | V(S′)；**新增：输入带 [MAP]/[PLAN]/[KEYS]** |
+| CARD_REWARD / BOSS_REWARD / GRID | 现有枚举 | 现有局部模拟（`_apply_choice`） | V(S′)；输入带 [CHARACTER]/[MAP]/[KEYS] |
 | SHOP_SCREEN | 现有贪心搜索（买/删牌组合） | 现有 | 同上 |
 | EVENT | 结构化语义（EventStateExtractor）的全部合法选项；随机效果（random_relic/random_upgrade 等）枚举 realization 取加权期望；战斗选项保守规则（避开或强制进入） | per-choice expectimax（已实现于 `sts_ai_framework/llm_agent_parts/event_expectimax.py`，`EVENT_DECISION_POLICY` 可切回 legacy） | 同上 |
 | REST | Rest / Smith(逐卡) / **Recall** | Recall 的 S′ = `ruby_key=True`（局部模拟器新增该动作） | V(S′) 与 Rest/Smith 同台比较；无 Ruby 且模型认为路线难以承担损失时自然选 Recall |
@@ -204,7 +205,7 @@ heart-rate.net **已关停**；现有外部数据全部在本地 `selectcard/STS
 
 | 来源 | 有什么 | 缺什么 | 用途 |
 |---|---|---|---|
-| 本地月度归档人类 run | 完整终局标签、卡组/遗物/事件/营火决策、`path_per_floor`、**`seed_played`（run 种子）**、`build_version` | 原生无图结构字段（由 §4.2 重建补齐）；Ruby←RECALL、Emerald←重建带火精英可推断，Sapphire 暂不可推断 | 价值核心预训练；`[PLAN]` 用 realized path + 固定视野截断 + dropout；**种子→图重建（见 4.2）的数据底座** |
+| 本地月度归档人类 run | 完整终局标签、卡组/遗物/事件/营火决策、`path_per_floor`、**`seed_played`（run 种子）**、`build_version` | 原生无图结构字段（由 §4.2 重建补齐）；Ruby←RECALL、Emerald←重建带火精英可推断，Sapphire 暂不可推断 | 价值核心预训练；post-action 快照与 history 上下文；**种子→图重建（见 4.2）的数据底座** |
 | 种子→地图重建（✅ 已实现并验证） | 给归档 run 配上**整幕真图**（节点/边/房间类型 + 带火精英位置），历史回验 99.97% | Sapphire 钥匙状态仍不可推断；约 0.03% 异常段标记为缺失 | 全图 `[MAP]` token 的主数据来源（无需等自对弈） |
 | 自对弈 run（framework） | 可 dump 全图/钥匙/带火标记/每步决策与候选 | 分布窄（AI 自己的偏好）、初期模型弱 | 分布适配微调；key-progress 头监督；MAP 搜索的行为数据 |
 | scumthespire 战斗模拟 | 精确战斗结果分布 | —— | 推理期特征（MAP 树展开），非训练数据 |
@@ -233,41 +234,17 @@ StS 的地图由种子确定性生成，**该轨道已实现并验证通过**：
 - ? 房间的具体事件**不**重建（eventRng 消耗顺序依赖玩家路径），保持 ? 概率分支方案；带火精英是否被击杀可由路径是否经过该节点推断，
   用于后续幕的 burning 标记与 `hasEmeraldKey` 状态链。
 
-### 4.3 未来信息通道：[MAP]（种子重建全图）+ [PLAN]（hindsight 固定视野）
+### 4.3 地图与历史上下文，以及训练时序
 
-种子重建（§4.2）落地后，外部数据从第一个样本起就带真图，两条未来信息通道并存：
+种子重建（§4.2）落地后，外部数据从第一个样本起就带当前幕真图。模型只接收决策时可获得的上下文：
 
-1. **[MAP] 全图通道**：每个决策点附当前幕重建图（节点/边/房间类型/burning 标记/visited 标记）。训练与推理同构
-   （推理期框架本来就从 `/state` 拿到真图）。全图 optionality、带火精英路线、钥匙时机（早拿 vs 晚拿）都由这条通道学习。
-2. **[PLAN] hindsight 通道**：决策点在第 k 层时，输入 = 过去路径 `path_per_floor[0..k-1]`（已发生，无泄漏）+
-   **未来路径 `path_per_floor[k+1 .. k+D]` 截断为固定 D=8 个房间**（带距离 embedding，幕边界截断）。
-3. **为什么 [PLAN] 必须截断（防泄漏）**：完整剩余路径的长度本身就是标签——活到通关的人后缀 ~50 层，死在第 12 层的人后缀只有几层。
-   不截断的话模型只需「数一数 plan 还有多长」就能刷高 hazard 指标，学到的是假价值。固定 D 只保留**局部未来结构**
-   （「2 层后是商店」「4 层后是精英」），恰好是投资信号，且推理期可从 router 计划同样获得。
-4. **训练-推理一致性**：[PLAN] 训练喂「该玩家接下来实际走的 D 个房间」、推理喂「router 计划的 D 个房间」——语义相同
-   （接下来会经历什么），分布差异由自对弈微调吸收；幕切换后下一幕路径本来就不存在，天然缺失。
-5. **防过信**：plan token dropout 0.5；探针测试（6.2）把关「投资行为」是否真的学出。
-6. **能学到 / 学不到**：
-   - 能学到：近程投资（商店前攒钱买关键件、精英前惜血、休息前敢冒险）、全图 optionality、
-     带火精英/钥匙路线时机（外部数据即带 burning 标记与可推断的钥匙状态链）；
-   - 学不到：下一幕未生成的地图（游戏本身不可见）——跨幕先验由 `act` 全局特征 + `[BOSS]` token 学习。
-
-#### 4.3.1 修订（v3 训练后）：D=8 的 padding 泄漏 → D=1 + [HISTORY×8]
-
-首轮 v3 训练（`v3_train_61024.log`）暴露出 D=8 截断**并未**防住第 3 条担心的泄漏：
-
-- **机理**：中途死亡的 run 其 realized 路径本身不足 8 层，plan 尾部以 0（missing）填充——padding 长度直接给出
-  「接下来 ≤8 层内死亡」，而监督质量集中在近程桶。训练第 4 轮（解 mask）val loss 即从 0.40 跳到 0.063，之后 14 轮仅降 0.0009。
-- **证据**：近程桶（plan 视野内）ROC-AUC 0.992–0.999，远程桶回落 0.79–0.96，呈精确的视野梯度；对照 v2
-  （无 plan，1250 万样本）所有桶平坦地 0.71–0.78。合法特征不可能产生「3 层内死亡近乎全知」的模式。
-- **修复（已实现，`map-context-v2`）**：
-  1. `PLAN_HORIZON = 1`——人总会走进他死亡的房间，单步 plan 对几乎所有样本都存在，padding 只剩幕边界这种决策时已知的合法截断；
-  2. 新增 `[HISTORY×8]`：当前楼层之前本幕实际走过的房间（most-recent-first + 距离 embedding），构造上无未来信息、无 dropout，
-     对应「死亡归因于走过的路径而非下一层」的因果方向；
-  3. 框架侧 plan 新鲜度：`_last_plan_symbols` 改存 `(锚定楼层, 路线)`，`map_payload` 按楼层差移位取「路线上的下一间」，
-     过期/耗尽即省略（D=1 下原始缓存的第一间恰是当前所在房间，语义完全错位）。
-- **代价**：多步前瞻意图（商店前 2 层攒钱）弱化——[MAP] 全图通道仍含布局，模型可自行组合；重训后近程桶 AUC 应回落至
-  与远程桶同级（验收标准），若整体与 v2 持平则说明 plan 通道无净增益、可直接移除。
+1. **[MAP] 全图通道**：每个决策点附当前幕重建图（节点/边/房间类型/burning/visited/reachable 标记）。训练与推理同构，
+   全图 optionality、带火精英路线和钥匙时机由这条通道学习。
+2. **[HISTORY×8]**：当前楼层之前本幕实际走过的房间（most-recent-first + 距离 embedding），只表示已发生信息，不含未来路径。
+3. **不使用 PLAN**：router 的路线只是临时选路工具，不进入训练数据、模型输入或 value payload；模型根据真实地图自行评估候选。
+4. **post-action 训练状态**：每条训练行的状态字段表示该行历史选择已经执行后的 `S′`，与推理阶段对候选执行局部模拟后评分 `V(S′)` 保持一致。
+   `state_timing="post_action"` 是新数据契约的一部分，混入旧时序样本时构建/加载必须拒绝。
+5. **能学到 / 学不到**：能学到全图 optionality、带火精英/钥匙路线时机以及基于历史的风险；下一幕未生成的地图仍由 `act` 全局特征和 `[BOSS]` token 表达跨幕先验。
 
 ### 4.4 自对弈数据捕获（新）
 
@@ -281,7 +258,7 @@ StS 的地图由种子确定性生成，**该轨道已实现并验证通过**：
 
 - 新目录 `selectcard/processed_data_v3/`（不提交），`PREPROCESSING_VERSION = "set-transformer-v7-map-hazard"`；
   **标签契约、端点、V 组合公式与 v2 完全一致** → 新旧模型同一把尺子。
-- 混训采样：每 batch 外部 : 自对弈 ≈ 7 : 3（防自对弈分布坍缩）；`[MAP]` 缺失（约 0.03% 异常段）走 learned missing-embedding，`[PLAN]` dropout 0.5。
+- 混训采样：每 batch 外部 : 自对弈 ≈ 7 : 3（防自对弈分布坍缩）；`[MAP]` 缺失（约 0.03% 异常段）走 learned missing-embedding。所有样本必须满足 `state_timing="post_action"`。
 - 地图附件：对每条外部 run 按幕调用重建器（`sts_mapgen.generate_act_map`），把 `nodes[{x,y,symbol,burning,edges}]` 与推断的钥匙状态链写进 v3 样本列（一次性批处理，约 2,000 万条；抽样回验命令见 §4.2）。
 - 过采样钥匙决策点（REST/CHEST/含 burning 路径的 MAP）×3，缓解稀有决策欠拟合。
 - 局部模拟保真度沿用仓库既有校验传统：自对弈时把每步 S′ 模拟结果与下一步真实 `/state` 比对，不一致事件进 `find_mismatches.py` 风格的报告。
@@ -300,8 +277,8 @@ v3.0（外部全量预训练，含重建地图）→ 自对弈采集（ε=0.1，
 
 - 损失：`Σ masked hazard BCE + heart BCE + 0.2 × key-progress BCE (+ 0.1 × policy CE)`；
   训练超参沿用 `config.py`（batch 512、cosine、early stopping 起点后移到 epoch 8，序列变长后 dataloader CPU 需求上升，沿用 SLURM 32 核建议）。
-- 课程：前 3 epoch 冻结 `[MAP]/[PLAN]` dropout=1（纯 v2 任务热身），再放开——保证 v3 永远不差于 v2 的退化点。
-- 消融开关（`config.py` 新增）：`USE_MAP_TOKENS / USE_PLAN_TOKENS / USE_KEY_HEAD` 逐个开关，跑 ±消融。
+- 课程：前若干 epoch 可屏蔽地图/历史上下文做热身，但不引入 PLAN dropout 或 PLAN curriculum。
+- 消融开关（`config.py` 新增）：`USE_MAP_TOKENS / USE_CHARACTER_TOKEN / USE_KEY_HEAD` 逐个开关，跑 ±消融。
 
 ---
 
@@ -335,8 +312,8 @@ v3.0（外部全量预训练，含重建地图）→ 自对弈采集（ε=0.1，
 
 | 阶段 | 内容 | 验证 |
 |---|---|---|
-| P0 协议与数据 | **✅ 已实现**：管线按 `seed_played` 重建整幕真图并发射 v3 列（`map_context.py` + `data_pipeline.py`，含 key 状态链与 hindsight plan）；未做：全量批处理执行、自对弈 dump、CHEST/Recall 协议确认、战斗分布接口 | 重建抽样回验 99.97%（已完成）；全量批处理与协议项待执行 |
-| P1 模型 | **✅ 已实现**：`[CLS]+[GLOBAL]+[BOSS]+[KEYS]+[MAP×105]+[PLAN×1]+[HISTORY×8]+items` token schema（类型 embedding，见 §4.3.1 修订：D=8 padding 泄漏 → D=1 + 当前幕 history）、key-progress 头、plan dropout 0.5、课程掩码、train/evaluate/inference 全链路（v2 checkpoint 双向兼容；v3 旧 checkpoint 因 `context_schema` 校验显式失效） | `python -m unittest discover -s selectcard/src -t selectcard/src`（106 测试绿）+ 真实数据端到端冒烟 |
+| P0 协议与数据 | **✅ 已实现**：管线按 `seed_played` 重建整幕真图并发射 v3 列（`map_context.py` + `data_pipeline.py`，含 key 状态链与 history）；训练快照统一为 post-action `S′` | 重建抽样回验 99.97%；全量批处理与协议项待执行 |
+| P1 模型 | **✅ 已实现**：`[CLS]+[GLOBAL]+[CHARACTER]+[BOSS]+[KEYS]+[MAP×105]+[HISTORY×8]+items` token schema、key-progress 头、课程掩码、train/evaluate/inference 全链路；旧 v3 checkpoint 因新 schema 校验显式失效 | `python -m unittest discover -s selectcard/src -t selectcard/src`（模型测试）+ 真实数据端到端冒烟 |
 | P1 模型 | token schema 扩展、key-progress 头、v3 预训练（外部 + 早期自对弈） | 离线指标 ≥ v2；`python -m unittest discover -s selectcard/src -t selectcard/src`（模型测试） |
 | P2 决策接入 | CARD/SHOP/EVENT/REST/CHEST 换 v3 输入；Recall/Sapphire 候选实现；局部模拟器新增 recall/sapphire 动作 | 框架回归 `python -m unittest discover -s sts_ai_framework/tests -t .`；探针 1–3 通过 |
 | P3 MAP 搜索化 | expectimax 决策器 + 快模式 + 规则 fallback | 延迟 < interval；A/B 200 runs |
@@ -351,7 +328,7 @@ SaveStateMod/LudicrousSpeed 预计不动。`selectcard` 侧新增 `MODEL_V3_DESI
 
 | 风险 | 对策 |
 |---|---|
-| hindsight plan 偏差（外部数据用 realized path 条件化，模型可能过信「未来已定」） | plan 固定视野 D=8 截断 + dropout 0.5（`[MAP]` 训练/推理同构，不受此影响）；探针 1–3 回归把关 |
+| 地图重建异常段 | 约 0.03% 样本使用 learned missing-embedding；重建统计和 history/post-action 契约纳入数据验收 |
 | 自对弈分布坍缩（模型学自己的偏好） | ε-greedy 采集 + 每 batch 30% 外部数据 + 跨轮评估 seeds 固定 |
 | 钥匙/Heart 样本稀疏 | key-progress 辅助头 + 决策点过采样；hazard 端点 57 已覆盖 Heart 通道 |
 | MAP 搜索延迟（战斗评估 200 叶） | 快模式（q50 单分支）先行；结果缓存；V 批量前向；超时回退现有 planner |

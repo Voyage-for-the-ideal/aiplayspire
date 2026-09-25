@@ -4,9 +4,9 @@ import sys
 from colorama import Fore, Style
 
 from ..config import EVENT_DECISION_POLICY
-from ..models import ActionType, GameAction, GameState, visible_boss_of
+from ..models import ActionType, GameAction, GameState
 from ..run_log import log_event
-from .map_payload import map_context_fields
+from .value_payload import value_state_payload
 
 
 class ActionMixin:
@@ -148,8 +148,10 @@ class ActionMixin:
         print(Fore.CYAN + "正在思考..." + Style.RESET_ALL)
 
         try:
-            # Normalize model name: strip provider prefix (e.g. "deepseek/deepseek-v4-flash" -> "deepseek-v4-flash")
-            model = self.model_name.split("/", 1)[1] if "/" in self.model_name else self.model_name
+            # 网关上的模型名即完整标识（如 "smart/reasoning" 是路由别名），不可剥离前缀：
+            # 截断成 "reasoning" 会被网关拒绝（403 key not allowed to access model）。
+            # 仅做 .strip()，因模型列表中可能出现带尾随空格的名字。
+            model = self.model_name.strip()
             try:
                 response = self.llm_client.chat.completions.create(
                     model=model,
@@ -171,7 +173,14 @@ class ActionMixin:
                     ],
                 )
 
-            content = response.choices[0].message.content
+            choice = response.choices[0]
+            content = choice.message.content
+            if not isinstance(content, str) or not content.strip():
+                # 推理模型在 token 预算耗尽时可能只产出 reasoning 而 content 为空。
+                # 显式抛错以走既有 fallback，并让 finish_reason 可见
+                # （否则会在 _clean_json_string 里以 NoneType.strip 的含混错误暴露）。
+                raise ValueError(f"LLM 返回空 content (finish_reason={choice.finish_reason})")
+
             print(Fore.GREEN + f"LLM 响应: {content}" + Style.RESET_ALL)
 
             content = self._clean_json_string(content)
@@ -407,18 +416,7 @@ class ActionMixin:
 
         # On-the-fly evaluation via value network (relic-triggered grids etc.)
         if not target_ids and self.value_engine is not None:
-            current_state = {
-                "hp": state.player.current_hp,
-                "max_hp": state.player.max_hp,
-                "gold": state.player.gold,
-                "floor": state.floor,
-                "ascension": 20,
-                "visible_boss": visible_boss_of(state),
-                **map_context_fields(state, getattr(self, "_last_plan_symbols", None)),
-                "deck": [card.id for card in state.deck] if hasattr(state, "deck") else [],
-                "relics": [relic.id for relic in state.relics] if hasattr(state, "relics") else [],
-                "relic_states": self._build_relic_state_payload(state) if hasattr(self, "_build_relic_state_payload") else [],
-            }
+            current_state = value_state_payload(state)
 
             # Never target non-upgradeable cards (notably Necronomicurse), and
             # keep curses out of transforms where a non-curse exists.

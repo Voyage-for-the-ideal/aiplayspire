@@ -46,9 +46,9 @@ class Config:
     MAX_UPGRADE = 15         # 最大升级等级
     MAX_COUNT = 10           # 最大拥有数量限制
     # MAX_SEQ_LEN is the full sequence budget; with map context enabled the
-    # fixed context block is [CLS]+[GLOBAL]+[BOSS]+[KEYS]+105 map+1 plan+8
+    # fixed context block is [CLS]+[GLOBAL]+[CHARACTER]+[BOSS]+[KEYS]+105 map+8
     # history tokens, so the item budget shrinks accordingly (73 at
-    # 192/105/1/8).
+    # 192/105/8). The value stays 73 because CHARACTER replaces the removed PLAN slot.
     MAX_SEQ_LEN = 192
     MAX_ITEM_TOKENS = 192 - 4 - 1 - 105 - 1 - 8  # 73
     D_MODEL = 192            # 隐藏层/嵌入层维度
@@ -63,18 +63,21 @@ class Config:
     RANDOM_SEED = 42
     HEART_WIN_BONUS_FLOORS = 3.0
     HEART_HEAD_LOSS_WEIGHT = 1.0
+    # ``macro_relative_nll`` gives every stopping bucket equal influence and
+    # scales it by the entropy of its training-set prior.  ``micro_nll`` keeps
+    # the legacy risk-cell average for reproducible ablations.
+    VALUE_LOSS_MODE = "macro_relative_nll"
+    BASELINE_ENTROPY_FLOOR = 0.05
     VALUE_DEBUG = os.environ.get("STS_VALUE_DEBUG", "").lower() in {"1", "true", "yes"}
 
     # ==========================
-    # v3 地图条件化上下文（[MAP]/[PLAN]/[KEYS] + key 辅助头）
+    # 地图条件化上下文（[MAP]/[HISTORY]/[KEYS] + key 辅助头）
     # ==========================
-    # Master switch for the v3 map-conditioned extension.  Checkpoints store
-    # their own flag, so v2 checkpoints keep loading and ignore context.
+    # Master switch for the map-conditioned extension. Checkpoints store their
+    # own flag; format-8 and earlier checkpoints require retraining.
     USE_MAP_CONTEXT = True
-    # Hindsight-plan token dropout while training (MODEL_V3_DESIGN.md 4.3).
-    PLAN_TOKEN_DROPOUT = 0.5
-    # First N epochs mask map/plan tokens entirely (curriculum warm-up so the
-    # v3 run can never lose to its own v2 degenerate point).
+    # First N epochs mask map/history tokens entirely for both train and
+    # validation (curriculum warm-up so the v3 run starts from its v2 point).
     CONTEXT_CURRICULUM_EPOCHS = 3
     # Auxiliary key-progress head supervision weight (ruby/emerald/sapphire).
     KEY_HEAD_LOSS_WEIGHT = 0.2

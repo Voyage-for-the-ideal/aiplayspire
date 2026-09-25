@@ -1,13 +1,15 @@
-"""Tests for the value-network map payload (plan freshness + history)."""
+"""Tests for the value-network map payload (history and no route plan)."""
 
 import unittest
 
 from sts_ai_framework.llm_agent_parts.map_payload import map_context_fields
+from sts_ai_framework.llm_agent_parts.value_payload import value_state_payload
 from sts_ai_framework.models import (
     GameState,
     KeyState,
     MapNodeState,
     PathHistoryEntry,
+    PlayerState,
 )
 
 
@@ -27,31 +29,9 @@ def _state(**overrides):
     return state
 
 
-class PlanFreshnessTests(unittest.TestCase):
-    ROUTE = (16, ["R", "E", "$"])  # anchored on the floor it was computed
-
-    def test_same_floor_yields_first_route_room(self):
-        payload = map_context_fields(_state(floor=16), self.ROUTE)
-        self.assertEqual(payload["plan"], ["R"])
-
-    def test_one_floor_later_shifts_past_entered_room(self):
-        payload = map_context_fields(_state(floor=17), self.ROUTE)
-        self.assertEqual(payload["plan"], ["E"])
-
-    def test_exhausted_route_omits_plan(self):
-        payload = map_context_fields(_state(floor=19), self.ROUTE)
-        self.assertNotIn("plan", payload)
-
-    def test_stale_route_floor_moved_backwards_omits_plan(self):
-        payload = map_context_fields(_state(floor=15), self.ROUTE)
-        self.assertNotIn("plan", payload)
-
-    def test_plain_symbol_list_passes_through(self):
-        payload = map_context_fields(_state(), ["e"])
-        self.assertEqual(payload["plan"], ["E"])
-
-    def test_no_plan_omits_key(self):
-        payload = map_context_fields(_state(), None)
+class PlanRemovalTests(unittest.TestCase):
+    def test_plan_is_never_emitted(self):
+        payload = map_context_fields(_state())
         self.assertNotIn("plan", payload)
 
 
@@ -70,7 +50,7 @@ class HistoryTests(unittest.TestCase):
                 PathHistoryEntry(floor=None, resolved_symbol="T"),  # malformed
             ],
         )
-        payload = map_context_fields(state, None)
+        payload = map_context_fields(state)
         self.assertEqual(payload["history"], ["M", "?"])
 
     def test_history_empty_at_act_start(self):
@@ -79,20 +59,20 @@ class HistoryTests(unittest.TestCase):
             floor=35,
             path_history=[PathHistoryEntry(floor=34, resolved_symbol="B")],
         )
-        payload = map_context_fields(state, None)
+        payload = map_context_fields(state)
         self.assertEqual(payload["history"], [])
 
 
 class PayloadShapeTests(unittest.TestCase):
     def test_menu_state_yields_empty_payload(self):
-        self.assertEqual(map_context_fields(GameState(), None), {})
-        self.assertEqual(map_context_fields(None, None), {})
+        self.assertEqual(map_context_fields(GameState()), {})
+        self.assertEqual(map_context_fields(None), {})
 
     def test_mapless_state_yields_empty_payload(self):
-        self.assertEqual(map_context_fields(_state(map_nodes=[]), None), {})
+        self.assertEqual(map_context_fields(_state(map_nodes=[])), {})
 
     def test_basic_fields_packed(self):
-        payload = map_context_fields(_state(), None)
+        payload = map_context_fields(_state())
         self.assertEqual(payload["act"], 2)
         self.assertEqual(payload["floor_in_act"], 2)  # floor 20 - act2 start 18
         self.assertEqual(payload["current_node"], (3, 3))
@@ -100,6 +80,24 @@ class PayloadShapeTests(unittest.TestCase):
                                            "sapphire": False})
         self.assertEqual(len(payload["map_nodes"]), 3)
         self.assertIn("history", payload)
+
+
+class ValuePayloadTests(unittest.TestCase):
+    def test_common_payload_carries_character_and_omits_plan(self):
+        state = _state(
+            character="THE_SILENT",
+            player=PlayerState(current_hp=55, max_hp=70, block=0, energy=3, gold=99),
+        )
+        payload = value_state_payload(state)
+        self.assertEqual(payload["character"], "THE_SILENT")
+        self.assertNotIn("plan", payload)
+
+    def test_common_payload_rejects_missing_or_unknown_character(self):
+        player = PlayerState(current_hp=55, max_hp=70, block=0, energy=3, gold=99)
+        with self.assertRaisesRegex(ValueError, "GameState.character"):
+            value_state_payload(_state(player=player))
+        with self.assertRaisesRegex(ValueError, "GameState.character"):
+            value_state_payload(_state(player=player, character="SILENT"))
 
 
 if __name__ == "__main__":

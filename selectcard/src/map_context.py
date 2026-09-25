@@ -1,14 +1,13 @@
-"""Map / key / plan context features for the v3 map-conditioned value network.
+"""Map / key / history context features for the map-conditioned value network.
 
 Two producers share one packed feature layout so that training samples and
 live inference feed the model identically:
 
 - archived human runs: reconstruct each act's true map from ``seed_played``
-  (:mod:`sts_mapgen`), derive the 1-step hindsight ``[PLAN]`` token and the
-  ``[HISTORY]`` tokens (rooms already walked this act) from
-  ``path_per_floor``;
+  (:mod:`sts_mapgen`) and derive ``[HISTORY]`` tokens (rooms already walked
+  this act) from ``path_per_floor``;
 - live framework states: encode the current act map, the current node, the
-  key state, and a router plan directly from a normalized state dictionary.
+  key state, and path history directly from a normalized state dictionary.
 
 Packed layout (one act, fixed size, no ragged lists):
 
@@ -19,14 +18,8 @@ Packed layout (one act, fixed size, no ragged lists):
     bit 1   burning    elite marked with the emerald flame
     bit 2   visited    on the realized path before the current floor
     bit 3   reachable  reachable from the current position in a future row
-    bit 4   on_plan    on a consistent continuation within the plan horizon
-    bits 5-6 out_deg   outgoing edge count (0-3)
-    bits 7-8 in_deg    incoming parent count (0-3)
-- ``plan_rooms``: :data:`PLAN_HORIZON` room ids; 0 = missing (beyond the act
-  end, dropped out, or unavailable).  The horizon is 1: only the next room.
-  A longer realized-path suffix leaks the stopping floor through its padding
-  length (runs that die mid-act have short suffixes), which the fixed
-  horizon of 1 removes -- the player always enters the room they die in.
+    bits 4-5 out_deg   outgoing edge count (0-3)
+    bits 6-7 in_deg    incoming parent count (0-3)
 - ``history_rooms``: :data:`HISTORY_HORIZON` room ids of the current act's
   realized path before the current floor, most-recent-first (index 0 = the
   room just left), right-padded with 0; no future information.  Earlier
@@ -35,7 +28,7 @@ Packed layout (one act, fixed size, no ragged lists):
 
 Approximations (documented, deliberately conservative):
 
-- "visited"/"on_plan" positions come from a forward DP over the realized
+- "visited" positions come from a forward DP over the realized
   symbol sequence.  When several same-symbol nodes are consistent with the
   log, all of them are marked; ambiguity is rare (the reconstruction
   validator measures the model as >=99.9% path-consistent).
@@ -57,19 +50,19 @@ try:
 except ImportError:  # pragma: no cover - package vs script import
     import sts_mapgen
 
-MAP_CONTEXT_VERSION = "map-context-v2"
+MAP_CONTEXT_VERSION = "map-context-v3"
 MAP_GRID_CELLS = sts_mapgen.MAP_HEIGHT * sts_mapgen.MAP_WIDTH  # 105
-PLAN_HORIZON = 1
 HISTORY_HORIZON = 8
+MAP_FLAG_FEATURES = 7
 
 
 def context_schema():
     """Stamped into v3 checkpoints and validated on load."""
     return {
         "map_context_version": MAP_CONTEXT_VERSION,
-        "plan_horizon": PLAN_HORIZON,
         "history_horizon": HISTORY_HORIZON,
         "map_grid_cells": MAP_GRID_CELLS,
+        "map_flag_features": MAP_FLAG_FEATURES,
     }
 
 ROOM_SYMBOL_TO_ID = {"M": 1, "E": 2, "R": 3, "$": 4, "T": 5, "?": 6, "B": 7}
@@ -80,9 +73,8 @@ FLAG_VALID = 1 << 0
 FLAG_BURNING = 1 << 1
 FLAG_VISITED = 1 << 2
 FLAG_REACHABLE = 1 << 3
-FLAG_ON_PLAN = 1 << 4
-FLAG_OUT_DEG = 1 << 5   # two bits
-FLAG_IN_DEG = 1 << 7    # two bits
+FLAG_OUT_DEG = 1 << 4   # two bits
+FLAG_IN_DEG = 1 << 6    # two bits
 
 WINGED_GREAVES_KEYS = ("wingedgreaves", "wingboots")
 WING_CHARGES = 3
@@ -337,7 +329,6 @@ class RunMapContextBuilder:
         act, segment_index, row = located
         start, symbols = self.segments[segment_index]
         nodes = self.act_maps.get(act)
-        plan_symbols = symbols[row + 1 : row + 1 + PLAN_HORIZON]
         walked = history_symbols(self.segments, segment_index, row)
         key_states = self._key_states(act, floor)
 
@@ -346,7 +337,6 @@ class RunMapContextBuilder:
 
         if nodes is not None:
             visited_rows = self._positions(segment_index, row + 1) or []
-            plan_rows = self._plan_positions(segment_index, row)
             reach = reachable_rows(nodes, row, visited_rows[row] if visited_rows else set())
             for y in range(sts_mapgen.MAP_HEIGHT):
                 for x in range(sts_mapgen.MAP_WIDTH):
@@ -364,56 +354,18 @@ class RunMapContextBuilder:
                         flags |= FLAG_VISITED
                     if y > row and x in reach[y]:
                         flags |= FLAG_REACHABLE
-                    if plan_rows is not None and y > row and x in plan_rows.get(y, ()):
-                        flags |= FLAG_ON_PLAN
-                    flags |= min(len(node.edges), 3) << 5
-                    flags |= min(len(node.parents), 3) << 7
+                    flags |= min(len(node.edges), 3) << 4
+                    flags |= min(len(node.parents), 3) << 6
                     map_flags[index] = flags
 
         return {
             "act": act,
             "map_rooms": map_rooms,
             "map_flags": map_flags,
-            "plan_rooms": [ROOM_SYMBOL_TO_ID.get(s, 0) for s in plan_symbols]
-            + [0] * (PLAN_HORIZON - len(plan_symbols)),
             "history_rooms": [ROOM_SYMBOL_TO_ID.get(s, 0) for s in walked]
             + [0] * (HISTORY_HORIZON - len(walked)),
             "key_states": key_states,
         }
-
-    def _plan_positions(self, segment_index: int, row: int):
-        """Consistent continuation column sets within the plan horizon."""
-        start, symbols = self.segments[segment_index]
-        nodes = self.act_maps.get(segment_index + 1)
-        if nodes is None:
-            return None
-        horizon = symbols[row + 1 : row + 1 + PLAN_HORIZON]
-        if not horizon:
-            return {}
-        base = self._positions(segment_index, row + 1)
-        if not base or not base[row]:
-            return {}
-        wing_row = None
-        if self.wing_floor is not None:
-            wing_row = max(0, self.wing_floor - 1 - start)
-        states: dict[int, int] = {x: 0 for x in base[row]}
-        result: dict[int, set[int]] = {}
-        for offset, wanted in enumerate(horizon, start=1):
-            y = row + offset
-            nxt: dict[int, int] = {}
-            for x, charges in states.items():
-                for edge in nodes[y - 1][x].edges:
-                    if _matches_symbol(nodes[y][edge.dst_x], wanted):
-                        nxt[edge.dst_x] = max(nxt.get(edge.dst_x, 0), charges)
-                if charges > 0 and wing_row is not None and y >= wing_row:
-                    for x2 in range(sts_mapgen.MAP_WIDTH):
-                        if _matches_symbol(nodes[y][x2], wanted):
-                            nxt[x2] = max(nxt.get(x2, 0), charges - 1)
-            if not nxt:
-                break
-            result[y] = set(nxt)
-            states = nxt
-        return result
 
     def _key_states(self, act: int, floor: int):
         ruby = 1 if self.recall is not None and floor > self.recall else 0
@@ -440,14 +392,12 @@ def inference_context(state: dict):
       ``floor_in_act``:       0-based row of the current node
       ``current_node``:       ``(x, y)`` of the current map node or None
       ``map_nodes``:          list of ``{x, y, symbol, burning, children:[{x,y}]}``
-      ``plan``:               up to PLAN_HORIZON upcoming room symbols
       ``history``:            current-act walked room symbols, oldest first
       ``keys``:               ``{ruby, emerald, sapphire}`` booleans
     """
     act = state.get("act")
     floor_in_act = state.get("floor_in_act")
     map_nodes = state.get("map_nodes") or []
-    plan = [s for s in (state.get("plan") or []) if s in ROOM_SYMBOL_TO_ID][:PLAN_HORIZON]
     walked = [
         s for s in (state.get("history") or []) if s in ROOM_SYMBOL_TO_ID
     ][-HISTORY_HORIZON:][::-1]
@@ -462,6 +412,12 @@ def inference_context(state: dict):
         x, y = int(node.get("x", 0)), int(node.get("y", 0))
         if 0 <= x < sts_mapgen.MAP_WIDTH and 0 <= y < sts_mapgen.MAP_HEIGHT:
             grid[(x, y)] = node
+    parent_counts: dict[tuple[int, int], int] = {}
+    for node in grid.values():
+        for child in node.get("children") or []:
+            child_xy = (int(child.get("x", -1)), int(child.get("y", -1)))
+            if child_xy in grid:
+                parent_counts[child_xy] = parent_counts.get(child_xy, 0) + 1
 
     if act is not None and grid:
         row = (
@@ -483,15 +439,14 @@ def inference_context(state: dict):
                 flags |= FLAG_VISITED
             if y in reach and x in reach[y]:
                 flags |= FLAG_REACHABLE
-            flags |= min(len(node.get("children") or []), 3) << 5
+            flags |= min(len(node.get("children") or []), 3) << 4
+            flags |= min(parent_counts.get((x, y), 0), 3) << 6
             map_flags[index] = flags
 
     return {
         "act": act if isinstance(act, int) else 0,
         "map_rooms": map_rooms,
         "map_flags": map_flags,
-        "plan_rooms": [ROOM_SYMBOL_TO_ID.get(s, 0) for s in plan]
-        + [0] * (PLAN_HORIZON - len(plan)),
         "history_rooms": [ROOM_SYMBOL_TO_ID.get(s, 0) for s in walked]
         + [0] * (HISTORY_HORIZON - len(walked)),
         "key_states": [
@@ -526,8 +481,7 @@ def decode_map_features(map_rooms, map_flags):
     """Decode packed columns into ``(room_ids, flag_matrix)`` float tensors data.
 
     Returns ``(rooms: list[int], flags: list[list[float]])`` where each flag
-    row is ``[burning, visited, reachable, on_plan, x/6, y/14, out_deg/3,
-    in_deg/3]``.
+    row is ``[burning, visited, reachable, x/6, y/14, out_deg/3, in_deg/3]``.
     """
     flags_out = []
     for index in range(MAP_GRID_CELLS):
@@ -537,11 +491,10 @@ def decode_map_features(map_rooms, map_flags):
             float(bool(bits & FLAG_BURNING)),
             float(bool(bits & FLAG_VISITED)),
             float(bool(bits & FLAG_REACHABLE)),
-            float(bool(bits & FLAG_ON_PLAN)),
             x / (sts_mapgen.MAP_WIDTH - 1),
             y / (sts_mapgen.MAP_HEIGHT - 1),
-            ((bits >> 5) & 3) / 3.0,
-            ((bits >> 7) & 3) / 3.0,
+            ((bits >> 4) & 3) / 3.0,
+            ((bits >> 6) & 3) / 3.0,
         ])
     return list(map_rooms), flags_out
 
@@ -565,11 +518,11 @@ def keys_token_features(key_states, map_flags, act: int):
 
 
 __all__ = [
-    "MAP_CONTEXT_VERSION", "MAP_GRID_CELLS", "PLAN_HORIZON", "HISTORY_HORIZON",
+    "MAP_CONTEXT_VERSION", "MAP_GRID_CELLS", "HISTORY_HORIZON", "MAP_FLAG_FEATURES",
     "context_schema",
     "ROOM_SYMBOL_TO_ID", "ROOM_ID_TO_SYMBOL", "KEY_ROOM_IDS",
     "FLAG_VALID", "FLAG_BURNING", "FLAG_VISITED", "FLAG_REACHABLE",
-    "FLAG_ON_PLAN", "FLAG_OUT_DEG", "FLAG_IN_DEG",
+    "FLAG_OUT_DEG", "FLAG_IN_DEG",
     "split_act_segments", "segment_of_floor", "history_symbols",
     "wing_pickup_floor",
     "forward_consistent_positions", "suffix_feasible_from",
