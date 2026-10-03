@@ -156,6 +156,37 @@ class SapphireValueEngine:
         result["relics"].append(choice["target"])
         return result
 
+
+class LearnedKeyValueEngine(SapphireValueEngine):
+    supports_key_value = True
+
+    def __init__(self, relic_gain=0.0, sapphire_gain=0.0, ruby_gain=0.0):
+        super().__init__(relic_gain)
+        self.sapphire_gain = sapphire_gain
+        self.ruby_gain = ruby_gain
+        self.choices = None
+
+    def evaluate_state(self, state):
+        keys = state.get("keys") or {}
+        return (
+            super().evaluate_state(state)
+            + self.sapphire_gain * bool(keys.get("sapphire"))
+            + self.ruby_gain * bool(keys.get("ruby"))
+        )
+
+    def _apply_choice(self, state, choice):
+        if choice.get("action") == "take_key":
+            result = copy.deepcopy(state)
+            result.setdefault("keys", {})[choice["target"]] = True
+            return result
+        return super()._apply_choice(state, choice)
+
+    def recommend_choice(self, state, choices, exclude_purge_ids=None):
+        self.choices = choices
+        return max(choices, key=lambda choice: self.evaluate_state(
+            self._apply_choice(state, choice)
+        ))
+
 class CursedTomeValueEngine:
     def __init__(self):
         self.last_apply = None
@@ -562,6 +593,16 @@ class StructuredEventTests(unittest.TestCase):
         self.assertEqual(ActionType.CHOOSE, action.type)
         self.assertEqual(2, action.choice_index)
 
+    def test_learned_ruby_key_is_a_rest_candidate_before_act_three(self):
+        state = make_state(choice_list=["RestOption", "RecallOption"])
+        state.screen_type = "REST"
+        state.act = 1
+        engine = LearnedKeyValueEngine(ruby_gain=10.0)
+        action = Harness(engine)._handle_rest_room(state)
+        self.assertEqual(ActionType.CHOOSE, action.type)
+        self.assertEqual(1, action.choice_index)
+        self.assertIn("take_key", [choice["action"] for choice in engine.choices])
+
     def test_smith_intent_is_a_suffixed_reference(self):
         state = make_state(choice_list=["SmithOption"])
         state.screen_type = "REST"
@@ -696,6 +737,19 @@ class StructuredEventTests(unittest.TestCase):
         action = Harness(SapphireValueEngine(relic_gain=0.08))._handle_combat_reward(state)
         self.assertEqual(ActionType.CHOOSE, action.type)
         self.assertEqual(0, action.choice_index)
+
+    def test_key_aware_checkpoint_compares_complete_post_states(self):
+        state = make_state(choice_list=["relic", "sapphire key"])
+        state.screen_type = "COMBAT_REWARD"
+        state.reward_choices = [
+            RewardChoice(choice_index=0, type="RELIC", relic_id="Anchor"),
+            RewardChoice(choice_index=1, type="SAPPHIRE_KEY", linked_reward_index=0),
+        ]
+        action = Harness(LearnedKeyValueEngine(
+            relic_gain=0.08, sapphire_gain=0.10
+        ))._handle_combat_reward(state)
+        self.assertEqual(ActionType.CHOOSE, action.type)
+        self.assertEqual(1, action.choice_index)
 
     def test_event_phase_change_counts_as_effective_action(self):
         before = make_state(event("FORCED", [choice(0)]), choice_list=["continue"])

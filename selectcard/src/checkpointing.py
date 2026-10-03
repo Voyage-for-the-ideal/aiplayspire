@@ -32,7 +32,7 @@ except ImportError:
     from map_context import context_schema
 
 
-CHECKPOINT_FORMAT_VERSION = 9
+CHECKPOINT_FORMAT_VERSION = 10
 LEGACY_VALUE_TARGET_ERROR = (
     "Checkpoint uses a legacy or incompatible value target. "
     "Rebuild the processed dataset and retrain the character-conditioned bucket hazard model."
@@ -44,6 +44,10 @@ def create_checkpoint(model, model_config, vocabulary, feature_encoder, metadata
     if model_config.get("num_characters") != NUM_CHARACTER_IDS:
         raise ValueError(
             "model_config.num_characters must equal the character vocabulary size"
+        )
+    if model_config.get("use_map_context") and model_config.get("num_key_features") != context_schema()["key_feature_count"]:
+        raise ValueError(
+            "model_config.num_key_features must match the key context schema"
         )
     return {
         "format_version": CHECKPOINT_FORMAT_VERSION,
@@ -127,6 +131,8 @@ def load_checkpoint(path, map_location="cpu"):
                 f"(expected {context_schema()}, got {checkpoint.get('context_schema')}); "
                 "retraining required"
             )
+        if checkpoint["model_config"].get("num_key_features") != context_schema()["key_feature_count"]:
+            raise ValueError("Checkpoint key feature count is incompatible; retraining required")
     if checkpoint["global_feature_schema_version"] != GlobalFeatureEncoder.schema_version:
         raise ValueError("Checkpoint global feature schema is incompatible")
     vocabulary = ItemVocabulary.from_dict(checkpoint["vocabulary"])

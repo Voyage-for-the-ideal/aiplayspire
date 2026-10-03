@@ -16,6 +16,7 @@ try:
     from .run_lifecycle import LIFECYCLE_SCREENS, get_lifecycle_action, is_lifecycle_state
     from .battle_stall import StallWatcher
     from .run_log import setup_run_log, log_event, install_stdout_tee
+    from .reward_telemetry import RewardTransitionTracker
 except ImportError:
     # Hack to allow running python sts_ai_framework/__main__.py
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -27,6 +28,7 @@ except ImportError:
     from sts_ai_framework.run_lifecycle import LIFECYCLE_SCREENS, get_lifecycle_action, is_lifecycle_state
     from sts_ai_framework.battle_stall import StallWatcher
     from sts_ai_framework.run_log import setup_run_log, log_event, install_stdout_tee
+    from sts_ai_framework.reward_telemetry import RewardTransitionTracker
 
 # Initialize colorama
 init()
@@ -152,6 +154,7 @@ def main():
     pending_submission_timeout = 15.0
     prev_state = None
     stall_watcher = StallWatcher(BATTLE_STALL_WARN_SECONDS)
+    reward_transition_tracker = RewardTransitionTracker()
 
     try:
         while True:
@@ -172,6 +175,19 @@ def main():
             if retry_count > 0:
                 sys.stdout.write("\n") # 换行
                 retry_count = 0
+
+            # The bridge acknowledges queue insertion before the game consumes
+            # an action.  Emit chest/reward semantics only after a later state
+            # confirms the transition; an unconfirmed timeout is not a label.
+            expired_transition = reward_transition_tracker.discard_if_expired(
+                time.monotonic(), pending_submission_timeout)
+            if expired_transition is not None:
+                print(Fore.YELLOW +
+                      f"未确认 {expired_transition} 状态变化，已丢弃该语义日志。" +
+                      Style.RESET_ALL)
+            confirmed_transition = reward_transition_tracker.observe(state)
+            if confirmed_transition is not None:
+                log_event(**confirmed_transition, ts=time.strftime("%H:%M:%S"))
 
             # 对局边界日志:进入 GAME_OVER 记 run_end；从生命周期界面回到对局内记 run_start
             if prev_state is not None:
@@ -303,17 +319,23 @@ def main():
                     submitted, server_resp, error_msg = client.submit_action(action)
                     post_state = None
                     if submitted:
+                        submitted_at = time.monotonic()
+                        reward_transition_tracker.begin(
+                            pre_action_state, action, submitted_at)
                         print(Fore.GREEN + "行动已提交到 Mod 队列。" + Style.RESET_ALL)
                         if server_resp is not None:
                             print(f"Mod 响应: {server_resp}")
 
                         post_state = _fetch_post_action_state(client)
+                        confirmed_transition = reward_transition_tracker.observe(post_state)
+                        if confirmed_transition is not None:
+                            log_event(**confirmed_transition, ts=time.strftime("%H:%M:%S"))
                         if _is_action_effective(pre_action_state, post_state, action):
                             print(Fore.GREEN + "检测到动作已生效。" + Style.RESET_ALL)
                         else:
                             print(Fore.YELLOW + "动作已提交，但暂未观察到明显状态变化（可能仍在动画或队列处理中）。" + Style.RESET_ALL)
                             if action.type != ActionType.WAIT:
-                                pending_submission = (pre_action_state, action, time.monotonic())
+                                pending_submission = (pre_action_state, action, submitted_at)
                     else:
                         print(Fore.RED + f"行动提交失败: {error_msg}" + Style.RESET_ALL)
 

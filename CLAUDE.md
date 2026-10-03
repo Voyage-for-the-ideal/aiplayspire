@@ -56,11 +56,11 @@ AIPlaySpire：让 AI 自动通关《杀戮尖塔》的研究项目。游戏侧 4
   - `[CHARACTER]` 使用稳定的 `IRONCLAD=0`、`THE_SILENT=1`、`DEFECT=2`、`WATCHER=3` 编码；训练和推理拒绝缺失或未知角色。
   - 地图上下文由 `selectcard/src/map_context.py` 打包（房间/边/带火/visited/reachable + 当前幕走过的路径 history 视野 8）；不再包含 `on_plan`、`plan_rooms` 或 router 计划。
     归档 run 经 `sts_mapgen.py` 由 `seed_played` 逐位重建整幕真图（历史回验 99.97%），训练/推理共用同一打包格式。
-  - `data_pipeline.py` 为每个样本附加上下文列（`map_rooms/map_flags/history_rooms/key_states/act`）；训练不使用 plan dropout 或 plan curriculum。
+  - `data_pipeline.py` 为每个样本附加上下文列（`map_rooms/map_flags/history_rooms/key_states/key_known_mask/act`）；历史 `.run` 无法确认的蓝钥匙保持 unknown，训练不使用 plan dropout 或 plan curriculum。
   - 新 v3 checkpoint 使用 post-action 状态：每条训练样本的特征表示历史选择执行后的 `S′`。本轮提升 preprocessing、map-context 和 checkpoint schema 版本，旧 v3 checkpoint 需重新训练，不兼容加载。
   - `use_map_context=False` 时仍使用 `[CLS] + [GLOBAL] + [CHARACTER] + [BOSS] + item tokens`；这是新角色 token 契约，不等同于旧 v2 checkpoint 兼容模式。
   - 框架侧 `sts_ai_framework/llm_agent_parts/map_payload.py` 只注入 GameState 的地图/钥匙/当前幕 path_history，不向价值网络 payload 传递 router 计划。
 - 输出头是 20 个楼层桶的 stopping-hazard + 1 个 Heart-win logit；端点与标签契约定义在 `selectcard/src/data_contract.py`（`VALUE_TARGET_SCHEMA = "bucket-hazard-v1"`）。标量价值 V(S) = E[终止楼层] + `HEART_WIN_BONUS_FLOORS` × P(Heart)。
-- Format-9 checkpoints embed model configuration, the frozen vocabulary, normalization statistics, preprocessing version, character schema, and map-context schema. Format 8 and earlier checkpoints (including legacy bare `state_dict`) are intentionally incompatible and require retraining.
+- Format-10 checkpoints embed model configuration, the frozen vocabulary, normalization statistics, preprocessing version, character schema, key observability, and map-context schema. Format 9 and earlier checkpoints (including legacy bare `state_dict`) are intentionally incompatible and require retraining.
 - Optional HTTP inference server: `uvicorn src.api:app` from `selectcard/` (`POST /recommend/choice`, `/recommend/shop`).
 - Do not commit `selectcard/checkpoints/`, `selectcard/processed_data/`, `selectcard/processed_data_v2/`, or `selectcard/processed_data_v3/` artifacts.

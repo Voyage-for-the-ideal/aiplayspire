@@ -41,7 +41,7 @@ class ChestValueEngine:
         curses = sum(1 for c in state["deck"] if c in CHEST_CURSE_POOL)
         score = (state["hp"] + 0.5 * state["max_hp"] + 0.01 * state["gold"]
                  + self.relic_bonus * len(state["relics"]) - self.curse_cost * curses)
-        if (state.get("key_states") or {}).get("sapphire"):
+        if (state.get("keys") or {}).get("sapphire"):
             score += self.relic_bonus
         return score
 
@@ -70,6 +70,20 @@ class Harness(DecisionMixin, ChoiceMixin, ActionMixin):
 
 def cursed_key_engine(relic_bonus=5.0, curse_cost=1.0):
     return ChestValueEngine(relic_bonus=relic_bonus, curse_cost=curse_cost)
+
+
+class KeyAwareChestValueEngine(ChestValueEngine):
+    supports_key_value = True
+
+    def __init__(self, key_bonus, **kwargs):
+        super().__init__(**kwargs)
+        self.key_bonus = key_bonus
+        self.observed_sapphire = []
+
+    def evaluate_state(self, state):
+        has_sapphire = bool((state.get("keys") or {}).get("sapphire"))
+        self.observed_sapphire.append(has_sapphire)
+        return super().evaluate_state(state) + (self.key_bonus if has_sapphire else 0.0)
 
 
 class ChestDecisionTests(unittest.TestCase):
@@ -104,6 +118,23 @@ class ChestDecisionTests(unittest.TestCase):
         self.assertEqual(0, action.choice_index)
         gold_effects = [e for e in engine.applied_effects if e["type"] == "gain_gold"]
         self.assertTrue(all(e["amount"] == 50 for e in gold_effects))
+
+    def test_key_aware_sapphire_branch_can_change_chest_decision(self):
+        state = make_chest_state(
+            relics=[RelicState(id="Cursed Key", name="Cursed Key")])
+        without_key_value = ChestValueEngine(relic_bonus=0.0, curse_cost=10.0)
+        self.assertEqual(
+            ActionType.PROCEED,
+            Harness(without_key_value).choose_action(state).type,
+        )
+
+        key_aware = KeyAwareChestValueEngine(
+            key_bonus=20.0, relic_bonus=0.0, curse_cost=10.0)
+        action = Harness(key_aware).choose_action(state)
+
+        self.assertEqual(ActionType.CHOOSE, action.type)
+        self.assertEqual(0, action.choice_index)
+        self.assertIn(True, key_aware.observed_sapphire)
 
     def test_boss_chest_always_opens_without_scoring(self):
         engine = cursed_key_engine(curse_cost=999.0)

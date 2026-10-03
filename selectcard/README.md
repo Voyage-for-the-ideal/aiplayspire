@@ -64,6 +64,78 @@ This repository contains an AI-driven system for **Slay the Spire** that predict
    ```
 5. **Inference**: Use the `inference.py` to get card selection advice.
 
+### A10+ specialist model
+
+Build a separate dataset containing only Ascension 10 and higher runs, then train
+the specialist checkpoint without replacing the general model:
+
+```bash
+python src/data_pipeline.py --input-dir "STS Data" \
+  --output-dir processed_data_a10plus_v1 --min-ascension 10 --workers 16
+python src/train.py --data-dir processed_data_a10plus_v1 \
+  --checkpoint-name sts_value_model_a10plus_v1.pth \
+  --report-name training_report_a10plus_v1.png
+```
+
+This produces `checkpoints/best_sts_value_model_a10plus_v1.pth` and
+`checkpoints/sts_value_model_a10plus_v1.pth`. The dataset manifest records the
+minimum Ascension, fixed run-ID split seed, and retained run/sample counts by
+Ascension. Training balances the Ascension bands represented in the dataset;
+the absent lower bands receive zero weight.
+
+The agent continues to use the general checkpoint by default. To explicitly use
+the specialist checkpoint for an A10+ run, set `STS_VALUE_CHECKPOINT` before
+starting the agent. For example, in PowerShell:
+
+```powershell
+$env:STS_VALUE_CHECKPOINT = "D:\code\aiplayspire\selectcard\checkpoints\best_sts_value_model_a10plus_v1.pth"
+python -m sts_ai_framework --interval 2.0
+```
+
+The A10+ model is trained only on A10–A20 data and is intended for those runs.
+
+### Format 10: Eggs and observable keys
+
+Format-10 checkpoints require preprocessing
+`set-transformer-v9-key-observability-eggs` and map context
+`map-context-v4-key-observability`. Format 9 checkpoints and older processed
+datasets are intentionally rejected. Archived `.run` files do not identify
+when the Sapphire key was taken: pre-Act-IV Sapphire state is therefore masked
+as unknown, including treasure floors with no recorded relic. Live framework
+states keep all three key flags observable.
+
+Build and train this schema on the training server:
+
+```bash
+python src/data_pipeline.py --input-dir "STS Data" \
+  --output-dir processed_data_keys_eggs_v1 --workers 16
+python src/train.py --data-dir processed_data_keys_eggs_v1 \
+  --checkpoint-name sts_value_model_keys_eggs_v1.pth \
+  --report-name training_report_keys_eggs_v1.png
+```
+
+Evaluate the saved best checkpoint without starting another training loop:
+
+```bash
+python src/train.py --test-only --data-dir processed_data_keys_eggs_v1 \
+  --checkpoint-name sts_value_model_keys_eggs_v1.pth \
+  --report-name training_report_keys_eggs_v1.png
+```
+
+For a fixed JSON list of inference state payloads, audit the signed marginal
+values of all three Eggs and keys:
+
+```bash
+python src/audit_value_deltas.py \
+  --checkpoint checkpoints/best_sts_value_model_keys_eggs_v1.pth \
+  --states-json audit_states.json
+```
+
+Each audit state uses the inference payload fields (`deck`, `relics`, `hp`,
+`max_hp`, `gold`, `floor`, `ascension`, `character`, `visible_boss`, `act`,
+`keys`, and optional map/history fields). The report preserves signed deltas;
+negative results are not clipped to zero.
+
 The data pipeline accepts standard, unseeded A0-A20 runs from game builds dated
 2020-01-14 or later. It rejects beta/daily/trial/endless runs, unknown content,
 invalid telemetry, and runs whose reconstructed final deck or relics do not match

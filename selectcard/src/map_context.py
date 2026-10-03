@@ -25,6 +25,9 @@ Packed layout (one act, fixed size, no ragged lists):
   room just left), right-padded with 0; no future information.  Earlier
   acts are not spliced in.
 - ``key_states``: ``[ruby, emerald, sapphire]`` flags (0/1).
+- ``key_known_mask``: whether each corresponding key flag is observable from
+  the source.  Archived ``.run`` files do not identify Sapphire acquisition,
+  so their pre-Act-IV Sapphire value is unknown rather than a fabricated 0.
 
 Approximations (documented, deliberately conservative):
 
@@ -34,7 +37,7 @@ Approximations (documented, deliberately conservative):
   validator measures the model as >=99.9% path-consistent).
 - Emerald keys are marked as collected on floors after the burning elite's
   floor when that node lies on a consistent path.  Sapphire keys are not
-  recoverable from archived logs and stay 0.
+  recoverable from archived logs before Act IV and are masked as unknown.
 - ``emerald_elite_enabled`` marks one reconstructed burning elite per act.
   Whether the 2020-era player had account-wide Act 4 unlocked is unknown;
   a marked-but-actually-absent flame is mild feature noise that never
@@ -50,7 +53,7 @@ try:
 except ImportError:  # pragma: no cover - package vs script import
     import sts_mapgen
 
-MAP_CONTEXT_VERSION = "map-context-v3"
+MAP_CONTEXT_VERSION = "map-context-v4-key-observability"
 MAP_GRID_CELLS = sts_mapgen.MAP_HEIGHT * sts_mapgen.MAP_WIDTH  # 105
 HISTORY_HORIZON = 8
 MAP_FLAG_FEATURES = 7
@@ -63,6 +66,8 @@ def context_schema():
         "history_horizon": HISTORY_HORIZON,
         "map_grid_cells": MAP_GRID_CELLS,
         "map_flag_features": MAP_FLAG_FEATURES,
+        "key_feature_count": 9,
+        "key_observability": "value-plus-known-mask-v1",
     }
 
 ROOM_SYMBOL_TO_ID = {"M": 1, "E": 2, "R": 3, "$": 4, "T": 5, "?": 6, "B": 7}
@@ -330,7 +335,7 @@ class RunMapContextBuilder:
         start, symbols = self.segments[segment_index]
         nodes = self.act_maps.get(act)
         walked = history_symbols(self.segments, segment_index, row)
-        key_states = self._key_states(act, floor)
+        key_states, key_known_mask = self._key_context(act, floor)
 
         map_rooms = [0] * MAP_GRID_CELLS
         map_flags = [0] * MAP_GRID_CELLS
@@ -365,13 +370,21 @@ class RunMapContextBuilder:
             "history_rooms": [ROOM_SYMBOL_TO_ID.get(s, 0) for s in walked]
             + [0] * (HISTORY_HORIZON - len(walked)),
             "key_states": key_states,
+            "key_known_mask": key_known_mask,
         }
 
-    def _key_states(self, act: int, floor: int):
+    def _key_context(self, act: int, floor: int):
+        # Reaching Act IV strictly proves that all three keys were collected.
+        if act >= 4:
+            return [1, 1, 1], [1, 1, 1]
         ruby = 1 if self.recall is not None and floor > self.recall else 0
         emerald_floor = self.emerald_floors.get(act)
         emerald = 1 if emerald_floor is not None and floor > emerald_floor else 0
-        return [ruby, emerald, 0]
+        emerald_known = 1 if act in self.act_maps else 0
+        # A missing relic on a T floor is ambiguous: it may be an unopened
+        # chest, an abandoned reward screen, or a Sapphire pick.  Never infer
+        # Sapphire from that absence.
+        return [ruby, emerald, 0], [1, emerald_known, 0]
 
 
 def build_run_contexts(event_data, snapshot_floors):
@@ -401,7 +414,8 @@ def inference_context(state: dict):
     walked = [
         s for s in (state.get("history") or []) if s in ROOM_SYMBOL_TO_ID
     ][-HISTORY_HORIZON:][::-1]
-    keys = state.get("keys") or {}
+    raw_keys = state.get("keys")
+    keys = raw_keys if isinstance(raw_keys, dict) else {}
 
     map_rooms = [0] * MAP_GRID_CELLS
     map_flags = [0] * MAP_GRID_CELLS
@@ -454,6 +468,12 @@ def inference_context(state: dict):
             int(bool(keys.get("emerald"))),
             int(bool(keys.get("sapphire"))),
         ],
+        # Framework payloads include explicit key fields even if the map is
+        # unavailable. Generic callers that omit them stay unknown.
+        "key_known_mask": [
+            int(isinstance(raw_keys, dict) and name in raw_keys)
+            for name in ("ruby", "emerald", "sapphire")
+        ],
     }
 
 
@@ -499,21 +519,24 @@ def decode_map_features(map_rooms, map_flags):
     return list(map_rooms), flags_out
 
 
-def keys_token_features(key_states, map_flags, act: int):
+def keys_token_features(key_states, map_flags, act: int, key_known_mask=None):
     """Feature vector for the ``[KEYS]`` context token.
 
-    ``[ruby, emerald, sapphire, burning_pending, collected/3, act/3]``
+    ``[ruby, emerald, sapphire, ruby_known, emerald_known, sapphire_known,
+    burning_pending, known_collected/3, act/3]``
     """
     ruby, emerald, sapphire = (list(key_states) + [0, 0, 0])[:3]
+    known = (list(key_known_mask) + [0, 0, 0])[:3] if key_known_mask is not None else [1, 1, 1]
     burning_pending = 0
-    if not emerald:
+    if known[1] and not emerald:
         burning_pending = int(any(
             bits & FLAG_BURNING for bits in (map_flags or [])
         ))
-    collected = ruby + emerald + sapphire
+    collected = sum(value for value, is_known in zip((ruby, emerald, sapphire), known) if is_known)
     return [
         float(ruby), float(emerald), float(sapphire),
-        float(burning_pending), collected / 3.0, min(max(act, 0), 3) / 3.0,
+        *(float(value) for value in known),
+        float(burning_pending), collected / 3.0, min(max(act, 0), 4) / 4.0,
     ]
 
 

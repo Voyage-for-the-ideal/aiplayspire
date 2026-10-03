@@ -97,6 +97,10 @@ class ContentCatalogTests(unittest.TestCase):
         self.assertIn("Cultist", self.catalog.enemies)
         self.assertEqual(canonical_card_id("SearingBlow+12"), "SearingBlow")
         self.assertEqual(self.catalog.classify_item("Snecko Skull"), "relic")
+        self.assertEqual(self.catalog.card_type("Anger"), "ATTACK")
+        self.assertEqual(self.catalog.card_type("Armaments+1"), "SKILL")
+        self.assertEqual(self.catalog.card_type("Inflame"), "POWER")
+        self.assertEqual(set(self.catalog.card_types), set(self.catalog.cards))
 
     def test_unknown_content_is_rejected(self):
         run = standard_run(master_deck=STARTER_DECK + ["ExampleMod:Card"])
@@ -135,6 +139,22 @@ class FilteringTests(unittest.TestCase):
         with self.assertRaisesRegex(RunRejected, "inconsistent_ascension_mode"):
             validate_raw_run(standard_run(ascension_level=1), self.catalog)
 
+    def test_min_ascension_rejects_runs_below_threshold_before_reconstruction(self):
+        a9 = standard_run(
+            is_ascension_mode=True,
+            ascension_level=9,
+        )
+        with self.assertRaisesRegex(RunRejected, "below_min_ascension_10"):
+            process_run(a9, self.catalog, min_ascension=10)
+
+        a10 = standard_run(
+            is_ascension_mode=True,
+            ascension_level=10,
+            master_deck=STARTER_DECK + ["AscendersBane"],
+        )
+        result = process_run(a10, self.catalog, min_ascension=10)
+        self.assertEqual(result["ascension"], 10)
+
     def test_shop_cards_relics_and_potions_are_classified(self):
         run = standard_run(
             items_purchased=["Anger", "PowerPotion", "Vajra"],
@@ -149,6 +169,106 @@ class FilteringTests(unittest.TestCase):
         self.assertIn("Anger", deck)
         self.assertNotIn("PowerPotion", deck)
         self.assertIn("Vajra", relics)
+
+    def test_eggs_upgrade_matching_event_cards_only_after_obtained(self):
+        cases = (
+            ("Molten Egg 2", "Anger"),
+            ("Toxic Egg 2", "Armaments"),
+            ("Frozen Egg 2", "Inflame"),
+        )
+        for egg, card in cases:
+            with self.subTest(egg=egg):
+                run = standard_run(
+                    master_deck=STARTER_DECK + [f"{card}+1"],
+                    relics=["Burning Blood", egg],
+                    relics_obtained=[{"floor": 1, "key": egg}],
+                    event_choices=[{
+                        "floor": 1,
+                        "event_name": "Synthetic egg fixture",
+                        "cards_obtained": [card],
+                    }],
+                    path_per_floor=["?"],
+                    path_taken=["?"],
+                )
+                deck = process_run(run, self.catalog)["rows"][0]["deck"].split(",")
+                self.assertIn(f"{card}+1", deck)
+                self.assertIn("Bash", deck)
+
+    def test_battle_reward_egg_upgrade_requires_prior_unambiguous_ownership(self):
+        prior_egg = standard_run(
+            floor_reached=2,
+            master_deck=STARTER_DECK + ["Anger+1"],
+            relics=["Burning Blood", "Molten Egg 2"],
+            relics_obtained=[{"floor": 1, "key": "Molten Egg 2"}],
+            card_choices=[{
+                "floor": 2,
+                "picked": "Anger",
+                "not_picked": ["Cleave", "Flex"],
+            }],
+            current_hp_per_floor=[70, 65],
+            max_hp_per_floor=[80, 80],
+            gold_per_floor=[99, 110],
+            path_per_floor=["T", "M"],
+            path_taken=["T", "M"],
+        )
+        deck = process_run(prior_egg, self.catalog)["rows"][0]["deck"].split(",")
+        self.assertIn("Anger+1", deck)
+
+        same_floor_unknown_order = standard_run(
+            master_deck=STARTER_DECK + ["Anger"],
+            relics=["Burning Blood", "Molten Egg 2"],
+            relics_obtained=[{"floor": 1, "key": "Molten Egg 2"}],
+            card_choices=[{
+                "floor": 1,
+                "picked": "Anger",
+                "not_picked": ["Cleave", "Flex"],
+            }],
+        )
+        deck = process_run(
+            same_floor_unknown_order, self.catalog
+        )["rows"][0]["deck"].split(",")
+        self.assertIn("Anger", deck)
+        self.assertNotIn("Anger+1", deck)
+
+    def test_shop_egg_respects_purchase_order_and_does_not_double_upgrade(self):
+        before_egg = standard_run(
+            items_purchased=["Anger", "Molten Egg 2"],
+            item_purchase_floors=[1, 1],
+            master_deck=STARTER_DECK + ["Anger"],
+            relics=["Burning Blood", "Molten Egg 2"],
+            relics_obtained=[{"floor": 1, "key": "Molten Egg 2"}],
+            path_per_floor=["$"],
+            path_taken=["$"],
+        )
+        deck = process_run(before_egg, self.catalog)["rows"][0]["deck"].split(",")
+        self.assertIn("Anger", deck)
+        self.assertNotIn("Anger+1", deck)
+
+        after_egg = standard_run(
+            items_purchased=["Molten Egg 2", "Anger"],
+            item_purchase_floors=[1, 1],
+            master_deck=STARTER_DECK + ["Anger+1"],
+            relics=["Burning Blood", "Molten Egg 2"],
+            relics_obtained=[{"floor": 1, "key": "Molten Egg 2"}],
+            path_per_floor=["$"],
+            path_taken=["$"],
+        )
+        deck = process_run(after_egg, self.catalog)["rows"][0]["deck"].split(",")
+        self.assertEqual(deck.count("Anger+1"), 1)
+        self.assertNotIn("Anger+2", deck)
+
+        already_upgraded = standard_run(
+            items_purchased=["Molten Egg 2", "Anger+1"],
+            item_purchase_floors=[1, 1],
+            master_deck=STARTER_DECK + ["Anger+1"],
+            relics=["Burning Blood", "Molten Egg 2"],
+            relics_obtained=[{"floor": 1, "key": "Molten Egg 2"}],
+            path_per_floor=["$"],
+            path_taken=["$"],
+        )
+        deck = process_run(already_upgraded, self.catalog)["rows"][0]["deck"].split(",")
+        self.assertEqual(deck.count("Anger+1"), 1)
+        self.assertNotIn("Anger+2", deck)
 
     def test_card_reward_snapshot_is_post_action(self):
         run = standard_run(
@@ -264,6 +384,43 @@ class FilteringTests(unittest.TestCase):
 
 
 class DatasetBuildTests(unittest.TestCase):
+    def test_min_ascension_build_records_only_matching_runs_and_samples(self):
+        with tempfile.TemporaryDirectory() as directory:
+            input_dir = os.path.join(directory, "input")
+            output_dir = os.path.join(directory, "output")
+            os.makedirs(input_dir)
+            a9 = standard_run(
+                is_ascension_mode=True,
+                ascension_level=9,
+                play_id="a9",
+                seed_played="-3775500262246337531",
+            )
+            a10 = standard_run(
+                is_ascension_mode=True,
+                ascension_level=10,
+                master_deck=STARTER_DECK + ["AscendersBane"],
+                play_id="a10",
+                seed_played="-3775500262246337531",
+            )
+            with open(os.path.join(input_dir, "runs.json"), "w", encoding="utf-8") as handle:
+                json.dump([a9, a10], handle)
+
+            manifest = build_dataset(
+                input_dir, output_dir, workers=1, min_ascension=10
+            )
+            frames = [
+                pd.read_parquet(path)
+                for path in glob.glob(os.path.join(output_dir, "*_chunk_*.parquet"))
+            ]
+            frame = pd.concat(frames, ignore_index=True)
+
+        self.assertEqual(manifest["selection"]["min_ascension"], 10)
+        self.assertEqual(manifest["output"]["accepted_runs"], 1)
+        self.assertEqual(manifest["rejections"]["below_min_ascension_10"], 1)
+        self.assertEqual(manifest["distributions"]["runs_by_ascension"], {"10": 1})
+        self.assertEqual(manifest["distributions"]["samples_by_ascension"], {"10": 1})
+        self.assertEqual(set(frame["ascension"]), {10})
+
     def test_synthetic_gzip_builds_versioned_dataset_and_manifest(self):
         with tempfile.TemporaryDirectory() as directory:
             input_dir = os.path.join(directory, "input")
@@ -319,6 +476,7 @@ class DatasetBuildTests(unittest.TestCase):
         self.assertNotIn("plan_rooms", frame.columns)
         self.assertEqual(len(frame["history_rooms"].iloc[0]), 8)
         self.assertEqual(list(frame["key_states"].iloc[0]), [0, 0, 0])
+        self.assertEqual(list(frame["key_known_mask"].iloc[0]), [1, 1, 0])
         self.assertTrue(any(room for room in frame["map_rooms"].iloc[0]))
         self.assertEqual(stored_manifest["map_context_version"], MAP_CONTEXT_VERSION)
         self.assertEqual(stored_manifest["state_timing"], "post_action")
@@ -389,6 +547,34 @@ class DifficultyWeightingTests(unittest.TestCase):
             logits, labels, masks, floors, globals_, torch.tensor(weights)
         )
         self.assertTrue(torch.isfinite(loss))
+
+    def test_inverse_frequency_weights_support_only_a10_plus_bands(self):
+        counts = [0, 0, 30, 15, 5, 2]
+        manifest = {
+            "distributions": {
+                "train_valid_samples_by_ascension_band": {
+                    str(index): count for index, count in enumerate(counts)
+                }
+            }
+        }
+        weights = difficulty_weights(manifest)
+        contributions = [count * weight for count, weight in zip(counts, weights)]
+
+        self.assertEqual(weights[:2], [0.0, 0.0])
+        active = [contributions[index] for index, count in enumerate(counts) if count]
+        for contribution in active[1:]:
+            self.assertAlmostEqual(contribution, active[0])
+
+    def test_inverse_frequency_weights_reject_empty_training_split(self):
+        manifest = {
+            "distributions": {
+                "train_valid_samples_by_ascension_band": {
+                    str(index): 0 for index in range(6)
+                }
+            }
+        }
+        with self.assertRaisesRegex(ValueError, "no valid samples"):
+            difficulty_weights(manifest)
 
 
 if __name__ == "__main__":

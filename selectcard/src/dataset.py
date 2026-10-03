@@ -41,6 +41,8 @@ REQUIRED_COLUMNS = {
     "character",
     "state_timing",
     "visible_boss",
+    "key_states",
+    "key_known_mask",
 }
 
 TRAINING_ARTIFACT_CACHE_NAME = "training_artifacts.json"
@@ -473,6 +475,8 @@ class STSDataset(Dataset):
                     "character",
                     "state_timing",
                     "visible_boss",
+                    "key_states",
+                    "key_known_mask",
                 ],
             )
             if set(metadata["split"].unique()) != {split}:
@@ -517,6 +521,7 @@ class STSDataset(Dataset):
     def _map_context_tensors(self, row):
         """Decode the packed v3 context columns of one row."""
         key_states = self._column_list(row, "key_states") or [0, 0, 0]
+        key_known_mask = self._column_list(row, "key_known_mask") or [0, 0, 0]
         act = row.get("act")
         act = int(act) if isinstance(act, (int, float)) and not (
             isinstance(act, float) and math.isnan(act)
@@ -546,11 +551,11 @@ class STSDataset(Dataset):
             map_context.HISTORY_HORIZON - len(history_dist)
         )
 
-        keys_features = map_context.keys_token_features(key_states, map_flags, act)
+        keys_features = map_context.keys_token_features(
+            key_states, map_flags, act, key_known_mask
+        )
         key_labels = [float(key_states[0]), float(key_states[1]), float(key_states[2])]
-        # Sapphire is not recoverable from archived logs; emerald needs the
-        # reconstructed map, so it is only supervised where the map exists.
-        key_mask = [1.0, 1.0 if map_present else 0.0, 0.0]
+        key_mask = [float(bool(value)) for value in key_known_mask]
         return (
             torch.tensor(keys_features, dtype=torch.float32),
             torch.tensor(map_rooms, dtype=torch.long),

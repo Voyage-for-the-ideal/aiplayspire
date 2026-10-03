@@ -1,5 +1,6 @@
 import torch
 import copy
+from functools import lru_cache
 try:
     from .model import STSValueNetwork
     from .checkpointing import load_checkpoint
@@ -9,6 +10,7 @@ try:
     from .data_contract import HAZARD_ENDPOINTS, HAZARD_OUTPUT_DIM
     from .boss_context import NUM_BOSS_IDS, boss_id, get_visible_boss
     from .character_context import NUM_CHARACTER_IDS, character_id
+    from .content_catalog import VanillaContentCatalog
     from . import map_context
 except ImportError:
     from model import STSValueNetwork
@@ -19,10 +21,16 @@ except ImportError:
     from data_contract import HAZARD_ENDPOINTS, HAZARD_OUTPUT_DIM
     from boss_context import NUM_BOSS_IDS, boss_id, get_visible_boss
     from character_context import NUM_CHARACTER_IDS, character_id
+    from content_catalog import VanillaContentCatalog
     import map_context
 
 
 V2_ITEM_TOKEN_BUDGET = 64  # v2 checkpoints were trained with this item budget
+
+
+@lru_cache(maxsize=1)
+def _vanilla_content_catalog():
+    return VanillaContentCatalog.from_repo()
 
 
 def resolve_deck_entry(deck, target):
@@ -185,6 +193,7 @@ class InferenceTokenizer:
 
 class STSInferenceEngine:
     def __init__(self, model_path=None):
+        self.content_catalog = _vanilla_content_catalog()
         if model_path:
             checkpoint, vocabulary, self.feature_encoder = load_checkpoint(model_path)
             architecture = checkpoint["model_config"]
@@ -207,9 +216,13 @@ class STSInferenceEngine:
                 "global_conditioning": Config.GLOBAL_CONDITIONING,
                 "norm_position": Config.NORM_POSITION,
                 "use_map_context": Config.USE_MAP_CONTEXT,
+                "num_key_features": 9,
             }
             self.model = STSValueNetwork(**architecture)
         self.uses_map_context = bool(getattr(self.model, "use_map_context", False))
+        self.supports_key_value = bool(
+            model_path and self.uses_map_context and architecture.get("num_key_features") == 9
+        )
         item_budget = (
             Config.MAX_ITEM_TOKENS if self.uses_map_context else V2_ITEM_TOKEN_BUDGET
         )
@@ -242,7 +255,8 @@ class STSInferenceEngine:
         """
         context = map_context.inference_context(state if isinstance(state, dict) else {})
         keys_features = map_context.keys_token_features(
-            context["key_states"], context["map_flags"], context["act"]
+            context["key_states"], context["map_flags"], context["act"],
+            context["key_known_mask"],
         )
         history_ids = context["history_rooms"]
         history_dist = [
@@ -358,6 +372,26 @@ class STSInferenceEngine:
                 return relic_item.get("name") or relic_item.get("id") or ""
             return str(relic_item)
 
+        def _add_obtained_card(card_id, amount=1):
+            card = canonical_reference(card_id)
+            if not card:
+                return
+            catalog = getattr(self, "content_catalog", None)
+            if catalog is None:
+                catalog = _vanilla_content_catalog()
+            egg_for_type = {
+                "ATTACK": "Molten Egg 2",
+                "POWER": "Frozen Egg 2",
+                "SKILL": "Toxic Egg 2",
+            }
+            relic_names = {
+                _normalize_relic_name(relic) for relic in new_state.get("relics", [])
+            }
+            egg = egg_for_type.get(catalog.card_type(card))
+            if upgrade_level(card) == 0 and egg in relic_names:
+                card = upgraded_reference(card)
+            new_state["deck"].extend([card] * amount)
+
         def _get_omamori_charge_pool():
             relic_states = new_state.get("relic_states", []) or []
             for relic in relic_states:
@@ -460,7 +494,12 @@ class STSInferenceEngine:
                     if entry is not None:
                         new_state["deck"].extend([entry] * amount)
                 elif e_type == "obtain_relic":
-                    relic_id = effect["relic_id"]
+                    # Incomplete event semantics can contain obtain_relic
+                    # without identifying the relic. Ignore it safely; the
+                    # event scorer filters these effects from expectimax.
+                    relic_id = effect.get("relic_id")
+                    if not relic_id:
+                        continue
                     replacements = {
                         "Black Blood": ("Burning Blood",),
                         "Ring of the Serpent": ("Ring of the Snake", "Ring of Snake"),
@@ -509,7 +548,7 @@ class STSInferenceEngine:
                     card_id = effect.get("card_id")
                     if _should_block_curse_add(card_id):
                         continue
-                    new_state["deck"].extend([card_id] * effect.get("amount", 1))
+                    _add_obtained_card(card_id, effect.get("amount", 1))
                 elif e_type == "remove_curses":
                     exact_ids = set(effect.get("card_ids", []))
                     if exact_ids:
@@ -548,15 +587,17 @@ class STSInferenceEngine:
             new_state["max_hp"] += 2
             new_state["hp"] += 2
         elif action == "pick_card" and target:
-            new_state["deck"].append(canonical_reference(target))
+            _add_obtained_card(target)
         elif action == "buy_card" and target:
-            new_state["deck"].append(canonical_reference(target))
+            _add_obtained_card(target)
             new_state["gold"] -= choice.get("cost", 0)
         elif action == "buy_relic" and target:
             new_state["relics"].append(target)
             new_state["gold"] -= choice.get("cost", 0)
         elif action == "buy_potion":
             new_state["gold"] -= choice.get("cost", 0)
+        elif action == "take_key" and target in {"ruby", "emerald", "sapphire"}:
+            new_state.setdefault("keys", {})[target] = True
         elif action == "remove_card" and target:
             entry = resolve_deck_entry(new_state["deck"], target)
             if entry is not None:

@@ -78,6 +78,15 @@ def guaranteed_hp_loss(choice) -> Optional[int]:
 
 def classify_choice(choice) -> str:
     """按选项全部 outcome 的效果类型集合判定可模拟性。"""
+    # An explicit relic id is required to model obtain_relic accurately. Some
+    # event payloads may report the effect without identifying the relic; do
+    # not score that choice as if acquiring a known relic had no downside.
+    if any(
+        effect.type == "obtain_relic" and not effect.relic_id
+        for outcome in choice.outcomes
+        for effect in outcome.effects
+    ):
+        return UNSUPPORTED
     effect_types = {
         effect.type
         for outcome in choice.outcomes

@@ -470,6 +470,7 @@ class RunReconstructor:
         path_per_floor = self.raw_data.get('path_per_floor', [])
 
         for floor in range(0, self.floor_reached + 1):
+            relics_added_this_floor = set()
             if floor > 0:
                 # 状态的基础跟随逻辑：维护 Reconstructor 的当前值
                 if floor >= 2:
@@ -514,25 +515,28 @@ class RunReconstructor:
 
             if floor in relics_obtained:
                 for r in relics_obtained[floor]:
+                    # Shop relics also appear in relics_obtained. Defer them to
+                    # the ordered purchase stream so a card bought before an
+                    # Egg is not upgraded retroactively.
+                    if r in purchases.get(floor, []):
+                        continue
+                    if r not in self.relics:
+                        relics_added_this_floor.add(r)
                     self._add_relic(r)
 
             if floor in purchases:
-                # 商店逻辑：先拿遗物，再拿卡牌，最后处理移除
                 item_list = purchases[floor]
                 all_relics = self.raw_data.get('relics', [])
-                
-                # 1. 先买遗物
+
+                # items_purchased retains transaction order. Applying it in
+                # order is required for Eggs: only cards bought afterwards
+                # receive the upgrade.
                 for item in item_list:
                     item_type = self._purchased_item_type(item, all_relics)
                     if item_type == 'relic' and item not in self.relics:
                         self._add_relic(item)
-                
-                # 2. 再买卡牌
-                for item in item_list:
-                    item_type = self._purchased_item_type(item, all_relics)
-                    if item_type == 'card':
+                    elif item_type == 'card':
                         self.deck.append(item)
-                        # 触发蛋类遗物对商店购买的即时升级
                         self._handle_egg_upgrade(item)
                             
             if floor in purges:
@@ -605,7 +609,14 @@ class RunReconstructor:
                     picked = choice.get('picked')
                     if picked and picked not in {'SKIP', 'Singing Bowl'}:
                         self.deck.append(picked)
-                        self._handle_egg_upgrade(picked)
+                        # Reward ordering is absent from historical .run files.
+                        # A base card recorded on the same floor as a new Egg
+                        # must not be guessed to have been taken afterwards.
+                        eligible_relics = [
+                            relic for relic in self.relics
+                            if relic not in relics_added_this_floor
+                        ]
+                        self._handle_egg_upgrade(picked, relics=eligible_relics)
                     if not getattr(self, '_is_dry_run', False):
                         yield {
                             'floor': floor,
@@ -629,37 +640,32 @@ class RunReconstructor:
             return item_type
         return 'relic' if item in all_relics else 'card'
 
-    def _handle_egg_upgrade(self, card_name: str):
-        """
-        蛋类遗物的自动升级逻辑。这些遗物在该卡牌被加入卡组的一瞬间触发。
-        """
-        if not card_name: return
+    def _handle_egg_upgrade(self, card_name: str, relics=None):
+        """Upgrade the just-added card when its matching Egg is owned."""
+        if not card_name:
+            return
         base_name, level = self._split_upgrade_level(card_name)
-        if level > 0: return # 已经是升级的牌不再处理
+        if level > 0:
+            return
 
-        # 找到卡组中最后一张匹配的基础卡（刚刚加进去的那张）
-        idx = -1
-        for i in range(len(self.deck)-1, -1, -1):
-            if self.deck[i] == card_name:
-                idx = i
-                break
-        
-        if idx == -1: return
+        if self.content_catalog is None:
+            return
+        egg_for_type = {
+            'ATTACK': 'Molten Egg 2',
+            'POWER': 'Frozen Egg 2',
+            'SKILL': 'Toxic Egg 2',
+        }
+        egg = egg_for_type.get(self.content_catalog.card_type(base_name))
+        owned_relics = self.relics if relics is None else relics
+        if not egg or egg not in owned_relics:
+            return
 
-        # 检查蛋类遗物
-        # TODO: 这里需要卡牌类型的知识，暂时通过特征字符串或逻辑占位
-        # Molten Egg: 攻击牌 | Frozen Egg: 能力牌 | Toxic Egg: 技能牌
-        # 我们这里使用 _upgrade_card 逻辑，它会尝试升级这张牌
-        if 'Molten Egg' in self.relics:
-            # 简单启发式：如果 master_deck 里这张牌是升级的，且我们有对应的蛋，就升级它
-            # 或者更严谨地检查卡牌数据库（暂不可用）
-            pass
-        
-        # 考虑到目前的架构，最稳妥的方法是：如果在拿到该牌时，我们已经拥有对应的蛋
-        # 且在 master_deck 中这张牌确实是升级的，那么这里就应该升级。
-        # 但既然我们现在在 replay 流程中，如果我们在此时已经拥有蛋，逻辑上就应该自动升级。
-        # 实际操作中，为了兼容性，我们直接复用 _reconcile_all_diffs 产生的 implicit 升级记录更稳妥。
-        # 这里的显式调用仅作为第一道防线。
+        # Every caller appends the new card immediately before invoking this
+        # method. Search backwards so an older copy is never upgraded instead.
+        for index in range(len(self.deck) - 1, -1, -1):
+            if self.deck[index] == card_name:
+                self.deck[index] = self._format_card_name(base_name, 1)
+                return
 
     def is_match_with_master_deck(self) -> bool:
         """

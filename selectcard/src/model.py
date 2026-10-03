@@ -73,7 +73,7 @@ class STSValueNetwork(nn.Module):
         global_conditioning="token",
         norm_position="pre",
         use_map_context=False,
-        num_key_features=6,
+        num_key_features=9,
     ):
         super().__init__()
         if global_conditioning not in {"token", "late_concat"}:

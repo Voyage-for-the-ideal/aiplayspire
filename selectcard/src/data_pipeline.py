@@ -61,6 +61,7 @@ STANDARD_FALSE_FLAGS = (
 )
 MAX_REJECTION_EXAMPLES = 20
 _WORKER_CATALOG = None
+_WORKER_MIN_ASCENSION = 0
 
 
 class RunRejected(ValueError):
@@ -410,9 +411,15 @@ def _validate_snapshot(snapshot, expected_ascension):
     return floor
 
 
-def process_run(event_data, catalog):
+def process_run(event_data, catalog, min_ascension=0):
+    if isinstance(min_ascension, bool) or not isinstance(min_ascension, int):
+        raise ValueError("min_ascension must be an integer from 0 to 20")
+    if not 0 <= min_ascension <= 20:
+        raise ValueError("min_ascension must be an integer from 0 to 20")
     run_id = stable_run_id(event_data)
     validated = validate_raw_run(event_data, catalog)
+    if validated["ascension"] < min_ascension:
+        _reject(f"below_min_ascension_{min_ascension}")
     recon = RunReconstructor(event_data, content_catalog=catalog)
     snapshots = list(recon.replay())
     if not recon.is_match_with_master_deck():
@@ -470,6 +477,7 @@ def process_run(event_data, catalog):
                 "map_flags": context["map_flags"] if has_map else None,
                 "history_rooms": context["history_rooms"] if context else None,
                 "key_states": context["key_states"] if context else None,
+                "key_known_mask": context["key_known_mask"] if context else None,
             }
         )
     return {
@@ -508,8 +516,10 @@ def _load_runs(filepath):
     return data if isinstance(data, list) else [data]
 
 
-def process_file(filepath, catalog=None):
+def process_file(filepath, catalog=None, min_ascension=None):
     catalog = catalog or _WORKER_CATALOG or VanillaContentCatalog.from_repo()
+    if min_ascension is None:
+        min_ascension = _WORKER_MIN_ASCENSION
     stats = _new_file_stats()
     accepted = []
     try:
@@ -535,7 +545,7 @@ def process_file(filepath, catalog=None):
             continue
         local_seen.add(run_id)
         try:
-            accepted.append(process_run(event_data, catalog))
+            accepted.append(process_run(event_data, catalog, min_ascension))
         except RunRejected as exc:
             _record_rejection(stats, exc.reason, run_id)
         except Exception as exc:
@@ -543,9 +553,10 @@ def process_file(filepath, catalog=None):
     return {"accepted": accepted, "stats": stats}
 
 
-def _init_worker(catalog_payload):
-    global _WORKER_CATALOG
+def _init_worker(catalog_payload, min_ascension=0):
+    global _WORKER_CATALOG, _WORKER_MIN_ASCENSION
     _WORKER_CATALOG = VanillaContentCatalog.from_payload(catalog_payload)
+    _WORKER_MIN_ASCENSION = min_ascension
 
 
 def _discover_files(data_dir, max_files_per_directory=None):
@@ -562,10 +573,10 @@ def _discover_files(data_dir, max_files_per_directory=None):
     return sorted(files)
 
 
-def _iter_file_results(files, catalog, workers):
+def _iter_file_results(files, catalog, workers, min_ascension=0):
     if workers == 1:
         for path in files:
-            yield path, process_file(path, catalog)
+            yield path, process_file(path, catalog, min_ascension)
         return
 
     max_pending = workers * 2
@@ -573,7 +584,7 @@ def _iter_file_results(files, catalog, workers):
     with concurrent.futures.ProcessPoolExecutor(
         max_workers=workers,
         initializer=_init_worker,
-        initargs=(catalog.to_payload(),),
+        initargs=(catalog.to_payload(), min_ascension),
     ) as executor:
         pending = {}
         for _ in range(min(max_pending, len(files))):
@@ -636,6 +647,8 @@ def _validate_staging(staging, expected_samples):
         "character",
         "state_timing",
         "visible_boss",
+        "key_states",
+        "key_known_mask",
     }
     columns = set(pd.read_parquet(parquet_files[0]).columns)
     missing = required.difference(columns)
@@ -654,7 +667,12 @@ def build_dataset(
     max_files_per_directory=None,
     replace=False,
     repo_root=None,
+    min_ascension=0,
 ):
+    if isinstance(min_ascension, bool) or not isinstance(min_ascension, int):
+        raise ValueError("min_ascension must be an integer from 0 to 20")
+    if not 0 <= min_ascension <= 20:
+        raise ValueError("min_ascension must be an integer from 0 to 20")
     files = _discover_files(data_dir, max_files_per_directory)
     if not files:
         raise ValueError(f"No JSON files found under {data_dir}")
@@ -679,6 +697,8 @@ def build_dataset(
         "runs_by_split": Counter(),
         "runs_with_map_context": Counter(),
         "samples_by_split": Counter(),
+        "samples_by_ascension": Counter(),
+        "valid_samples_by_ascension": Counter(),
         "positive_samples_by_target": Counter(),
         "valid_samples_by_target": Counter(),
         "at_risk_samples_by_hazard": Counter(),
@@ -712,7 +732,7 @@ def build_dataset(
 
     try:
         for completed, (_path, result) in enumerate(
-            _iter_file_results(files, catalog, workers), start=1
+            _iter_file_results(files, catalog, workers, min_ascension), start=1
         ):
             _merge_stats(stats, result["stats"])
             for run in result["accepted"]:
@@ -730,6 +750,7 @@ def build_dataset(
                     dimensions["runs_with_map_context"]["true"] += 1
                 for row in run["rows"]:
                     sample_count += 1
+                    dimensions["samples_by_ascension"][str(run["ascension"])] += 1
                     if row.get("map_rooms") is not None:
                         dimensions["samples_with_map_context"]["true"] += 1
                     dimensions["samples_by_split"][row["split"]] += 1
@@ -753,6 +774,9 @@ def build_dataset(
                     target_valid = any(row[column] for column in MASK_COLUMNS)
                     if target_valid:
                         valid_sample_count += 1
+                        dimensions["valid_samples_by_ascension"][
+                            str(run["ascension"])
+                        ] += 1
                         dimensions["valid_samples_by_split"][row["split"]] += 1
                         if row["split"] == "train":
                             dimensions["train_valid_samples_by_ascension_band"][
@@ -777,6 +801,10 @@ def build_dataset(
             "filter_version": FILTER_VERSION,
             "map_context_version": MAP_CONTEXT_VERSION,
             "state_timing": "post_action",
+            "selection": {
+                "min_ascension": min_ascension,
+                "split_seed": Config.SPLIT_SEED,
+            },
             "value_target_schema": VALUE_TARGET_SCHEMA,
             "hazard_endpoints": list(HAZARD_ENDPOINTS),
             "created_at_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
@@ -831,6 +859,13 @@ def parse_args(argv=None):
     parser.add_argument("--workers", type=int, default=None)
     parser.add_argument("--chunk-size", type=int, default=50000)
     parser.add_argument("--max-files-per-directory", type=int, default=None)
+    parser.add_argument(
+        "--min-ascension",
+        type=int,
+        default=0,
+        choices=range(21),
+        help="Keep only runs at or above this Ascension level (default: 0).",
+    )
     parser.add_argument("--replace", action="store_true")
     return parser.parse_args(argv)
 
@@ -844,6 +879,7 @@ def main(argv=None):
         workers=args.workers,
         max_files_per_directory=args.max_files_per_directory,
         replace=args.replace,
+        min_ascension=args.min_ascension,
     )
 
 

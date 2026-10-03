@@ -117,6 +117,7 @@ class RunMapContextBuilderTests(unittest.TestCase):
         self.assertNotIn("plan_rooms", context)
         self.assertEqual(len(context["history_rooms"]), HISTORY_HORIZON)
         self.assertEqual(len(context["key_states"]), 3)
+        self.assertEqual(context["key_known_mask"], [1, 1, 0])
 
     def test_history_is_current_act_most_recent_first(self):
         # Floor 9 -> act 1, row 8; walked rooms = symbols[:8] reversed.
@@ -204,6 +205,27 @@ class RunMapContextBuilderTests(unittest.TestCase):
         self.assertTrue(any(context["history_rooms"]))
         self.assertEqual(context["key_states"][0], 0)  # ruby needs recall only
 
+    def test_archived_treasure_does_not_fabricate_sapphire_label(self):
+        run = dict(self.event)
+        path = list(run["path_per_floor"])
+        path[2] = "T"
+        run["path_per_floor"] = path
+        context = RunMapContextBuilder(run).context_for_floor(3)
+        self.assertEqual(context["key_states"][2], 0)
+        self.assertEqual(context["key_known_mask"][2], 0)
+
+    def test_act_four_strictly_proves_all_keys(self):
+        run = {
+            "seed_played": ARCHIVED_SEED,
+            "path_per_floor": ["B", "B", "B", "M"],
+            "campfire_choices": [],
+            "relics_obtained": [],
+        }
+        context = RunMapContextBuilder(run).context_for_floor(4)
+        self.assertEqual(context["act"], 4)
+        self.assertEqual(context["key_states"], [1, 1, 1])
+        self.assertEqual(context["key_known_mask"], [1, 1, 1])
+
     def test_build_run_contexts_matches_individual_calls(self):
         floors = [1, 5, 17, 40]
         self.assertEqual(
@@ -248,6 +270,7 @@ class InferenceContextTests(unittest.TestCase):
         )
         self.assertEqual(len(context["history_rooms"]), HISTORY_HORIZON)
         self.assertEqual(context["key_states"], [1, 0, 0])
+        self.assertEqual(context["key_known_mask"], [1, 1, 1])
 
     def test_empty_state_degrades(self):
         context = inference_context({})
@@ -255,6 +278,7 @@ class InferenceContextTests(unittest.TestCase):
         self.assertNotIn("plan_rooms", context)
         self.assertEqual(context["history_rooms"], [0] * HISTORY_HORIZON)
         self.assertEqual(context["key_states"], [0, 0, 0])
+        self.assertEqual(context["key_known_mask"], [0, 0, 0])
 
 
 class FeatureDecodeTests(unittest.TestCase):
@@ -280,10 +304,10 @@ class FeatureDecodeTests(unittest.TestCase):
     def test_keys_token_features(self):
         map_flags = [FLAG_BURNING] * 3
         features = keys_token_features([0, 0, 0], map_flags, 2)
-        self.assertEqual(features[3], 1.0)  # burning pending
+        self.assertEqual(features[6], 1.0)  # burning pending
         features = keys_token_features([1, 1, 0], [], 3)
-        self.assertEqual(features[3], 0.0)  # emerald collected
-        self.assertAlmostEqual(features[4], 2 / 3)
+        self.assertEqual(features[6], 0.0)  # emerald collected
+        self.assertAlmostEqual(features[7], 2 / 3)
 
 
 if __name__ == "__main__":

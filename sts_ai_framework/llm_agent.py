@@ -8,6 +8,7 @@ from openai import OpenAI
 from .agent_base import Agent
 from .knowledge_base import KnowledgeBase
 from .llm_agent_parts import ActionMixin, ChoiceMixin, DecisionMixin, InfoPromptMixin, RouteMixin
+from .value_checkpoint import resolve_value_checkpoint
 
 # 添加 selectcard 到 PYTHONPATH 以便导入模型
 sys.path.append(os.path.join(os.path.dirname(os.path.dirname(__file__)), "selectcard"))
@@ -55,7 +56,7 @@ class LLMAgent(ActionMixin, DecisionMixin, InfoPromptMixin, ChoiceMixin, RouteMi
                 os.path.dirname(os.path.dirname(__file__)),
                 "selectcard",
             )
-            model_path = os.path.join(model_base_dir, "checkpoints", "best_sts_value_model_final.pth")
+            model_path = resolve_value_checkpoint(model_base_dir)
             if os.path.exists(model_path):
                 try:
                     self.value_engine = STSInferenceEngine(model_path=model_path)
@@ -63,6 +64,6 @@ class LLMAgent(ActionMixin, DecisionMixin, InfoPromptMixin, ChoiceMixin, RouteMi
                 except ValueError as exc:
                     print(f"\033[33m本地卡牌决策模型不兼容: {exc}\033[0m")
             else:
-                print(f"\033[33m本地卡牌决策模型不存在，请先训练 v2 模型\033[0m")
+                print(f"\033[33m本地卡牌决策模型不存在: {model_path}\033[0m")
         else:
             print(f"\033[31m未找到 selectcard.src.inference，无法加载决策模型\033[0m")

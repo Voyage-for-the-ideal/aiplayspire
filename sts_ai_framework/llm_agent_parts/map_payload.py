@@ -3,7 +3,7 @@
 The v3 value network accepts optional ``act`` / ``map_nodes`` /
 ``current_node`` / ``keys`` / ``history`` keys in its state
 dictionaries (see ``selectcard/src/map_context.py``). This helper derives
-them from the framework ``GameState``. Checkpoint format 9 requires the
+them from the framework ``GameState``. Checkpoint format 10 requires the
 matching map-context schema, so legacy checkpoints are rejected at load time.
 """
 
@@ -38,14 +38,12 @@ def _act_history_symbols(state: GameState, act: int) -> List[str]:
 def map_context_fields(state: GameState) -> Dict[str, Any]:
     """Extra state keys for the map-conditioned value network.
 
-    Returns ``{}`` outside a run or whenever the act map is unavailable;
-    the inference side degrades gracefully to a missing-context forward pass.
+    Returns ``{}`` outside a run. Keys remain authoritative even when the act
+    map is unavailable; map/history fields then degrade independently.
     """
     if state is None or not getattr(state, "act", None):
         return {}
     nodes = getattr(state, "map_nodes", None) or []
-    if not nodes:
-        return {}
 
     packed_nodes = [
         {

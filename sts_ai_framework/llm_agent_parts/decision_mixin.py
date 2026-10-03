@@ -549,11 +549,12 @@ class DecisionMixin:
         # 蓝钥匙链接选项：开箱后在奖励屏可弃遗物换 Sapphire Key，而 Cursed Key 的
         # 诅咒在 open() 开头就已结算，事后换钥匙照样吃。open 取两者价值上限；
         # 拾取时的最终取舍仍由 _should_take_sapphire_key 决定。
-        if not state.keys.sapphire:
+        if (not state.keys.sapphire
+                and getattr(engine, "supports_key_value", False)):
             sapphire_payload = dict(current)
-            key_states = dict(current.get("key_states") or {})
-            key_states["sapphire"] = True
-            sapphire_payload["key_states"] = key_states
+            keys = dict(current.get("keys") or {})
+            keys["sapphire"] = True
+            sapphire_payload["keys"] = keys
             sapphire_score = 0.0
             for curse_id in CHEST_CURSE_POOL:
                 hypothetical = engine._apply_choice(sapphire_payload, {"action": "composite_event", "effects":

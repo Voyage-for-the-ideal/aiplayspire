@@ -117,10 +117,13 @@ def difficulty_weights(manifest):
         counts = [int(raw_counts.get(str(index), 0)) for index in range(6)]
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("Dataset manifest difficulty counts are invalid") from exc
-    if any(count <= 0 for count in counts):
-        raise ValueError(f"Every ascension band needs training samples; got {counts}")
+    if any(count < 0 for count in counts):
+        raise ValueError(f"Ascension band sample counts cannot be negative: {counts}")
+    active_count = sum(count > 0 for count in counts)
+    if active_count == 0:
+        raise ValueError("The training split has no valid samples in any ascension band")
     total = sum(counts)
-    return [total / (len(counts) * count) for count in counts]
+    return [total / (active_count * count) if count else 0.0 for count in counts]
 
 
 def constant_hazard_baseline(manifest):
@@ -484,6 +487,7 @@ def model_config(vocab_size):
         "global_conditioning": Config.GLOBAL_CONDITIONING,
         "norm_position": Config.NORM_POSITION,
         "use_map_context": Config.USE_MAP_CONTEXT,
+        "num_key_features": 9,
     }
 
 
@@ -525,6 +529,123 @@ def _key_head_loss(key_logits, key_labels, key_masks):
     )
     weighted = losses * key_masks
     return weighted.sum() / key_masks.sum().clamp_min(1.0)
+
+
+EGG_RELIC_IDS = ("Molten Egg 2", "Frozen Egg 2", "Toxic Egg 2")
+
+
+def scalar_state_value(logits, floors):
+    """Differentiable counterpart of inference.evaluate_state (unnormalized)."""
+    _, survival, heart_probability = hazard_predictions(logits, floors)
+    return expected_terminal_floor(survival, floors) + (
+        Config.HEART_WIN_BONUS_FLOORS * heart_probability
+    )
+
+
+def _forward_value_model(
+    model, seq, upgrades, counts, globals_, character_ids, boss_ids, context=None
+):
+    if context is None:
+        return model(seq, upgrades, counts, globals_, character_ids, boss_ids)
+    keys_features, map_rooms, map_flags, history_rooms, history_dist = context
+    return model(
+        seq, upgrades, counts, globals_, character_ids, boss_ids,
+        keys_features=keys_features, map_rooms=map_rooms, map_flags=map_flags,
+        history_rooms=history_rooms, history_dist=history_dist,
+    )
+
+
+def monotonic_counterfactual_loss(
+    model,
+    observed_logits,
+    seq,
+    upgrades,
+    counts,
+    globals_,
+    character_ids,
+    boss_ids,
+    floors,
+    egg_token_ids,
+    *,
+    context=None,
+    key_labels=None,
+    key_masks=None,
+):
+    """Zero-margin loss for free Eggs and known collected keys.
+
+    Each comparison removes one observed Egg or one observed, explicitly known
+    key from the otherwise identical state.  Synthetic states are used only
+    for ordering; terminal labels remain attached solely to observed states.
+    """
+    observed_value = scalar_state_value(observed_logits, floors)
+    terms = []
+
+    for token_id in egg_token_ids:
+        matches = seq.eq(int(token_id))
+        egg_rows = matches.any(dim=1)
+        if not egg_rows.any():
+            continue
+        rows = egg_rows.nonzero(as_tuple=False).squeeze(1)
+        positions = matches[rows].to(torch.int64).argmax(dim=1)
+        altered_seq = seq[egg_rows].clone()
+        altered_upgrades = upgrades[egg_rows].clone()
+        altered_counts = counts[egg_rows].clone()
+        local_rows = torch.arange(len(rows), device=seq.device)
+        altered_seq[local_rows, positions] = 0
+        altered_upgrades[local_rows, positions] = 0
+        altered_counts[local_rows, positions] = 0
+        subset_context = (
+            tuple(value[egg_rows] for value in context) if context is not None else None
+        )
+        without_egg = _forward_value_model(
+            model,
+            altered_seq, altered_upgrades, altered_counts,
+            globals_[egg_rows], character_ids[egg_rows], boss_ids[egg_rows],
+            subset_context,
+        )
+        terms.append(
+            nn.functional.relu(
+                scalar_state_value(without_egg, floors[egg_rows])
+                - observed_value[egg_rows]
+            )
+        )
+
+    if context is not None and key_labels is not None and key_masks is not None:
+        eligible = key_labels.gt(0.5) & key_masks.gt(0.5)
+        for key_index in range(eligible.shape[1]):
+            key_rows = eligible[:, key_index]
+            if not key_rows.any():
+                continue
+            altered_keys = context[0][key_rows].clone()
+            altered_keys[:, key_index] = 0.0
+            # Features 3:6 are the known-mask bits; feature 7 is the number of
+            # known collected keys.  Preserve observability while clearing value.
+            altered_keys[:, 7] = (
+                altered_keys[:, :3] * altered_keys[:, 3:6]
+            ).sum(dim=1) / 3.0
+            # Clearing Emerald makes the reconstructed burning elite pending.
+            if key_index == 1:
+                burning = context[2][key_rows].bitwise_and(2).ne(0).any(dim=1)
+                altered_keys[:, 6] = burning.to(altered_keys.dtype)
+            without_key_context = (
+                altered_keys,
+                *(value[key_rows] for value in context[1:]),
+            )
+            without_key = _forward_value_model(
+                model,
+                seq[key_rows], upgrades[key_rows], counts[key_rows], globals_[key_rows],
+                character_ids[key_rows], boss_ids[key_rows], without_key_context,
+            )
+            terms.append(
+                nn.functional.relu(
+                    scalar_state_value(without_key, floors[key_rows])
+                    - observed_value[key_rows]
+                )
+            )
+
+    if not terms:
+        return observed_logits.sum() * 0.0
+    return torch.cat(terms).mean()
 
 
 def _numpy_entropy(rates):
@@ -612,6 +733,8 @@ def training_objective_metadata(baseline_rates, baseline_statistics, selection=N
         "baseline_entropy_floor": Config.BASELINE_ENTROPY_FLOOR,
         "heart_loss_weight": Config.HEART_HEAD_LOSS_WEIGHT,
         "key_loss_weight": Config.KEY_HEAD_LOSS_WEIGHT,
+        "monotonic_loss_weight": Config.MONOTONIC_LOSS_WEIGHT,
+        "monotonic_constraint": "zero-margin-observed-egg-and-known-key-v1",
         "global_baseline_rates": [float(value) for value in baseline_rates],
         "contextual_baseline_schema": baseline_statistics["schema_version"],
         "contextual_baseline_prior_strength": baseline_statistics["prior_strength"],
@@ -713,6 +836,7 @@ def evaluate(
     realized_floors = []
     snapshot_floors = []
     ascension_bands = []
+    ascension_levels = []
     key_probabilities = []
     key_targets = []
     key_target_masks = []
@@ -774,6 +898,9 @@ def evaluate(
             ascension_bands.append(
                 ascension_band_tensor(globals_).cpu().numpy().reshape(-1)
             )
+            ascension_levels.append(
+                torch.round(globals_[:, 8] * 20.0).to(torch.long).cpu().numpy().reshape(-1)
+            )
             now = time.monotonic()
             if progress and (
                 batch_index == 1
@@ -794,6 +921,7 @@ def evaluate(
     heart_array = np.concatenate(heart_probabilities)
     masks_array = np.concatenate(masks).astype(bool)
     bands_array = np.concatenate(ascension_bands)
+    ascension_array = np.concatenate(ascension_levels)
     if band_weights is None:
         evaluation_weights = np.ones(len(bands_array), dtype=np.float64)
     else:
@@ -917,26 +1045,37 @@ def evaluate(
         metrics["skill"] = float(
             1.0 - metrics["relative_value_nll"] / baseline_score
         )
+    def grouped_classification_metrics(include):
+        group_metrics = {}
+        for index, component in enumerate(HAZARD_NAMES):
+            component_include = include & masks_array[:, index]
+            values = _classification_metrics(
+                targets_array[component_include, index],
+                hazards_array[component_include, index],
+            )
+            values["samples"] = int(component_include.sum())
+            group_metrics[component] = values
+        heart_group_include = include & heart_include
+        heart_values = _classification_metrics(
+            targets_array[heart_group_include, HAZARD_OUTPUT_DIM],
+            heart_array[heart_group_include],
+        )
+        heart_values["samples"] = int(heart_group_include.sum())
+        group_metrics["heart_win"] = heart_values
+        return group_metrics
+
     metrics["by_ascension_band"] = {}
     for band, name in enumerate(ASCENSION_BAND_NAMES):
         include = bands_array == band
         if include.any():
-            band_metrics = {}
-            for index, component in enumerate(HAZARD_NAMES):
-                component_include = include & masks_array[:, index]
-                values = _classification_metrics(
-                    targets_array[component_include, index], hazards_array[component_include, index],
-                )
-                values["samples"] = int(component_include.sum())
-                band_metrics[component] = values
-            heart_band_include = include & heart_include
-            heart_values = _classification_metrics(
-                targets_array[heart_band_include, HAZARD_OUTPUT_DIM],
-                heart_array[heart_band_include],
-            )
-            heart_values["samples"] = int(heart_band_include.sum())
-            band_metrics["heart_win"] = heart_values
-            metrics["by_ascension_band"][name] = band_metrics
+            metrics["by_ascension_band"][name] = grouped_classification_metrics(include)
+    metrics["by_ascension"] = {
+        str(level): {
+            "samples": int((ascension_array == level).sum()),
+            **grouped_classification_metrics(ascension_array == level),
+        }
+        for level in sorted(np.unique(ascension_array).tolist())
+    }
     return metrics
 
 
@@ -1005,11 +1144,28 @@ def finish_training(
             "training_objective": objective,
             "dataset": {
                 "filter_version": FILTER_VERSION,
+                "selection": manifest.get("selection", {}),
+                "runs_by_ascension": manifest.get("distributions", {}).get(
+                    "runs_by_ascension", {}
+                ),
+                "samples_by_ascension": manifest.get("distributions", {}).get(
+                    "samples_by_ascension", {}
+                ),
                 "content_catalog": manifest["content_catalog"],
                 "train_valid_samples_by_ascension_band": manifest[
                     "distributions"
                 ]["train_valid_samples_by_ascension_band"],
                 "difficulty_weights": raw_band_weights,
+            },
+            "training_config": {
+                "data_dir": os.path.basename(os.path.normpath(Config.DATA_DIR)),
+                "epochs": Config.EPOCHS,
+                "batch_size": Config.BATCH_SIZE,
+                "learning_rate": Config.LEARNING_RATE,
+                "d_model": Config.D_MODEL,
+                "n_heads": Config.N_HEADS,
+                "n_layers": Config.N_LAYERS,
+                "use_map_context": Config.USE_MAP_CONTEXT,
             },
         }
     )
@@ -1062,6 +1218,11 @@ def train_model(test_only=False):
     vocabulary, feature_encoder, baseline_statistics = build_training_artifacts(
         Config.DATA_DIR, progress=log, include_baselines=True
     )
+    egg_token_ids = [
+        vocabulary.item2id[name]
+        for name in EGG_RELIC_IDS
+        if name in vocabulary.item2id
+    ]
     log(f"Training artifacts ready; vocabulary_size={len(vocabulary):,}")
     datasets = {
         split: make_dataset(split, vocabulary, feature_encoder, progress=log)
@@ -1132,9 +1293,12 @@ def train_model(test_only=False):
         raise ValueError(f"Unsupported VALUE_LOSS_MODE: {Config.VALUE_LOSS_MODE}")
     if not 0.0 < Config.BASELINE_ENTROPY_FLOOR:
         raise ValueError("BASELINE_ENTROPY_FLOOR must be greater than zero")
+    if Config.MONOTONIC_LOSS_WEIGHT < 0.0:
+        raise ValueError("MONOTONIC_LOSS_WEIGHT must be non-negative")
     log(
         f"Training objective: mode={Config.VALUE_LOSS_MODE}; "
         f"entropy_floor={Config.BASELINE_ENTROPY_FLOOR}; "
+        f"monotonic_weight={Config.MONOTONIC_LOSS_WEIGHT}; "
         f"contextual_baseline={baseline_statistics['schema_version']}"
     )
 
@@ -1190,7 +1354,7 @@ def train_model(test_only=False):
         running = {name: 0.0 for name in (
             "total", "value", "hazard_micro_nll", "hazard_macro_nll",
             "hazard_relative_nll", "heart_joint_nll", "heart_relative_nll",
-            "key_bce",
+            "key_bce", "monotonic",
         )}
         running_samples = 0
         for batch_index, batch in enumerate(loaders["train"], start=1):
@@ -1204,10 +1368,14 @@ def train_model(test_only=False):
                 )
             )
             optimizer.zero_grad()
+            device_context = None
             if Config.USE_MAP_CONTEXT:
                 (keys_features, map_rooms, map_flags, history_rooms, history_dist) = (
                     value.to(device, non_blocking=device.type == "cuda")
                     for value in context
+                )
+                device_context = (
+                    keys_features, map_rooms, map_flags, history_rooms, history_dist
                 )
                 key_labels, key_masks = (
                     value.to(device, non_blocking=device.type == "cuda")
@@ -1242,6 +1410,26 @@ def train_model(test_only=False):
                     band_weights,
                     baseline_rates,
                 )
+                key_labels = key_masks = None
+            monotonic = monotonic_counterfactual_loss(
+                model,
+                logits,
+                seq,
+                upgrades,
+                counts,
+                globals_,
+                character_ids,
+                boss_ids,
+                floors,
+                egg_token_ids,
+                context=device_context,
+                key_labels=key_labels,
+                key_masks=key_masks,
+            )
+            components["monotonic"] = monotonic
+            components["total"] = (
+                components["total"] + Config.MONOTONIC_LOSS_WEIGHT * monotonic
+            )
             loss = components["total"]
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -1335,11 +1523,28 @@ def train_model(test_only=False):
             ),
             "dataset": {
                 "filter_version": FILTER_VERSION,
+                "selection": manifest.get("selection", {}),
+                "runs_by_ascension": manifest.get("distributions", {}).get(
+                    "runs_by_ascension", {}
+                ),
+                "samples_by_ascension": manifest.get("distributions", {}).get(
+                    "samples_by_ascension", {}
+                ),
                 "content_catalog": manifest["content_catalog"],
                 "train_valid_samples_by_ascension_band": manifest[
                     "distributions"
                 ]["train_valid_samples_by_ascension_band"],
                 "difficulty_weights": raw_band_weights,
+            },
+            "training_config": {
+                "data_dir": os.path.basename(os.path.normpath(Config.DATA_DIR)),
+                "epochs": Config.EPOCHS,
+                "batch_size": Config.BATCH_SIZE,
+                "learning_rate": Config.LEARNING_RATE,
+                "d_model": Config.D_MODEL,
+                "n_heads": Config.N_HEADS,
+                "n_layers": Config.N_LAYERS,
+                "use_map_context": Config.USE_MAP_CONTEXT,
             },
         }
         is_best = checkpoint_eligible and selection_score < best_val_score
@@ -1447,5 +1652,23 @@ if __name__ == "__main__":
             "evaluation, then save the final checkpoint with test metrics."
         ),
     )
+    parser.add_argument(
+        "--data-dir",
+        default=Config.DATA_DIR,
+        help="Processed dataset directory (default: configured DATA_DIR).",
+    )
+    parser.add_argument(
+        "--checkpoint-name",
+        default=Config.CHECKPOINT_NAME,
+        help="Final checkpoint filename; best checkpoint uses a best_ prefix.",
+    )
+    parser.add_argument(
+        "--report-name",
+        default=Config.TRAINING_REPORT_NAME,
+        help="Training report filename.",
+    )
     args = parser.parse_args()
+    Config.DATA_DIR = args.data_dir
+    Config.CHECKPOINT_NAME = args.checkpoint_name
+    Config.TRAINING_REPORT_NAME = args.report_name
     train_model(test_only=args.test_only)

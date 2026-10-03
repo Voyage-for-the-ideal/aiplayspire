@@ -81,6 +81,9 @@ class Config:
     CONTEXT_CURRICULUM_EPOCHS = 3
     # Auxiliary key-progress head supervision weight (ruby/emerald/sapphire).
     KEY_HEAD_LOSS_WEIGHT = 0.2
+    # Zero-margin ordering for mechanics that are strictly non-negative when
+    # added for free to an otherwise identical post-action state.
+    MONOTONIC_LOSS_WEIGHT = 0.1
 
     # ==========================
     # 输出与保存

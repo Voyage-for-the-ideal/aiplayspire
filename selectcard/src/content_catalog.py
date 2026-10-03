@@ -4,6 +4,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 
 
 _JAVA_ID_PATTERN = re.compile(
@@ -15,6 +16,12 @@ _ENCOUNTER_CONSTANT_PATTERN = re.compile(
 )
 _CASE_PATTERN = re.compile(r"case\s+\"([^\"]+)\"\s*:")
 _UPGRADE_PATTERN = re.compile(r"\+\d*$")
+_CARD_TYPE_PATTERN = re.compile(
+    r"\bsuper\s*\([^;]*?\bCardType\."
+    r"(ATTACK|SKILL|POWER|CURSE|STATUS)\b",
+    re.DOTALL,
+)
+_CARD_TYPES = frozenset({"ATTACK", "SKILL", "POWER", "CURSE", "STATUS"})
 _RELIC_ALIASES = {
     # Telemetry uses the display name while the game source uses the internal ID.
     "Snecko Skull": "Snake Skull",
@@ -34,9 +41,29 @@ def _extract_ids(paths):
     return values
 
 
+def _extract_card_types(paths):
+    card_types = {}
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        card_ids = _JAVA_ID_PATTERN.findall(text)
+        if not card_ids:
+            continue
+        types = _CARD_TYPE_PATTERN.findall(text)
+        if len(card_ids) != 1 or len(types) != 1:
+            raise ValueError(
+                f"Could not extract exactly one card ID and CardType from {path}"
+            )
+        card_id = card_ids[0]
+        if card_id in card_types:
+            raise ValueError(f"Duplicate vanilla card ID: {card_id}")
+        card_types[card_id] = types[0]
+    return card_types
+
+
 @dataclass(frozen=True)
 class VanillaContentCatalog:
     cards: frozenset
+    card_types: dict
     relics: frozenset
     potions: frozenset
     enemies: frozenset
@@ -52,9 +79,13 @@ class VanillaContentCatalog:
             )
 
         card_roots = ("blue", "colorless", "curses", "green", "purple", "red")
-        cards = set()
+        card_types = {}
         for directory in card_roots:
-            cards.update(_extract_ids((source_root / "cards" / directory).glob("*.java")))
+            card_types.update(
+                _extract_card_types(
+                    (source_root / "cards" / directory).glob("*.java")
+                )
+            )
         relics = _extract_ids((source_root / "relics").glob("*.java"))
         potions = _extract_ids((source_root / "potions").glob("*.java"))
         helper_text = monster_helper.read_text(encoding="utf-8")
@@ -62,7 +93,8 @@ class VanillaContentCatalog:
         enemies.update(_CASE_PATTERN.findall(helper_text))
 
         catalog = cls(
-            cards=frozenset(cards),
+            cards=frozenset(card_types),
+            card_types=MappingProxyType(card_types),
             relics=frozenset(relics),
             potions=frozenset(potions),
             enemies=frozenset(enemies),
@@ -74,6 +106,7 @@ class VanillaContentCatalog:
     def from_payload(cls, payload):
         catalog = cls(
             cards=frozenset(payload["cards"]),
+            card_types=MappingProxyType(dict(payload["card_types"])),
             relics=frozenset(payload["relics"]),
             potions=frozenset(payload["potions"]),
             enemies=frozenset(payload["enemies"]),
@@ -85,6 +118,11 @@ class VanillaContentCatalog:
         for name in ("cards", "relics", "potions", "enemies"):
             if not getattr(self, name):
                 raise ValueError(f"Vanilla {name} catalog is empty")
+        if set(self.card_types) != set(self.cards):
+            raise ValueError("Vanilla card type catalog does not match card IDs")
+        unknown_types = set(self.card_types.values()) - _CARD_TYPES
+        if unknown_types:
+            raise ValueError(f"Unknown vanilla CardType values: {sorted(unknown_types)}")
         overlaps = {
             "cards/relics": self.cards & self.relics,
             "cards/potions": self.cards & self.potions,
@@ -109,9 +147,14 @@ class VanillaContentCatalog:
             raise ValueError("relic ID must be a non-empty string")
         return _RELIC_ALIASES.get(value, value)
 
+    def card_type(self, value):
+        """Return the vanilla CardType for a possibly-upgraded card ID."""
+        return self.card_types.get(canonical_card_id(value))
+
     def to_payload(self):
         return {
             "cards": sorted(self.cards),
+            "card_types": dict(sorted(self.card_types.items())),
             "relics": sorted(self.relics),
             "potions": sorted(self.potions),
             "enemies": sorted(self.enemies),

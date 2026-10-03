@@ -28,6 +28,7 @@ from train import (
     _split_batch,
     checkpoint_eligibility,
     configure_context_curriculum,
+    monotonic_counterfactual_loss,
     value_loss_components,
 )
 from boss_context import NUM_BOSS_IDS
@@ -76,7 +77,7 @@ def _context_batch(batch=3):
     history_dist = torch.full((batch, HISTORY_HORIZON), HISTORY_HORIZON, dtype=torch.long)
     history_rooms[:, 0] = ROOM_SYMBOL_TO_ID["E"]
     history_dist[:, 0] = 0
-    keys_features = torch.rand((batch, 6))
+    keys_features = torch.rand((batch, 9))
     return keys_features, map_rooms, map_flags, history_rooms, history_dist
 
 
@@ -182,6 +183,7 @@ class CheckpointCompatTests(unittest.TestCase):
             "num_bosses": NUM_BOSS_IDS,
             "dropout": 0.0, "global_conditioning": "token", "norm_position": "pre",
             "use_map_context": True,
+            "num_key_features": 9,
         }
         restored = self._roundtrip(_v3_model(), config)
         self.assertTrue(restored.use_map_context)
@@ -221,6 +223,7 @@ class DatasetContextTests(unittest.TestCase):
                 "history_rooms": [ROOM_SYMBOL_TO_ID["M"], ROOM_SYMBOL_TO_ID["$"]]
                                  + [0] * (HISTORY_HORIZON - 2),
                 "key_states": [0, 0, 0],
+                "key_known_mask": [1, 1, 0],
             }
             rows.append(row)
         return rows
@@ -241,7 +244,7 @@ class DatasetContextTests(unittest.TestCase):
             self.assertEqual(sample[4].item(), 0)  # IRONCLAD
             (keys_features, map_rooms, map_flags,
              history_rooms, history_dist, key_labels, key_masks) = sample[9:]
-            self.assertEqual(keys_features.shape, (6,))
+            self.assertEqual(keys_features.shape, (9,))
             self.assertEqual(map_rooms.shape, (MAP_GRID_CELLS,))
             self.assertEqual(map_flags.shape, (MAP_GRID_CELLS,))
             self.assertEqual(history_rooms.shape, (HISTORY_HORIZON,))
@@ -274,15 +277,158 @@ class DatasetContextTests(unittest.TestCase):
             row["map_rooms"] = None
             row["map_flags"] = None
             row["key_states"] = None
+            row["key_known_mask"] = None
         with tempfile.TemporaryDirectory() as tmp:
             dataset = self._dataset(self._write_parquet(tmp, rows))
             sample = dataset[0]
             (_, map_rooms, _, _, _, _, key_masks) = sample[9:]
             self.assertFalse(map_rooms.any())
-            self.assertEqual(key_masks.tolist(), [1.0, 0.0, 0.0])
+            self.assertEqual(key_masks.tolist(), [0.0, 0.0, 0.0])
 
 
 class TrainingHelperTests(unittest.TestCase):
+    def test_monotonic_loss_penalizes_lower_observed_egg_value(self):
+        class FloorValueModel(torch.nn.Module):
+            def forward(self, seq, upgrades, counts, globals_, character, boss, **kwargs):
+                # Removing token 7 raises the predicted value, which violates
+                # the free-relic ordering and must produce a positive loss.
+                present = seq.eq(7).any(dim=1).float()
+                logits = torch.zeros((len(seq), 21), device=seq.device)
+                logits[:, 0] = present * 2.0 - 1.0
+                return logits
+
+        model = FloorValueModel()
+        seq = torch.tensor([[7, 2], [2, 3]])
+        upgrades = torch.zeros_like(seq)
+        counts = torch.ones_like(seq)
+        globals_ = torch.zeros((2, 9))
+        character = torch.zeros(2, dtype=torch.long)
+        boss = torch.zeros(2, dtype=torch.long)
+        floors = torch.ones(2)
+        observed = model(seq, upgrades, counts, globals_, character, boss)
+        loss = monotonic_counterfactual_loss(
+            model, observed, seq, upgrades, counts, globals_, character, boss,
+            floors, [7],
+        )
+        self.assertGreater(loss.item(), 0.0)
+
+    def test_monotonic_loss_checks_every_observed_egg(self):
+        class SecondEggValueModel(torch.nn.Module):
+            def forward(self, seq, upgrades, counts, globals_, character, boss, **kwargs):
+                # Token 7 is neutral. Removing token 8 improves the prediction,
+                # so a first-Egg-only implementation incorrectly returns zero.
+                second_egg_present = seq.eq(8).any(dim=1).float()
+                logits = torch.zeros((len(seq), 21), device=seq.device)
+                logits[:, 0] = second_egg_present * 2.0 - 1.0
+                return logits
+
+        model = SecondEggValueModel()
+        seq = torch.tensor([[7, 8, 2]])
+        upgrades = torch.zeros_like(seq)
+        counts = torch.ones_like(seq)
+        globals_ = torch.zeros((1, 9))
+        character = torch.zeros(1, dtype=torch.long)
+        boss = torch.zeros(1, dtype=torch.long)
+        floors = torch.ones(1)
+        observed = model(seq, upgrades, counts, globals_, character, boss)
+        loss = monotonic_counterfactual_loss(
+            model, observed, seq, upgrades, counts, globals_, character, boss,
+            floors, [7, 8],
+        )
+        self.assertGreater(loss.item(), 0.0)
+
+    def test_monotonic_loss_penalizes_lower_known_key_value(self):
+        class KeyValueModel(torch.nn.Module):
+            def forward(self, seq, upgrades, counts, globals_, character, boss,
+                        keys_features=None, **kwargs):
+                present = keys_features[:, 0]
+                logits = torch.zeros((len(seq), 21), device=seq.device)
+                logits[:, 0] = present * 2.0 - 1.0
+                return logits
+
+        model = KeyValueModel()
+        seq = torch.tensor([[2, 3]])
+        upgrades = torch.zeros_like(seq)
+        counts = torch.ones_like(seq)
+        globals_ = torch.zeros((1, 9))
+        character = torch.zeros(1, dtype=torch.long)
+        boss = torch.zeros(1, dtype=torch.long)
+        floors = torch.ones(1)
+        keys_features = torch.tensor([[1.0, 0.0, 0.0, 1.0, 1.0, 0.0,
+                                       0.0, 1.0 / 3.0, 0.25]])
+        context = (
+            keys_features,
+            torch.zeros((1, MAP_GRID_CELLS), dtype=torch.long),
+            torch.zeros((1, MAP_GRID_CELLS), dtype=torch.long),
+            torch.zeros((1, HISTORY_HORIZON), dtype=torch.long),
+            torch.full((1, HISTORY_HORIZON), HISTORY_HORIZON, dtype=torch.long),
+        )
+        observed = model(
+            seq, upgrades, counts, globals_, character, boss,
+            keys_features=keys_features,
+        )
+        loss = monotonic_counterfactual_loss(
+            model, observed, seq, upgrades, counts, globals_, character, boss,
+            floors, [], context=context,
+            key_labels=torch.tensor([[1.0, 0.0, 0.0]]),
+            key_masks=torch.tensor([[1.0, 1.0, 0.0]]),
+        )
+        self.assertGreater(loss.item(), 0.0)
+
+    def test_monotonic_loss_checks_every_key_and_restores_emerald_pending(self):
+        class SecondKeyValueModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.seen_key_features = []
+
+            def forward(self, seq, upgrades, counts, globals_, character, boss,
+                        keys_features=None, **kwargs):
+                self.seen_key_features.append(keys_features.detach().clone())
+                emerald_present = keys_features[:, 1]
+                logits = torch.zeros((len(seq), 21), device=seq.device)
+                logits[:, 0] = emerald_present * 2.0 - 1.0
+                return logits
+
+        model = SecondKeyValueModel()
+        seq = torch.tensor([[2, 3]])
+        upgrades = torch.zeros_like(seq)
+        counts = torch.ones_like(seq)
+        globals_ = torch.zeros((1, 9))
+        character = torch.zeros(1, dtype=torch.long)
+        boss = torch.zeros(1, dtype=torch.long)
+        floors = torch.ones(1)
+        keys_features = torch.tensor([[
+            1.0, 1.0, 0.0,  # collected values
+            1.0, 1.0, 0.0,  # known mask
+            0.0, 2.0 / 3.0, 0.25,  # pending, progress, act
+        ]])
+        map_flags = torch.zeros((1, MAP_GRID_CELLS), dtype=torch.long)
+        map_flags[0, 0] = 2  # FLAG_BURNING
+        context = (
+            keys_features,
+            torch.zeros((1, MAP_GRID_CELLS), dtype=torch.long),
+            map_flags,
+            torch.zeros((1, HISTORY_HORIZON), dtype=torch.long),
+            torch.full((1, HISTORY_HORIZON), HISTORY_HORIZON, dtype=torch.long),
+        )
+        observed = model(
+            seq, upgrades, counts, globals_, character, boss,
+            keys_features=keys_features,
+        )
+        loss = monotonic_counterfactual_loss(
+            model, observed, seq, upgrades, counts, globals_, character, boss,
+            floors, [], context=context,
+            key_labels=torch.tensor([[1.0, 1.0, 0.0]]),
+            key_masks=torch.tensor([[1.0, 1.0, 0.0]]),
+        )
+        self.assertGreater(loss.item(), 0.0)
+        seen = torch.cat(model.seen_key_features[1:], dim=0)
+        emerald_removed = seen[seen[:, 1].eq(0.0)]
+        self.assertEqual(len(emerald_removed), 1)
+        self.assertEqual(emerald_removed[0, 3:6].tolist(), [1.0, 1.0, 0.0])
+        self.assertEqual(emerald_removed[0, 6].item(), 1.0)
+        self.assertAlmostEqual(emerald_removed[0, 7].item(), 1.0 / 3.0)
+
     def test_key_head_loss_masks_unsupervised_targets(self):
         logits = torch.tensor([[2.0, 2.0, 2.0]])
         labels = torch.tensor([[1.0, 0.0, 1.0]])

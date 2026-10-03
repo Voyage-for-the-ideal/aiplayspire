@@ -69,8 +69,12 @@ class PayloadShapeTests(unittest.TestCase):
         self.assertEqual(map_context_fields(GameState()), {})
         self.assertEqual(map_context_fields(None), {})
 
-    def test_mapless_state_yields_empty_payload(self):
-        self.assertEqual(map_context_fields(_state(map_nodes=[])), {})
+    def test_mapless_state_keeps_authoritative_keys(self):
+        payload = map_context_fields(_state(map_nodes=[]))
+        self.assertEqual(payload["map_nodes"], [])
+        self.assertEqual(payload["keys"], {
+            "ruby": False, "emerald": False, "sapphire": False,
+        })
 
     def test_basic_fields_packed(self):
         payload = map_context_fields(_state())

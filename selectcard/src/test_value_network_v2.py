@@ -41,12 +41,15 @@ from train import (
 )
 from boss_context import NUM_BOSS_IDS
 from character_context import NUM_CHARACTER_IDS
+from audit_value_deltas import audit_states
 
 
 def supervision_fields(valid=True, label=0.0):
     return {
         **{column: label for column in TARGET_COLUMNS},
         **{column: valid for column in MASK_COLUMNS},
+        "key_states": [0, 0, 0],
+        "key_known_mask": [1, 1, 0],
     }
 
 
@@ -379,6 +382,17 @@ class GlobalFeatureEncoderTests(unittest.TestCase):
 
 
 class ModelTests(unittest.TestCase):
+    def test_safe_addition_audit_reports_signed_deltas(self):
+        class AuditEngine:
+            def evaluate_state(self, state):
+                return len(state.get("relics", [])) + sum(
+                    bool(value) for value in (state.get("keys") or {}).values()
+                )
+
+        report = audit_states(AuditEngine(), [{"relics": [], "keys": {}}])
+        self.assertEqual(report["Molten Egg 2"]["mean"], 1.0)
+        self.assertEqual(report["sapphire"]["positive"], 1)
+
     def test_training_report_is_written(self):
         old_history = [
             {"epoch": 1, "train_loss": 0.4, "val_loss": 0.5, "learning_rate": 2e-4},
@@ -530,6 +544,7 @@ class ModelTests(unittest.TestCase):
         self.assertIn("heart_win", metrics)
         self.assertTrue(torch.isfinite(torch.tensor(metrics["terminal_floor_mae"])))
         self.assertIn("constant_baseline", metrics)
+        self.assertEqual(metrics["by_ascension"]["0"]["samples"], batch_size)
 
     def test_evaluation_loss_is_independent_of_batch_partition(self):
         batch_size = 4
@@ -618,6 +633,58 @@ class ModelTests(unittest.TestCase):
         state = {"deck": ["Strike_R"], "relics": [], "visible_boss": "Time Eater"}
         result = engine._apply_choice(state, {"action": "skip"})
         self.assertEqual(result["visible_boss"], "Time Eater")
+
+    def test_choice_simulation_applies_each_egg_to_matching_new_cards(self):
+        cases = (
+            ("Molten Egg 2", "Anger", "Anger+1"),
+            ("Toxic Egg 2", "Armaments", "Armaments+1"),
+            ("Frozen Egg 2", "Inflame", "Inflame+1"),
+        )
+        engine = STSInferenceEngine.__new__(STSInferenceEngine)
+        for egg, card, expected in cases:
+            with self.subTest(egg=egg):
+                state = {"deck": ["Bash"], "relics": [egg], "gold": 100}
+                picked = engine._apply_choice(
+                    state, {"action": "pick_card", "target": card}
+                )
+                bought = engine._apply_choice(
+                    state, {"action": "buy_card", "target": card, "cost": 10}
+                )
+                self.assertEqual(picked["deck"], ["Bash", expected])
+                self.assertEqual(bought["deck"], ["Bash", expected])
+
+    def test_composite_add_card_applies_egg_without_double_upgrade(self):
+        engine = STSInferenceEngine.__new__(STSInferenceEngine)
+        state = {"deck": [], "relics": ["Molten Egg 2"]}
+        added = engine._apply_choice(state, {
+            "action": "composite_event",
+            "effects": [{"type": "add_card", "card_id": "Anger", "amount": 2}],
+        })
+        upgraded = engine._apply_choice(state, {
+            "action": "composite_event",
+            "effects": [{"type": "add_card", "card_id": "Anger+1"}],
+        })
+        mismatched = engine._apply_choice(state, {
+            "action": "composite_event",
+            "effects": [{"type": "add_card", "card_id": "Armaments"}],
+        })
+        self.assertEqual(added["deck"], ["Anger+1", "Anger+1"])
+        self.assertEqual(upgraded["deck"], ["Anger+1"])
+        self.assertEqual(mismatched["deck"], ["Armaments"])
+
+    def test_take_key_sets_requested_key_on_copied_state(self):
+        engine = STSInferenceEngine.__new__(STSInferenceEngine)
+        state = {
+            "deck": [],
+            "relics": [],
+            "keys": {"ruby": False, "emerald": True, "sapphire": False},
+        }
+        result = engine._apply_choice(
+            state, {"action": "take_key", "target": "sapphire"}
+        )
+        self.assertTrue(result["keys"]["sapphire"])
+        self.assertTrue(result["keys"]["emerald"])
+        self.assertFalse(state["keys"]["sapphire"])
 
     def test_singing_bowl_increases_current_and_max_hp(self):
         engine = STSInferenceEngine.__new__(STSInferenceEngine)
@@ -833,7 +900,7 @@ class ModelTests(unittest.TestCase):
             path = os.path.join(directory, "model.pth")
             save_checkpoint(path, model, config, vocabulary, feature_encoder)
             checkpoint, loaded_vocab, loaded_encoder = load_checkpoint(path)
-        self.assertEqual(checkpoint["format_version"], 9)
+        self.assertEqual(checkpoint["format_version"], 10)
         self.assertEqual(loaded_vocab.to_dict(), vocabulary.to_dict())
         self.assertEqual(loaded_encoder.to_dict(), feature_encoder.to_dict())
 
@@ -874,7 +941,7 @@ class ModelTests(unittest.TestCase):
                 {"training_objective": objective},
             )
             checkpoint, _, _ = load_checkpoint(path)
-        self.assertEqual(checkpoint["format_version"], 9)
+        self.assertEqual(checkpoint["format_version"], 10)
         self.assertEqual(checkpoint["metadata"]["training_objective"], objective)
 
     def test_wrong_checkpoint_format_is_rejected(self):

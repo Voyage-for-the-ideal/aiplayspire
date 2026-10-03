@@ -25,12 +25,26 @@ public class ExhaustActionState implements CurrentActionState, ActionState {
 
     @Override
     public AbstractGameAction loadAction() {
-        return new ExhaustAction(AbstractDungeon.player, AbstractDungeon.player, amount, isRandom, anyNumber);
+        return new ExhaustAction(
+                AbstractDungeon.player,
+                AbstractDungeon.player,
+                amount,
+                isRandom,
+                anyNumber,
+                canPickZero
+        );
     }
 
     @Override
     public ExhaustAction loadCurrentAction() {
-        ExhaustAction result = new ExhaustAction(AbstractDungeon.player, AbstractDungeon.player, amount, isRandom, anyNumber);
+        ExhaustAction result = new ExhaustAction(
+                AbstractDungeon.player,
+                AbstractDungeon.player,
+                amount,
+                isRandom,
+                anyNumber,
+                canPickZero
+        );
 
         // This should make the action only trigger the second half of the update
         ReflectionHacks

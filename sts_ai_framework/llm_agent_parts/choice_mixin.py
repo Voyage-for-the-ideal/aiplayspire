@@ -1,3 +1,4 @@
+import copy
 from typing import List, Optional, Tuple
 
 from colorama import Fore, Style
@@ -38,9 +39,8 @@ class ChoiceMixin:
                 return GameAction(type=ActionType.PROCEED)
             return GameAction(type=ActionType.WAIT)
 
-        # Guarantee the Ruby Key during Act III. Recall is not a relic and the
-        # current value network has no key feature, so this must remain an
-        # explicit progression rule until a key-aware model is trained.
+        # Guarantee the Ruby Key during Act III even when the learned value
+        # would prefer a short-term campfire benefit.
         if state.act >= 3 and not getattr(state.keys, "ruby", False):
             for i, choice_text in enumerate(state.choice_list):
                 if "recalloption" in str(choice_text).lower():
@@ -99,6 +99,9 @@ class ChoiceMixin:
                 choices.append({"action": "buy_relic", "target": "Anchor", "index": i})
             elif "liftoption" in text_lower:
                 choices.append({"action": "buy_relic", "target": "Vajra", "index": i})
+            elif "recalloption" in text_lower and getattr(
+                    self.value_engine, "supports_key_value", False):
+                choices.append({"action": "take_key", "target": "ruby", "index": i})
 
         if not choices:
             if state.can_proceed:
@@ -130,6 +133,8 @@ class ChoiceMixin:
                 print(Fore.MAGENTA + "决定在营火睡觉 (Rest) 回血" + Style.RESET_ALL)
             elif action_type == "buy_relic":
                 print(Fore.MAGENTA + "决定使用营火遗物 (Shovel/Girya)" + Style.RESET_ALL)
+            elif action_type == "take_key":
+                print(Fore.MAGENTA + "决定在营火回忆取得红宝石钥匙" + Style.RESET_ALL)
 
             idx = best.get("index")
             return self._map_unified_choice_to_action(state, idx)
@@ -241,11 +246,10 @@ class ChoiceMixin:
         return GameAction(type=ActionType.WAIT)
 
     def _should_take_sapphire_key(self, state, sapphire_reward, rewards) -> bool:
-        """Compare the linked relic's learned delta with a rule-valued key.
+        """Compare complete key/relic post-states when the checkpoint supports it.
 
-        The current checkpoint has no key feature, so the key side remains an
-        explicit Act-dependent utility. The relic side still uses the local
-        value network. Act III is forced to guarantee final-act access.
+        Older engines retain the Act-dependent utility fallback. Act III is
+        forced for every engine to guarantee final-act access.
         """
         if state.act >= 3:
             return True
@@ -269,15 +273,34 @@ class ChoiceMixin:
                 current_state,
                 {"action": "buy_relic", "target": linked_relic.relic_id, "cost": 0},
             )
-            relic_gain = max(0.0, self.value_engine.evaluate_state(relic_state) - current_value)
+            relic_value = self.value_engine.evaluate_state(relic_state)
+            relic_gain = relic_value - current_value
         except Exception as exc:
             print(Fore.YELLOW + f"蓝钥匙比较失败，使用Act规则: {exc}" + Style.RESET_ALL)
             return state.act >= 2
 
+        if getattr(self.value_engine, "supports_key_value", False):
+            try:
+                key_state = copy.deepcopy(current_state)
+                key_state.setdefault("keys", {})["sapphire"] = True
+                key_value = self.value_engine.evaluate_state(key_state)
+            except Exception as exc:
+                print(Fore.YELLOW + f"蓝钥匙模型比较失败，使用Act规则: {exc}" + Style.RESET_ALL)
+                return state.act >= 2
+            print(
+                Fore.MAGENTA
+                + "蓝钥匙完整后状态比较: "
+                + f"key={key_value:.6f}, relic={linked_relic.relic_id} "
+                + f"value={relic_value:.6f}, relic_delta={relic_gain:+.6f}"
+                + Style.RESET_ALL
+            )
+            return key_value >= relic_value
+
         key_utility = 0.02 if state.act == 1 else 0.05
         print(
             Fore.MAGENTA
-            + f"蓝钥匙比较: key={key_utility:.4f}, relic={linked_relic.relic_id} gain={relic_gain:.4f}"
+            + f"蓝钥匙兼容规则: key={key_utility:.4f}, relic={linked_relic.relic_id} "
+              f"signed_gain={relic_gain:+.6f}"
             + Style.RESET_ALL
         )
         return key_utility >= relic_gain
