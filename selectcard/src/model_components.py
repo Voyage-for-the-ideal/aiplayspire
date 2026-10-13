@@ -1,13 +1,44 @@
-"""Optional reverse-DAG and latent map blocks."""
+"""Optional v4 blocks. Defaults are still the repaired ReLU/LayerNorm model."""
+
+import math
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 
 def make_norm(width, kind):
     if kind == "layernorm":
         return nn.LayerNorm(width)
+    if kind == "rmsnorm":
+        return nn.RMSNorm(width, eps=1e-5)
     raise ValueError(f"Unsupported normalization: {kind}")
+
+
+class SwiGLU(nn.Module):
+    def __init__(self, width, dropout):
+        super().__init__()
+        self.hidden_width = max(8, 8 * round(width / 3))
+        self.gate = nn.Linear(width, self.hidden_width)
+        self.value = nn.Linear(width, self.hidden_width)
+        self.output = nn.Linear(self.hidden_width, width)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        return self.dropout(self.output(self.dropout(F.silu(self.gate(x)) * self.value(x))))
+
+
+class CoordinatePLR(nn.Module):
+    """Raw xy plus eight trainable Fourier frequencies per coordinate."""
+    def __init__(self, width, frequencies=8):
+        super().__init__()
+        self.frequencies = nn.Parameter(torch.randn(2, frequencies))
+        self.projection = nn.Linear(2 + 4 * frequencies, width)
+
+    def forward(self, xy):
+        angles = 2 * math.pi * xy.unsqueeze(-1) * self.frequencies
+        features = torch.cat([xy, angles.sin().flatten(-2), angles.cos().flatten(-2)], dim=-1)
+        return F.relu(self.projection(features))
 
 
 class MapNodeEncoder(nn.Module):

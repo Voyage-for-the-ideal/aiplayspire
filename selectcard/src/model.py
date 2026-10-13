@@ -4,11 +4,11 @@ import torch.nn as nn
 try:
     from .data_contract import VALUE_OUTPUT_DIM
     from .map_context import MAP_GRID_CELLS, HISTORY_HORIZON
-    from .model_components import make_norm, MapNodeEncoder, MapLatentPool
+    from .model_components import make_norm, SwiGLU, CoordinatePLR, MapNodeEncoder, MapLatentPool
 except ImportError:
     from data_contract import VALUE_OUTPUT_DIM
     from map_context import MAP_GRID_CELLS, HISTORY_HORIZON
-    from model_components import make_norm, MapNodeEncoder, MapLatentPool
+    from model_components import make_norm, SwiGLU, CoordinatePLR, MapNodeEncoder, MapLatentPool
 
 
 class SetAttention(nn.Module):
@@ -17,15 +17,19 @@ class SetAttention(nn.Module):
         super().__init__()
         if norm_position not in {"pre", "post"}:
             raise ValueError("norm_position must be 'pre' or 'post'")
-        if ffn_type != "relu":
+        if ffn_type not in {"relu", "gelu", "swiglu"}:
             raise ValueError("Unsupported FFN type")
         self.norm_position = norm_position
         self.mha = nn.MultiheadAttention(d_model, n_heads, dropout=dropout, batch_first=True)
         self.norm1, self.norm2 = make_norm(d_model, norm_type), make_norm(d_model, norm_type)
-        self.ffn = nn.Sequential(
-            nn.Linear(d_model, d_model * 4), nn.ReLU(),
-            nn.Dropout(dropout), nn.Linear(d_model * 4, d_model), nn.Dropout(dropout),
-        )
+        if ffn_type == "swiglu":
+            self.ffn = SwiGLU(d_model, dropout)
+        else:
+            self.ffn = nn.Sequential(
+                nn.Linear(d_model, d_model * 4),
+                nn.ReLU() if ffn_type == "relu" else nn.GELU(),
+                nn.Dropout(dropout), nn.Linear(d_model * 4, d_model), nn.Dropout(dropout),
+            )
 
     def forward(self, x, key_padding_mask=None):
         source = self.norm1(x) if self.norm_position == "pre" else x
@@ -59,9 +63,9 @@ class STSValueNetwork(nn.Module):
             raise ValueError("Invalid global conditioning")
         if map_encoder not in {"none", "edge", "node_mlp", "dag"}:
             raise ValueError("Invalid map encoder")
-        if map_latents not in {0, 16, 32} or register_tokens != 0:
+        if map_latents not in {0, 16, 32} or register_tokens not in {0, 2, 4}:
             raise ValueError("Invalid latent/register count")
-        if coordinate_embedding != "linear" or pooling != "cls":
+        if coordinate_embedding not in {"linear", "plr"} or pooling not in {"cls", "cls_mean"}:
             raise ValueError("Invalid coordinate embedding/pooling")
         if not use_map_context and (map_encoder != "none" or map_latents or coordinate_embedding != "linear"):
             raise ValueError("Map experiments require map context")
@@ -79,7 +83,7 @@ class STSValueNetwork(nn.Module):
         self.upgrade_emb = nn.Embedding(max_upgrade, d_model, padding_idx=0)
         self.count_emb = nn.Embedding(max_count, d_model, padding_idx=0)
         self.cls_token = nn.Parameter(torch.randn(1, 1, d_model))
-        self.registers = None
+        self.registers = nn.Parameter(torch.randn(1, register_tokens, d_model) * 0.02) if register_tokens else None
         self.character_token = nn.Parameter(torch.randn(1, 1, d_model))
         self.character_emb = nn.Embedding(num_characters, d_model)
         self.boss_token = nn.Parameter(torch.randn(1, 1, d_model))
@@ -88,7 +92,9 @@ class STSValueNetwork(nn.Module):
         if use_map_context:
             self.token_type_emb = nn.Embedding(self.NUM_CONTEXT_TYPES, d_model)
             self.map_room_emb = nn.Embedding(self.NUM_ITEM_ROOMS, d_model, padding_idx=0)
-            self.map_flag_proj = nn.Linear(7, d_model)
+            self.map_flag_proj = nn.Linear(7 if coordinate_embedding == "linear" else 5, d_model)
+            if coordinate_embedding == "plr":
+                self.coordinate_plr = CoordinatePLR(d_model)
             if map_encoder != "none":
                 self.map_edge_proj = nn.Linear(3, d_model, bias=False)
             if map_encoder in {"node_mlp", "dag"}:
@@ -105,7 +111,7 @@ class STSValueNetwork(nn.Module):
             for _ in range(n_layers)
         ])
         self.final_norm = make_norm(d_model, norm_type) if norm_position == "pre" else nn.Identity()
-        head_input = d_model * (1 + int(global_conditioning == "late_concat"))
+        head_input = d_model * (1 + int(pooling == "cls_mean") + int(global_conditioning == "late_concat"))
         self.value_head = nn.Sequential(nn.Linear(head_input, d_model // 2), nn.ReLU(), nn.Linear(d_model // 2, VALUE_OUTPUT_DIM))
         if use_map_context:
             self.key_head = nn.Linear(head_input, 3)
@@ -138,7 +144,11 @@ class STSValueNetwork(nn.Module):
         map_outgoing_mask = map_outgoing_mask.to(device=device, dtype=torch.long)
         keys_out = self.keys_mlp(keys_features.to(device)).unsqueeze(1) + self.token_type_emb.weight[4]
         features = self._decode_map_flags(map_flags)
-        projected = self.map_flag_proj(features)
+        if self.coordinate_embedding == "linear":
+            projected = self.map_flag_proj(features)
+        else:
+            projected = self.map_flag_proj(torch.cat([features[..., :3], features[..., 5:]], -1))
+            projected = projected + self.coordinate_plr(features[..., 3:5])
         map_out = self.map_room_emb(map_rooms) + projected + self.token_type_emb.weight[5]
         map_mask = map_rooms.eq(0)
         if self.map_encoder != "none":
@@ -173,6 +183,9 @@ class STSValueNetwork(nn.Module):
             boss = boss + self.token_type_emb.weight[3]
             items = items + self.token_type_emb.weight[7]
         blocks, masks = [cls], [empty]
+        if self.registers is not None:
+            blocks.append(self.registers.expand(batch, -1, -1))
+            masks.append(torch.zeros(batch, self.registers.size(1), dtype=torch.bool, device=device))
         if self.global_conditioning == "token":
             global_token = global_out.unsqueeze(1)
             if self.use_map_context:
@@ -195,6 +208,9 @@ class STSValueNetwork(nn.Module):
             x = layer(x, key_padding_mask=padding)
         x = self.final_norm(x)
         pooled = [x[:, 0]]
+        if self.pooling == "cls_mean":
+            valid = (~item_mask).unsqueeze(-1)
+            pooled.append((x[:, item_start:] * valid).sum(1) / valid.sum(1).clamp_min(1))
         if self.global_conditioning == "late_concat":
             pooled.append(global_out)
         pooled = torch.cat(pooled, dim=-1)

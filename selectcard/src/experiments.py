@@ -15,6 +15,9 @@ EXPERIMENTS = {
     "baseline": {},
     "depth8": {"N_LAYERS": 8},
     "width256": {"D_MODEL": 256},
+    "gelu": {"FFN_TYPE": "gelu"},
+    "swiglu": {"FFN_TYPE": "swiglu"},
+    "rmsnorm": {"NORM_TYPE": "rmsnorm"},
     "edges": {"MAP_ENCODER": "edge"},
     "node_mlp": {"MAP_ENCODER": "node_mlp"},
     "dag": {"MAP_ENCODER": "dag"},
@@ -28,6 +31,10 @@ EXPERIMENTS = {
     "monotonic0": {"MONOTONIC_LOSS_WEIGHT": 0.0},
     "monotonic003": {"MONOTONIC_LOSS_WEIGHT": 0.03},
     "monotonic01": {"MONOTONIC_LOSS_WEIGHT": 0.1},
+    "plr": {"COORDINATE_EMBEDDING": "plr"},
+    "cls_mean": {"POOLING": "cls_mean"},
+    "register2": {"REGISTER_TOKENS": 2},
+    "register4": {"REGISTER_TOKENS": 4},
 }
 
 BASELINE = {

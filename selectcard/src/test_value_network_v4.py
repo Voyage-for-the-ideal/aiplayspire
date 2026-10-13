@@ -130,8 +130,12 @@ class ArchitectureTests(unittest.TestCase):
         torch.testing.assert_close(grad, actual_grad, atol=2e-6, rtol=2e-5)
 
     def test_each_component_forward_backward_and_checkpoint(self):
-        variants = [dict(map_encoder="edge"), dict(map_encoder="node_mlp"), dict(map_encoder="dag"),
-                    dict(map_latents=16), dict(map_latents=32), dict(map_encoder="dag", map_latents=16)]
+        variants = [dict(ffn_type="gelu"), dict(ffn_type="swiglu"), dict(norm_type="rmsnorm"),
+                    dict(map_encoder="edge"), dict(map_encoder="node_mlp"), dict(map_encoder="dag"),
+                    dict(map_latents=16), dict(map_latents=32), dict(coordinate_embedding="plr"),
+                    dict(pooling="cls_mean"), dict(register_tokens=2), dict(register_tokens=4),
+                    dict(map_encoder="dag", map_latents=16, pooling="cls_mean", norm_type="rmsnorm"),
+                    dict(global_conditioning="late_concat", pooling="cls_mean")]
         vocab = ItemVocabulary()
         for i in range(30):
             vocab.add(f"item{i}")
@@ -157,7 +161,7 @@ class ArchitectureTests(unittest.TestCase):
 
     def test_masked_cells_cannot_influence_compressed_output(self):
         for latents in (16, 32):
-            model = small_model(map_latents=latents).eval()
+            model = small_model(map_latents=latents, pooling="cls_mean").eval()
             args, ctx = synthetic_inputs(model, 2, torch.device("cpu"))
             ctx["map_rooms"][:, 30:] = 0
             first = model(*args, **ctx)
@@ -170,6 +174,13 @@ class ArchitectureTests(unittest.TestCase):
             result.sum().backward()
             self.assertTrue(all(p.grad is None or torch.isfinite(p.grad).all() for p in model.parameters()))
 
+    def test_item_padding_invariance_with_registers_and_mean(self):
+        model = small_model(register_tokens=4, pooling="cls_mean").eval()
+        args, ctx = synthetic_inputs(model, 2, torch.device("cpu"))
+        expected = model(*args, **ctx)
+        padded = tuple(torch.cat([t, torch.zeros(2, 5, dtype=t.dtype)], 1) if i < 3 else t
+                       for i, t in enumerate(args))
+        torch.testing.assert_close(expected, model(*padded, **ctx), atol=1e-6, rtol=1e-5)
 
     def test_reverse_dag_receives_far_successor_information(self):
         torch.manual_seed(7)
