@@ -508,13 +508,13 @@ def make_dataset(split, vocabulary, feature_encoder, progress=None):
 def _split_batch(batch, use_map):
     """Unpack a (v2 or v3) dataset batch into common and context parts."""
     if use_map:
-        if len(batch) != 16:
-            raise ValueError("map-context dataset batches must carry 16 tensors")
+        if len(batch) != 17:
+            raise ValueError("map-context dataset batches must carry 17 tensors")
         (seq, upgrades, counts, globals_, character_ids, boss_ids, floors, targets, masks,
          keys_features, map_rooms, map_flags,
-         history_rooms, history_dist, key_labels, key_masks) = batch
+         history_rooms, history_dist, key_labels, key_masks, outgoing) = batch
         context = (
-            keys_features, map_rooms, map_flags, history_rooms, history_dist,
+            keys_features, map_rooms, map_flags, history_rooms, history_dist, outgoing,
         )
         return (seq, upgrades, counts, globals_, character_ids, boss_ids, floors, targets, masks), context, (key_labels, key_masks)
     if len(batch) != 9:
@@ -547,11 +547,12 @@ def _forward_value_model(
 ):
     if context is None:
         return model(seq, upgrades, counts, globals_, character_ids, boss_ids)
-    keys_features, map_rooms, map_flags, history_rooms, history_dist = context
+    keys_features, map_rooms, map_flags, history_rooms, history_dist = context[:5]
+    outgoing = context[5] if len(context) > 5 else None
     return model(
         seq, upgrades, counts, globals_, character_ids, boss_ids,
         keys_features=keys_features, map_rooms=map_rooms, map_flags=map_flags,
-        history_rooms=history_rooms, history_dist=history_dist,
+        history_rooms=history_rooms, history_dist=history_dist, map_outgoing_mask=outgoing,
     )
 
 
@@ -854,7 +855,7 @@ def evaluate(
                 )
             )
             if use_map:
-                (keys_features, map_rooms, map_flags, history_rooms, history_dist) = (
+                (keys_features, map_rooms, map_flags, history_rooms, history_dist, outgoing) = (
                     value.to(device, non_blocking=device.type == "cuda")
                     for value in context
                 )
@@ -866,7 +867,7 @@ def evaluate(
                     seq, upgrades, counts, globals_, character_ids, boss_ids,
                     keys_features=keys_features, map_rooms=map_rooms,
                     map_flags=map_flags, history_rooms=history_rooms,
-                    history_dist=history_dist, return_keys=True,
+                    history_dist=history_dist, map_outgoing_mask=outgoing, return_keys=True,
                 )
             else:
                 logits = model(seq, upgrades, counts, globals_, character_ids, boss_ids)
@@ -1370,12 +1371,12 @@ def train_model(test_only=False):
             optimizer.zero_grad()
             device_context = None
             if Config.USE_MAP_CONTEXT:
-                (keys_features, map_rooms, map_flags, history_rooms, history_dist) = (
+                (keys_features, map_rooms, map_flags, history_rooms, history_dist, outgoing) = (
                     value.to(device, non_blocking=device.type == "cuda")
                     for value in context
                 )
                 device_context = (
-                    keys_features, map_rooms, map_flags, history_rooms, history_dist
+                    keys_features, map_rooms, map_flags, history_rooms, history_dist, outgoing
                 )
                 key_labels, key_masks = (
                     value.to(device, non_blocking=device.type == "cuda")
@@ -1385,7 +1386,7 @@ def train_model(test_only=False):
                     seq, upgrades, counts, globals_, character_ids, boss_ids,
                     keys_features=keys_features, map_rooms=map_rooms,
                     map_flags=map_flags, history_rooms=history_rooms,
-                    history_dist=history_dist, return_keys=True,
+                    history_dist=history_dist, map_outgoing_mask=outgoing, return_keys=True,
                 )
                 components = value_loss_components(
                     logits,

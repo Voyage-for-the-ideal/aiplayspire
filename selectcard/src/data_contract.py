@@ -1,7 +1,7 @@
 import math
 
 
-PREPROCESSING_VERSION = "set-transformer-v9-key-observability-eggs"
+PREPROCESSING_VERSION = "set-transformer-v10-current-edges"
 FILTER_VERSION = "standard-vanilla-v1"
 BOSS_SCHEMA_VERSION = "visible-boss-v1"
 

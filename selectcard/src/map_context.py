@@ -16,7 +16,7 @@ Packed layout (one act, fixed size, no ragged lists):
 - ``map_flags``: 105 ints, per-cell bit mask:
     bit 0   valid      the cell is a connected room used by this sample
     bit 1   burning    elite marked with the emerald flame
-    bit 2   visited    on the realized path before the current floor
+    bit 2   current_candidate  possible current position (all zero = unknown)
     bit 3   reachable  reachable from the current position in a future row
     bits 4-5 out_deg   outgoing edge count (0-3)
     bits 6-7 in_deg    incoming parent count (0-3)
@@ -31,10 +31,10 @@ Packed layout (one act, fixed size, no ragged lists):
 
 Approximations (documented, deliberately conservative):
 
-- "visited" positions come from a forward DP over the realized
-  symbol sequence.  When several same-symbol nodes are consistent with the
-  log, all of them are marked; ambiguity is rare (the reconstruction
-  validator measures the model as >=99.9% path-consistent).
+- Current candidates come from a forward DP over the observed prefix only.
+  Multiple candidates express uncertainty, never a fabricated exact position.
+- ``map_outgoing_mask`` holds three bits per cell: left/straight/right edges
+  to the next row. Row 14 connects to one virtual Boss (out-degree one).
 - Emerald keys are marked as collected on floors after the burning elite's
   floor when that node lies on a consistent path.  Sapphire keys are not
   recoverable from archived logs before Act IV and are masked as unknown.
@@ -53,7 +53,7 @@ try:
 except ImportError:  # pragma: no cover - package vs script import
     import sts_mapgen
 
-MAP_CONTEXT_VERSION = "map-context-v4-key-observability"
+MAP_CONTEXT_VERSION = "map-context-v5-current-edges"
 MAP_GRID_CELLS = sts_mapgen.MAP_HEIGHT * sts_mapgen.MAP_WIDTH  # 105
 HISTORY_HORIZON = 8
 MAP_FLAG_FEATURES = 7
@@ -68,6 +68,9 @@ def context_schema():
         "map_flag_features": MAP_FLAG_FEATURES,
         "key_feature_count": 9,
         "key_observability": "value-plus-known-mask-v1",
+        "coordinate_order": "xy-normalized",
+        "position_semantics": "current-candidates-v1",
+        "edge_encoding": "next-row-left-straight-right-v1",
     }
 
 ROOM_SYMBOL_TO_ID = {"M": 1, "E": 2, "R": 3, "$": 4, "T": 5, "?": 6, "B": 7}
@@ -76,10 +79,83 @@ KEY_ROOM_IDS = frozenset(ROOM_SYMBOL_TO_ID.values())
 
 FLAG_VALID = 1 << 0
 FLAG_BURNING = 1 << 1
-FLAG_VISITED = 1 << 2
+FLAG_CURRENT_CANDIDATE = 1 << 2
 FLAG_REACHABLE = 1 << 3
 FLAG_OUT_DEG = 1 << 4   # two bits
 FLAG_IN_DEG = 1 << 6    # two bits
+
+
+def normalize_graph(map_nodes):
+    """Normalize both producers to unique, valid next-row grid edges.
+
+    Ignore dangling destinations; reject in-grid non-vanilla edges rather
+    than silently encoding an incorrect graph. Boss coordinates are external
+    to the 105-cell grid and canonicalized separately.
+    """
+    grid = {}
+    for raw in map_nodes:
+        x, y = int(raw["x"]), int(raw["y"])
+        if not (0 <= x < 7 and 0 <= y < 15):
+            continue
+        symbol = str(raw.get("symbol", "?")).upper()
+        if symbol not in ROOM_SYMBOL_TO_ID:
+            continue
+        xy = (x, y)
+        if xy in grid:
+            raise ValueError(f"Duplicate map node: {xy}")
+        grid[xy] = {**raw, "symbol": symbol, "children": list(raw.get("children") or [])}
+    edges = {xy: set() for xy in grid}
+    for (x, y), node in grid.items():
+        for child in node["children"]:
+            dst = (int(child["x"]), int(child["y"]))
+            if dst not in grid:
+                continue
+            if y == 14 or dst[1] != y + 1 or abs(dst[0] - x) > 1:
+                raise ValueError(f"Unsupported map edge: {(x, y)} -> {dst}")
+            edges[(x, y)].add(dst)
+    return grid, edges
+
+
+def pack_graph(map_nodes, current_candidates=()):
+    """Shared graph packing; degrees and reachability use final unique edges."""
+    grid, edges = normalize_graph(map_nodes)
+    current = {tuple(xy) for xy in current_candidates if tuple(xy) in grid}
+    incoming = {xy: 0 for xy in grid}
+    for destinations in edges.values():
+        for dst in destinations:
+            incoming[dst] += 1
+    reachable = set()
+    frontier = set(current)
+    while frontier:
+        frontier = {dst for src in frontier for dst in edges[src]} - reachable
+        reachable.update(frontier)
+    rooms, flags, outgoing = ([0] * MAP_GRID_CELLS for _ in range(3))
+    for (x, y), node in grid.items():
+        index = y * 7 + x
+        rooms[index] = ROOM_SYMBOL_TO_ID[node["symbol"]]
+        bits = FLAG_VALID
+        if node.get("burning"):
+            bits |= FLAG_BURNING
+        if (x, y) in current:
+            bits |= FLAG_CURRENT_CANDIDATE
+        if (x, y) in reachable:
+            bits |= FLAG_REACHABLE
+        bits |= (1 if y == 14 else len(edges[(x, y)])) << 4
+        bits |= incoming[(x, y)] << 6
+        flags[index] = bits
+        for dx, _ in edges[(x, y)]:
+            outgoing[index] |= 1 << (dx - x + 1)
+    return rooms, flags, outgoing
+
+
+def nodes_as_payload(nodes):
+    """Adapt immutable mapgen nodes without mutating its game-faithful data."""
+    return [
+        {"x": n.x, "y": n.y, "symbol": _node_symbol(n), "burning": n.burning,
+         "children": [{"x": e.dst_x, "y": e.dst_y} for e in n.edges]}
+        for row in nodes for n in row
+        if n.room is not None and (n.has_edges or n.parents)
+    ]
 
 WINGED_GREAVES_KEYS = ("wingedgreaves", "wingboots")
 WING_CHARGES = 3
@@ -337,36 +413,17 @@ class RunMapContextBuilder:
         walked = history_symbols(self.segments, segment_index, row)
         key_states, key_known_mask = self._key_context(act, floor)
 
-        map_rooms = [0] * MAP_GRID_CELLS
-        map_flags = [0] * MAP_GRID_CELLS
-
-        if nodes is not None:
-            visited_rows = self._positions(segment_index, row + 1) or []
-            reach = reachable_rows(nodes, row, visited_rows[row] if visited_rows else set())
-            for y in range(sts_mapgen.MAP_HEIGHT):
-                for x in range(sts_mapgen.MAP_WIDTH):
-                    node = nodes[y][x]
-                    if node.room is None:
-                        continue
-                    if not (node.has_edges or node.parents):
-                        continue  # unconnected fixed-row cells carry no signal
-                    index = y * sts_mapgen.MAP_WIDTH + x
-                    map_rooms[index] = ROOM_SYMBOL_TO_ID.get(_node_symbol(node), 0)
-                    flags = FLAG_VALID
-                    if node.burning:
-                        flags |= FLAG_BURNING
-                    if y <= row and visited_rows and x in visited_rows[y]:
-                        flags |= FLAG_VISITED
-                    if y > row and x in reach[y]:
-                        flags |= FLAG_REACHABLE
-                    flags |= min(len(node.edges), 3) << 4
-                    flags |= min(len(node.parents), 3) << 6
-                    map_flags[index] = flags
+        candidates = self._positions(segment_index, row + 1) or []
+        current = [(x, row) for x in candidates[row]] if row < len(candidates) else []
+        map_rooms, map_flags, outgoing = pack_graph(
+            nodes_as_payload(nodes) if nodes is not None else [], current
+        )
 
         return {
             "act": act,
             "map_rooms": map_rooms,
             "map_flags": map_flags,
+            "map_outgoing_mask": outgoing,
             "history_rooms": [ROOM_SYMBOL_TO_ID.get(s, 0) for s in walked]
             + [0] * (HISTORY_HORIZON - len(walked)),
             "key_states": key_states,
@@ -417,50 +474,17 @@ def inference_context(state: dict):
     raw_keys = state.get("keys")
     keys = raw_keys if isinstance(raw_keys, dict) else {}
 
-    map_rooms = [0] * MAP_GRID_CELLS
-    map_flags = [0] * MAP_GRID_CELLS
     current = state.get("current_node")
-
-    grid: dict[tuple[int, int], dict] = {}
-    for node in map_nodes:
-        x, y = int(node.get("x", 0)), int(node.get("y", 0))
-        if 0 <= x < sts_mapgen.MAP_WIDTH and 0 <= y < sts_mapgen.MAP_HEIGHT:
-            grid[(x, y)] = node
-    parent_counts: dict[tuple[int, int], int] = {}
-    for node in grid.values():
-        for child in node.get("children") or []:
-            child_xy = (int(child.get("x", -1)), int(child.get("y", -1)))
-            if child_xy in grid:
-                parent_counts[child_xy] = parent_counts.get(child_xy, 0) + 1
-
-    if act is not None and grid:
-        row = (
-            int(current[1]) if current is not None
-            else (int(floor_in_act) if floor_in_act is not None else None)
-        )
-        reach = reachable_rows_from_children(grid, row, current)
-        for (x, y), node in grid.items():
-            symbol = str(node.get("symbol", "?")).upper()
-            room_id = ROOM_SYMBOL_TO_ID.get(symbol, 0)
-            if room_id == 0:
-                continue
-            index = y * sts_mapgen.MAP_WIDTH + x
-            map_rooms[index] = room_id
-            flags = FLAG_VALID
-            if node.get("burning"):
-                flags |= FLAG_BURNING
-            if current is not None and (x, y) == tuple(current):
-                flags |= FLAG_VISITED
-            if y in reach and x in reach[y]:
-                flags |= FLAG_REACHABLE
-            flags |= min(len(node.get("children") or []), 3) << 4
-            flags |= min(parent_counts.get((x, y), 0), 3) << 6
-            map_flags[index] = flags
+    map_rooms, map_flags, outgoing = pack_graph(
+        map_nodes if act in (1, 2, 3) else [],
+        [current] if current is not None else [],
+    )
 
     return {
         "act": act if isinstance(act, int) else 0,
         "map_rooms": map_rooms,
         "map_flags": map_flags,
+        "map_outgoing_mask": outgoing,
         "history_rooms": [ROOM_SYMBOL_TO_ID.get(s, 0) for s in walked]
         + [0] * (HISTORY_HORIZON - len(walked)),
         "key_states": [
@@ -501,7 +525,7 @@ def decode_map_features(map_rooms, map_flags):
     """Decode packed columns into ``(room_ids, flag_matrix)`` float tensors data.
 
     Returns ``(rooms: list[int], flags: list[list[float]])`` where each flag
-    row is ``[burning, visited, reachable, x/6, y/14, out_deg/3, in_deg/3]``.
+    row is ``[burning, current_candidate, reachable, x/6, y/14, out_deg/3, in_deg/3]``.
     """
     flags_out = []
     for index in range(MAP_GRID_CELLS):
@@ -509,7 +533,7 @@ def decode_map_features(map_rooms, map_flags):
         y, x = divmod(index, sts_mapgen.MAP_WIDTH)
         flags_out.append([
             float(bool(bits & FLAG_BURNING)),
-            float(bool(bits & FLAG_VISITED)),
+            float(bool(bits & FLAG_CURRENT_CANDIDATE)),
             float(bool(bits & FLAG_REACHABLE)),
             x / (sts_mapgen.MAP_WIDTH - 1),
             y / (sts_mapgen.MAP_HEIGHT - 1),
@@ -542,9 +566,9 @@ def keys_token_features(key_states, map_flags, act: int, key_known_mask=None):
 
 __all__ = [
     "MAP_CONTEXT_VERSION", "MAP_GRID_CELLS", "HISTORY_HORIZON", "MAP_FLAG_FEATURES",
-    "context_schema",
+    "context_schema", "normalize_graph", "pack_graph", "nodes_as_payload",
     "ROOM_SYMBOL_TO_ID", "ROOM_ID_TO_SYMBOL", "KEY_ROOM_IDS",
-    "FLAG_VALID", "FLAG_BURNING", "FLAG_VISITED", "FLAG_REACHABLE",
+    "FLAG_VALID", "FLAG_BURNING", "FLAG_CURRENT_CANDIDATE", "FLAG_REACHABLE",
     "FLAG_OUT_DEG", "FLAG_IN_DEG",
     "split_act_segments", "segment_of_floor", "history_symbols",
     "wing_pickup_floor",

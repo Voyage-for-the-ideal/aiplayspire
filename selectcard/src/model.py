@@ -74,8 +74,12 @@ class STSValueNetwork(nn.Module):
         norm_position="pre",
         use_map_context=False,
         num_key_features=9,
+        item_token_budget=None,
     ):
         super().__init__()
+        self.model_config = {k: v for k, v in locals().items() if k not in {"self", "__class__"}}
+        self.item_token_budget = item_token_budget if item_token_budget is not None else (73 if use_map_context else 192)
+        self.model_config["item_token_budget"] = self.item_token_budget
         if global_conditioning not in {"token", "late_concat"}:
             raise ValueError("global_conditioning must be 'token' or 'late_concat'")
         self.global_conditioning = global_conditioning
@@ -112,8 +116,8 @@ class STSValueNetwork(nn.Module):
             # Row-major (y, x) coordinate pair per grid cell, index = y*7+x.
             coordinates = torch.stack(
                 (
-                    torch.linspace(0.0, 1.0, 15).repeat_interleave(7),
                     torch.linspace(0.0, 1.0, 7).repeat(15),
+                    torch.linspace(0.0, 1.0, 15).repeat_interleave(7),
                 ),
                 dim=1,
             )
@@ -138,17 +142,17 @@ class STSValueNetwork(nn.Module):
     def _decode_map_flags(self, map_flags):
         """Bit-packed cell flags -> [B, 105, 7] float feature matrix."""
         burning = ((map_flags >> 1) & 1).float().unsqueeze(-1)
-        visited = ((map_flags >> 2) & 1).float().unsqueeze(-1)
+        current_candidate = ((map_flags >> 2) & 1).float().unsqueeze(-1)
         reachable = ((map_flags >> 3) & 1).float().unsqueeze(-1)
         out_deg = ((map_flags >> 4) & 3).float().div(3.0).unsqueeze(-1)
         in_deg = ((map_flags >> 6) & 3).float().div(3.0).unsqueeze(-1)
         coordinates = (
-            self.map_cell_coordinates.to(map_flags.dtype)
+            self.map_cell_coordinates.to(device=map_flags.device, dtype=torch.float32)
             .unsqueeze(0)
             .expand(map_flags.size(0), -1, -1)
         )
         return torch.cat(
-            [burning, visited, reachable, coordinates, out_deg, in_deg],
+            [burning, current_candidate, reachable, coordinates, out_deg, in_deg],
             dim=-1,
         )
 
@@ -205,6 +209,7 @@ class STSValueNetwork(nn.Module):
         history_rooms=None,
         history_dist=None,
         return_keys=False,
+        map_outgoing_mask=None,
     ):
         batch_size = seq_tokens.size(0)
         device = seq_tokens.device

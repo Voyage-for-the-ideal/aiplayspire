@@ -529,10 +529,16 @@ class STSDataset(Dataset):
 
         map_rooms = self._column_list(row, "map_rooms")
         map_flags = self._column_list(row, "map_flags")
+        outgoing = self._column_list(row, "map_outgoing_mask")
+        if map_rooms is not None and outgoing is None:
+            raise ValueError("Present V4 map is missing map_outgoing_mask; rebuild data")
+        if outgoing is None:
+            outgoing = [0] * map_context.MAP_GRID_CELLS
         map_present = map_rooms is not None
         if not self.context_enabled or not map_present:
             map_rooms = [0] * map_context.MAP_GRID_CELLS
             map_flags = [0] * map_context.MAP_GRID_CELLS
+            outgoing = [0] * map_context.MAP_GRID_CELLS
 
         # History is most-recent-first (index 0 = the room just left) and
         # right-padded. It carries no future information.
@@ -564,6 +570,7 @@ class STSDataset(Dataset):
             torch.tensor(history_dist, dtype=torch.long),
             torch.tensor(key_labels, dtype=torch.float32),
             torch.tensor(key_mask, dtype=torch.float32),
+            torch.tensor(outgoing, dtype=torch.long),
         )
 
     def __getitem__(self, idx):

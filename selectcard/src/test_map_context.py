@@ -10,7 +10,7 @@ from map_context import (
     FLAG_BURNING,
     FLAG_REACHABLE,
     FLAG_VALID,
-    FLAG_VISITED,
+    FLAG_CURRENT_CANDIDATE,
     HISTORY_HORIZON,
     MAP_CONTEXT_VERSION,
     MAP_GRID_CELLS,
@@ -162,15 +162,15 @@ class RunMapContextBuilderTests(unittest.TestCase):
                 + [0] * (HISTORY_HORIZON - len(walked)),
             )
 
-    def test_visited_flags_set_for_early_rows(self):
+    def test_current_candidates_only_on_current_row(self):
         context = self.builder.context_for_floor(3)
         visited_rows = {
             index // 7
             for index, bits in enumerate(context["map_flags"])
-            if bits & FLAG_VISITED
+            if bits & FLAG_CURRENT_CANDIDATE
         }
-        self.assertTrue(visited_rows.issubset({0, 1, 2}))
-        self.assertIn(0, visited_rows)
+        self.assertTrue(visited_rows.issubset({2}))
+        self.assertIn(2, visited_rows)
 
     def test_map_cells_only_for_connected_rooms(self):
         context = self.builder.context_for_floor(3)
@@ -257,7 +257,7 @@ class InferenceContextTests(unittest.TestCase):
         self.assertEqual(context["map_rooms"][3 * 7 + 3], ROOM_SYMBOL_TO_ID["M"])
         self.assertEqual(context["map_rooms"][4 * 7 + 4], ROOM_SYMBOL_TO_ID["E"])
         self.assertTrue(context["map_flags"][4 * 7 + 4] & FLAG_BURNING)
-        self.assertTrue(context["map_flags"][3 * 7 + 3] & FLAG_VISITED)
+        self.assertTrue(context["map_flags"][3 * 7 + 3] & FLAG_CURRENT_CANDIDATE)
         self.assertTrue(context["map_flags"][4 * 7 + 4] & FLAG_REACHABLE)
         self.assertFalse(context["map_flags"][3 * 7 + 4] & FLAG_REACHABLE)
         self.assertEqual((context["map_flags"][3 * 7 + 3] >> 4) & 3, 2)
@@ -288,7 +288,7 @@ class FeatureDecodeTests(unittest.TestCase):
         index = 4 * 7 + 2
         map_rooms[index] = ROOM_SYMBOL_TO_ID["E"]
         map_flags[index] = (
-            FLAG_VALID | FLAG_BURNING | FLAG_VISITED | FLAG_REACHABLE
+            FLAG_VALID | FLAG_BURNING | FLAG_CURRENT_CANDIDATE | FLAG_REACHABLE
             | (2 << 4) | (1 << 6)
         )
         rooms, flags = decode_map_features(map_rooms, map_flags)

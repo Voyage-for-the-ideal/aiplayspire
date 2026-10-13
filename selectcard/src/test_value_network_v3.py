@@ -220,6 +220,7 @@ class DatasetContextTests(unittest.TestCase):
                 "act": 1,
                 "map_rooms": [ROOM_SYMBOL_TO_ID["M"]] + [0] * (MAP_GRID_CELLS - 1),
                 "map_flags": [1] * MAP_GRID_CELLS,
+                "map_outgoing_mask": [0] * MAP_GRID_CELLS,
                 "history_rooms": [ROOM_SYMBOL_TO_ID["M"], ROOM_SYMBOL_TO_ID["$"]]
                                  + [0] * (HISTORY_HORIZON - 2),
                 "key_states": [0, 0, 0],
@@ -240,10 +241,10 @@ class DatasetContextTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             dataset = self._dataset(self._write_parquet(tmp, self._rows()))
             sample = dataset[0]
-            self.assertEqual(len(sample), 16)
+            self.assertEqual(len(sample), 17)
             self.assertEqual(sample[4].item(), 0)  # IRONCLAD
             (keys_features, map_rooms, map_flags,
-             history_rooms, history_dist, key_labels, key_masks) = sample[9:]
+             history_rooms, history_dist, key_labels, key_masks, outgoing) = sample[9:]
             self.assertEqual(keys_features.shape, (9,))
             self.assertEqual(map_rooms.shape, (MAP_GRID_CELLS,))
             self.assertEqual(map_flags.shape, (MAP_GRID_CELLS,))
@@ -265,7 +266,7 @@ class DatasetContextTests(unittest.TestCase):
             dataset = self._dataset(self._write_parquet(tmp, self._rows()))
             dataset.context_enabled = False
             sample = dataset[0]
-            (_, map_rooms, map_flags, history_rooms, history_dist, _, _) = sample[9:]
+            (_, map_rooms, map_flags, history_rooms, history_dist, _, _, _) = sample[9:]
             self.assertFalse(map_rooms.any())
             self.assertFalse(map_flags.any())
             self.assertFalse(history_rooms.any())
@@ -281,7 +282,7 @@ class DatasetContextTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             dataset = self._dataset(self._write_parquet(tmp, rows))
             sample = dataset[0]
-            (_, map_rooms, _, _, _, _, key_masks) = sample[9:]
+            (_, map_rooms, _, _, _, _, key_masks, _) = sample[9:]
             self.assertFalse(map_rooms.any())
             self.assertEqual(key_masks.tolist(), [0.0, 0.0, 0.0])
 
@@ -444,9 +445,9 @@ class TrainingHelperTests(unittest.TestCase):
         base, context, keys = _split_batch(v2_batch, use_map=False)
         self.assertIsNone(context)
         self.assertIsNone(keys)
-        v3_batch = tuple(torch.zeros(2) for _ in range(16))
+        v3_batch = tuple(torch.zeros(2) for _ in range(17))
         base, context, keys = _split_batch(v3_batch, use_map=True)
-        self.assertEqual(len(context), 5)
+        self.assertEqual(len(context), 6)
         self.assertEqual(len(keys), 2)
         with self.assertRaises(ValueError):
             _split_batch(v2_batch, use_map=True)
@@ -640,7 +641,7 @@ class InferenceEngineTests(unittest.TestCase):
             )
             engine = STSInferenceEngine(model_path=path)
         self.assertFalse(engine.uses_map_context)
-        self.assertEqual(engine.tokenizer.max_seq_len, 64)
+        self.assertEqual(engine.tokenizer.max_seq_len, 192)
         value = engine.evaluate_state(self.MAP_STATE)
         self.assertTrue(0.0 <= value <= 1.0)
         with self.assertRaises(ValueError):

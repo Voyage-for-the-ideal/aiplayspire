@@ -224,7 +224,7 @@ class STSInferenceEngine:
             model_path and self.uses_map_context and architecture.get("num_key_features") == 9
         )
         item_budget = (
-            Config.MAX_ITEM_TOKENS if self.uses_map_context else V2_ITEM_TOKEN_BUDGET
+            self.model.item_token_budget
         )
         self.tokenizer = InferenceTokenizer(
             vocabulary,
@@ -269,6 +269,7 @@ class STSInferenceEngine:
             torch.tensor([context["map_flags"]], dtype=torch.long),
             torch.tensor([history_ids], dtype=torch.long),
             torch.tensor([history_dist], dtype=torch.long),
+            torch.tensor([context["map_outgoing_mask"]], dtype=torch.long),
         )
 
     def _model_logits(self, state):
@@ -285,7 +286,7 @@ class STSInferenceEngine:
             seq_tokens, upgrades, counts, global_feats, character_ids, boss_ids,
             keys_features=context[0], map_rooms=context[1],
             map_flags=context[2], history_rooms=context[3],
-            history_dist=context[4], return_keys=True,
+            history_dist=context[4], map_outgoing_mask=context[5], return_keys=True,
         )
         self._last_key_logits = key_logits
         return logits

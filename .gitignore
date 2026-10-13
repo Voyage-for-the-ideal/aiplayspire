@@ -11,6 +11,9 @@ raw_heartrate/
 checkpoints/
 processed_data/
 processed_data_v2/
+processed_data_v3/
+processed_data_v4/
+experiment_results/
 
 # Python
 __pycache__/

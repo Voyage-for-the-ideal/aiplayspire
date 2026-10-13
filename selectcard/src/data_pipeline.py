@@ -475,6 +475,7 @@ def process_run(event_data, catalog, min_ascension=0):
                 "act": context["act"] if context else None,
                 "map_rooms": context["map_rooms"] if has_map else None,
                 "map_flags": context["map_flags"] if has_map else None,
+                "map_outgoing_mask": context["map_outgoing_mask"] if has_map else None,
                 "history_rooms": context["history_rooms"] if context else None,
                 "key_states": context["key_states"] if context else None,
                 "key_known_mask": context["key_known_mask"] if context else None,
@@ -855,7 +856,7 @@ def parse_args(argv=None):
     base_dir = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description="Build the standard-vanilla STS dataset")
     parser.add_argument("--input-dir", default=str(base_dir / "STS Data"))
-    parser.add_argument("--output-dir", default=str(base_dir / "processed_data_v2"))
+    parser.add_argument("--output-dir", default=str(base_dir / "processed_data_v4"))
     parser.add_argument("--workers", type=int, default=None)
     parser.add_argument("--chunk-size", type=int, default=50000)
     parser.add_argument("--max-files-per-directory", type=int, default=None)

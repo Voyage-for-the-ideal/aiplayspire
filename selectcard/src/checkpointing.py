@@ -32,7 +32,7 @@ except ImportError:
     from map_context import context_schema
 
 
-CHECKPOINT_FORMAT_VERSION = 10
+CHECKPOINT_FORMAT_VERSION = 11
 LEGACY_VALUE_TARGET_ERROR = (
     "Checkpoint uses a legacy or incompatible value target. "
     "Rebuild the processed dataset and retrain the character-conditioned bucket hazard model."
@@ -40,7 +40,11 @@ LEGACY_VALUE_TARGET_ERROR = (
 
 
 def create_checkpoint(model, model_config, vocabulary, feature_encoder, metadata=None):
-    model_config = dict(model_config)
+    supplied = dict(model_config)
+    model_config = dict(model.model_config)
+    for name, value in supplied.items():
+        if name not in model_config or model_config[name] != value:
+            raise ValueError(f"Model configuration disagrees with instantiated model: {name}")
     if model_config.get("num_characters") != NUM_CHARACTER_IDS:
         raise ValueError(
             "model_config.num_characters must equal the character vocabulary size"
@@ -117,6 +121,9 @@ def load_checkpoint(path, map_location="cpu"):
         raise ValueError(LEGACY_VALUE_TARGET_ERROR)
     if checkpoint["boss_schema_version"] != BOSS_SCHEMA_VERSION or checkpoint["boss_vocabulary"] != BOSS_VOCABULARY:
         raise ValueError("Checkpoint boss schema is incompatible; retraining required")
+    required_architecture = {"item_token_budget"}
+    if not required_architecture.issubset(checkpoint["model_config"]):
+        raise ValueError("Incomplete V4 architecture configuration")
     if checkpoint["model_config"].get("num_bosses") != NUM_BOSS_IDS:
         raise ValueError("Checkpoint boss vocabulary size is incompatible; retraining required")
     if checkpoint["character_schema_version"] != CHARACTER_SCHEMA_VERSION:
