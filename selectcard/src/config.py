@@ -35,8 +35,8 @@ class Config:
     # Let the 20-epoch cosine schedule leave its high-learning-rate phase before
     # treating validation fluctuations as evidence that training has stalled.
     EARLY_STOPPING_START_EPOCH = 10
-    # 峰值显存仅 ~0.65 GiB（RTX 5090 32GB），瓶颈在 CPU dataloader：
-    # 提交 SLURM 作业时请用 --cpus-per-task=32，worker 数会按实际 CPU 自动裁剪
+    # Worker count is capped by available CPUs; profile memory/throughput on
+    # the actual target device rather than extrapolating from older logs.
     MAX_AUTO_DATALOADER_WORKERS = 32
     DATALOADER_PREFETCH_FACTOR = 4
 
@@ -60,6 +60,15 @@ class Config:
     DROPOUT = 0.1            # Dropout 比例
     GLOBAL_CONDITIONING = "token"  # "token" or "late_concat"
     NORM_POSITION = "pre"           # "pre" or "post"
+    FFN_TYPE = "relu"
+    NORM_TYPE = "layernorm"
+    MAP_ENCODER = "none"
+    MAP_LATENTS = 0
+    COORDINATE_EMBEDDING = "linear"
+    POOLING = "cls"
+    REGISTER_TOKENS = 0
+    RUN_FRACTION = 1.0
+    EXPERIMENT_METADATA = {}
     RANDOM_SEED = 42
     HEART_WIN_BONUS_FLOORS = 3.0
     HEART_HEAD_LOSS_WEIGHT = 1.0
@@ -74,7 +83,7 @@ class Config:
     # 地图条件化上下文（[MAP]/[HISTORY]/[KEYS] + key 辅助头）
     # ==========================
     # Master switch for the map-conditioned extension. Checkpoints store their
-    # own flag; format-8 and earlier checkpoints require retraining.
+    # own architecture; format-10 and earlier checkpoints require retraining.
     USE_MAP_CONTEXT = True
     # First N epochs mask map/history tokens entirely for both train and
     # validation (curriculum warm-up so the v3 run starts from its v2 point).

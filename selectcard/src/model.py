@@ -74,12 +74,27 @@ class STSValueNetwork(nn.Module):
         norm_position="pre",
         use_map_context=False,
         num_key_features=9,
+        ffn_type="relu",
+        norm_type="layernorm",
+        map_encoder="none",
+        map_latents=0,
+        coordinate_embedding="linear",
+        pooling="cls",
+        register_tokens=0,
         item_token_budget=None,
     ):
         super().__init__()
         self.model_config = {k: v for k, v in locals().items() if k not in {"self", "__class__"}}
         self.item_token_budget = item_token_budget if item_token_budget is not None else (73 if use_map_context else 192)
         self.model_config["item_token_budget"] = self.item_token_budget
+        if (ffn_type, norm_type, map_encoder, map_latents, coordinate_embedding, pooling, register_tokens) != (
+            "relu", "layernorm", "none", 0, "linear", "cls", 0
+        ):
+            raise ValueError("Optional architecture components are not implemented yet")
+        if isinstance(self.item_token_budget, bool) or not isinstance(self.item_token_budget, int) or self.item_token_budget <= 0:
+            raise ValueError("item_token_budget must be a positive integer")
+        if use_map_context and self.item_token_budget != 73:
+            raise ValueError("V4 map models retain the 73-item contract")
         if global_conditioning not in {"token", "late_concat"}:
             raise ValueError("global_conditioning must be 'token' or 'late_concat'")
         self.global_conditioning = global_conditioning

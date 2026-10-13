@@ -121,7 +121,10 @@ def load_checkpoint(path, map_location="cpu"):
         raise ValueError(LEGACY_VALUE_TARGET_ERROR)
     if checkpoint["boss_schema_version"] != BOSS_SCHEMA_VERSION or checkpoint["boss_vocabulary"] != BOSS_VOCABULARY:
         raise ValueError("Checkpoint boss schema is incompatible; retraining required")
-    required_architecture = {"item_token_budget"}
+    required_architecture = {
+        "ffn_type", "norm_type", "map_encoder", "map_latents", "coordinate_embedding",
+        "pooling", "register_tokens", "item_token_budget",
+    }
     if not required_architecture.issubset(checkpoint["model_config"]):
         raise ValueError("Incomplete V4 architecture configuration")
     if checkpoint["model_config"].get("num_bosses") != NUM_BOSS_IDS:

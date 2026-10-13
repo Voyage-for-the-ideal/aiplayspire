@@ -444,6 +444,7 @@ class STSDataset(Dataset):
         max_count=10,
         progress=None,
         use_map_context=False,
+        run_fraction=1.0,
     ):
         self.vocabulary = vocabulary
         self.feature_encoder = feature_encoder
@@ -455,6 +456,14 @@ class STSDataset(Dataset):
         # Curriculum switch: while False, map/history tokens are masked out so a
         # v3 run warms up on the pure v2 objective (MODEL_V3_DESIGN.md 5).
         self.context_enabled = True
+        try:
+            from .experiments import selected_run
+        except ImportError:
+            from experiments import selected_run
+        if not 0 < run_fraction <= 1:
+            raise ValueError("run_fraction must be in (0, 1]")
+        self.run_fraction = run_fraction
+        self.row_offsets = []
         self.files = sorted(
             glob.glob(os.path.join(parquet_dir, f"{split}_valid_chunk_*.parquet"))
         )
@@ -485,7 +494,9 @@ class STSDataset(Dataset):
                 raise ValueError(f"Dataset shard is not post-action: {path}")
             if not metadata[list(MASK_COLUMNS)].astype(bool).any(axis=1).all():
                 raise ValueError(f"Dataset shard contains censored samples: {path}")
-            total += len(metadata)
+            offsets = [i for i, rid in enumerate(metadata["run_id"]) if selected_run(rid, run_fraction)] if run_fraction < 1 else None
+            self.row_offsets.append(offsets)
+            total += len(offsets) if offsets is not None else len(metadata)
             self.cumulative_lengths.append(total)
             if progress and (
                 file_index == 1
@@ -500,6 +511,15 @@ class STSDataset(Dataset):
 
     def __len__(self):
         return self.total_samples
+
+    def identity(self, idx):
+        file_idx = bisect.bisect_right(self.cumulative_lengths, idx)
+        start = 0 if file_idx == 0 else self.cumulative_lengths[file_idx - 1]
+        local = idx - start
+        if self.row_offsets[file_idx] is not None:
+            local = self.row_offsets[file_idx][local]
+        row = self._get_df(file_idx).iloc[local]
+        return str(row["run_id"]), f"{self.files[file_idx].rsplit(os.sep, 1)[-1]}:{local}", str(row["character"])
 
     # Each DataLoader worker owns this cache, so keep it small under multiprocessing.
     @lru_cache(maxsize=2)
@@ -530,9 +550,10 @@ class STSDataset(Dataset):
         map_rooms = self._column_list(row, "map_rooms")
         map_flags = self._column_list(row, "map_flags")
         outgoing = self._column_list(row, "map_outgoing_mask")
-        if map_rooms is not None and outgoing is None:
-            raise ValueError("Present V4 map is missing map_outgoing_mask; rebuild data")
-        if outgoing is None:
+        if map_rooms is not None:
+            if outgoing is None:
+                raise ValueError("Present V4 map is missing map_outgoing_mask; rebuild data")
+        else:
             outgoing = [0] * map_context.MAP_GRID_CELLS
         map_present = map_rooms is not None
         if not self.context_enabled or not map_present:
@@ -580,7 +601,10 @@ class STSDataset(Dataset):
             raise IndexError(idx)
         file_idx = bisect.bisect_right(self.cumulative_lengths, idx)
         offset = 0 if file_idx == 0 else self.cumulative_lengths[file_idx - 1]
-        row = self._get_df(file_idx).iloc[idx - offset]
+        local = idx - offset
+        if self.row_offsets[file_idx] is not None:
+            local = self.row_offsets[file_idx][local]
+        row = self._get_df(file_idx).iloc[local]
 
         tokens, upgrades, counts = encode_items(
             row.get("deck", []),

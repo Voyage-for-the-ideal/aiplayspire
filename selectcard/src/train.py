@@ -1,4 +1,6 @@
 import math
+import json
+from pathlib import Path
 import os
 import random
 import time
@@ -488,6 +490,14 @@ def model_config(vocab_size):
         "norm_position": Config.NORM_POSITION,
         "use_map_context": Config.USE_MAP_CONTEXT,
         "num_key_features": 9,
+        "ffn_type": Config.FFN_TYPE,
+        "norm_type": Config.NORM_TYPE,
+        "map_encoder": Config.MAP_ENCODER,
+        "map_latents": Config.MAP_LATENTS,
+        "coordinate_embedding": Config.COORDINATE_EMBEDDING,
+        "pooling": Config.POOLING,
+        "register_tokens": Config.REGISTER_TOKENS,
+        "item_token_budget": Config.MAX_ITEM_TOKENS if Config.USE_MAP_CONTEXT else Config.MAX_SEQ_LEN,
     }
 
 
@@ -502,11 +512,12 @@ def make_dataset(split, vocabulary, feature_encoder, progress=None):
         max_count=Config.MAX_COUNT,
         progress=progress,
         use_map_context=Config.USE_MAP_CONTEXT,
+        run_fraction=Config.RUN_FRACTION,
     )
 
 
 def _split_batch(batch, use_map):
-    """Unpack a (v2 or v3) dataset batch into common and context parts."""
+    """Unpack a non-map or V4 map-context dataset batch into common and context parts."""
     if use_map:
         if len(batch) != 17:
             raise ValueError("map-context dataset batches must carry 17 tensors")
@@ -762,7 +773,8 @@ def configure_context_curriculum(datasets, epoch, use_map_context, curriculum_ep
     if use_map_context:
         datasets["train"].context_enabled = not warmup
         datasets["val"].context_enabled = not warmup
-        datasets["test"].context_enabled = True
+        if "test" in datasets:
+            datasets["test"].context_enabled = True
     return warmup
 
 
@@ -827,6 +839,8 @@ def evaluate(
     baseline_statistics=None,
     band_weights=None,
     use_map=False,
+    recorder=None,
+    egg_token_ids=(),
 ):
     model.eval()
     targets = []
@@ -838,6 +852,7 @@ def evaluate(
     snapshot_floors = []
     ascension_bands = []
     ascension_levels = []
+    character_values = []
     key_probabilities = []
     key_targets = []
     key_target_masks = []
@@ -876,6 +891,28 @@ def evaluate(
                 key_targets.append(key_labels.cpu().numpy())
                 key_target_masks.append(key_masks.cpu().numpy())
             hazards, survival, heart_probability = hazard_predictions(logits, floors)
+            character_values.append(character_ids.cpu().numpy())
+            if recorder is not None:
+                try:
+                    from .evaluation_v4 import mechanism_counts
+                    from .experiments import selected_run
+                except ImportError:
+                    from evaluation_v4 import mechanism_counts
+                    from experiments import selected_run
+                probe_eligible = torch.tensor(
+                    [selected_run(rid, 0.01) for rid, _, _ in recorder.identities(len(seq))],
+                    device=device, dtype=torch.bool,
+                )
+                device_ctx = tuple(value.to(device) for value in context) if use_map else None
+                pc, pv = mechanism_counts(
+                    model, logits, seq, upgrades, counts, globals_, character_ids, boss_ids,
+                    floors, device_ctx, key_labels if use_map else None,
+                    key_masks if use_map else None, egg_token_ids, probe_eligible,
+                )
+                probs = torch.cat([hazards, heart_probability[:, None]], dim=1).cpu().numpy()
+                batch_bands = ascension_band_tensor(globals_).cpu().numpy()
+                weights = np.ones(len(seq)) if band_weights is None else np.asarray(band_weights)[batch_bands]
+                recorder.add(probs, batch_targets.cpu().numpy(), batch_masks.cpu().numpy(), weights, pc, pv)
             future = torch.as_tensor(
                 HAZARD_ENDPOINTS, dtype=floors.dtype, device=device
             ).unsqueeze(0) > floors.unsqueeze(1)
@@ -1063,8 +1100,16 @@ def evaluate(
         )
         heart_values["samples"] = int(heart_group_include.sum())
         group_metrics["heart_win"] = heart_values
+        group_metrics["terminal_floor_mae"] = float(np.abs(
+            predicted_floors_array[heart_group_include] - realized_floors_array[heart_group_include]
+        ).mean()) if heart_group_include.any() else float("nan")
         return group_metrics
 
+    characters_array = np.concatenate(character_values)
+    metrics["by_character"] = {
+        str(int(character)): grouped_classification_metrics(characters_array == character)
+        for character in np.unique(characters_array)
+    }
     metrics["by_ascension_band"] = {}
     for band, name in enumerate(ASCENSION_BAND_NAMES):
         include = bands_array == band
@@ -1096,93 +1141,31 @@ def finish_training(
     baseline_statistics,
     history,
 ):
-    """Save the training report, then evaluate the best checkpoint on test.
-
-    Shared by the full training run and ``--test-only`` so a crashed report
-    step never blocks the final test evaluation.
-    """
+    """Publish the selected training checkpoint without touching held-out test."""
     report_path = os.path.join(Config.CHECKPOINT_DIR, Config.TRAINING_REPORT_NAME)
     save_training_report(history, report_path)
-    log(f"Saved training report to {report_path}")
-    log(f"Loading best checkpoint from {best_path}")
     best_checkpoint, _, _ = load_checkpoint(best_path, map_location=device)
     model.load_state_dict(best_checkpoint["model_state_dict"])
-    log("Test evaluation started")
-    test_metrics = evaluate(
-        model,
-        loaders["test"],
-        device,
-        progress=log,
-        name="Test",
-        baseline_rates=baseline_rates,
-        baseline_statistics=baseline_statistics,
-        band_weights=raw_band_weights,
-        use_map=Config.USE_MAP_CONTEXT,
-    )
-    final_metadata = dict(best_checkpoint.get("metadata", {}))
-    objective = dict(
-        final_metadata.get(
-            "training_objective",
-            training_objective_metadata(baseline_rates, baseline_statistics),
-        )
-    )
-    selection = dict(objective.get("selection", {}))
-    selection.update(
-        {
-            "test_score": test_metrics["relative_value_nll"],
-            "test_skill": test_metrics.get("skill"),
-            "test_terminal_floor_mae": test_metrics["terminal_floor_mae"],
-            "test_contextual_baseline_terminal_floor_mae": test_metrics[
-                "contextual_baseline"
-            ]["terminal_floor_mae"],
-        }
-    )
-    objective["selection"] = selection
-    final_metadata.update(
-        {
-            "seed": Config.RANDOM_SEED,
-            "test_metrics": test_metrics,
-            "training_objective": objective,
-            "dataset": {
-                "filter_version": FILTER_VERSION,
-                "selection": manifest.get("selection", {}),
-                "runs_by_ascension": manifest.get("distributions", {}).get(
-                    "runs_by_ascension", {}
-                ),
-                "samples_by_ascension": manifest.get("distributions", {}).get(
-                    "samples_by_ascension", {}
-                ),
-                "content_catalog": manifest["content_catalog"],
-                "train_valid_samples_by_ascension_band": manifest[
-                    "distributions"
-                ]["train_valid_samples_by_ascension_band"],
-                "difficulty_weights": raw_band_weights,
-            },
-            "training_config": {
-                "data_dir": os.path.basename(os.path.normpath(Config.DATA_DIR)),
-                "epochs": Config.EPOCHS,
-                "batch_size": Config.BATCH_SIZE,
-                "learning_rate": Config.LEARNING_RATE,
-                "d_model": Config.D_MODEL,
-                "n_heads": Config.N_HEADS,
-                "n_layers": Config.N_LAYERS,
-                "use_map_context": Config.USE_MAP_CONTEXT,
-            },
-        }
-    )
-    save_checkpoint(
-        final_path,
-        model,
-        architecture,
-        vocabulary,
-        feature_encoder,
-        final_metadata,
-    )
-    log(f"Test metrics: {test_metrics}")
-    log(f"Saved bucket-hazard checkpoints to {Config.CHECKPOINT_DIR}")
+    metadata = dict(best_checkpoint.get("metadata", {}))
+    metadata["history"] = history
+    metadata["held_out_test_evaluated"] = False
+    save_checkpoint(final_path, model, architecture, vocabulary, feature_encoder, metadata)
+    try:
+        from .experiments import write_json
+    except ImportError:
+        from experiments import write_json
+    write_json(Path(Config.CHECKPOINT_DIR) / "training_metrics.json", {
+        "history": history, "parameters": sum(p.numel() for p in model.parameters()),
+        "architecture": model.model_config, "device": str(device),
+        "torch_version": str(torch.__version__), "experiment": Config.EXPERIMENT_METADATA,
+        "validation_metrics": metadata.get("validation_metrics"),
+    })
+    log(f"Saved selected checkpoint to {final_path}; held-out test not evaluated")
 
 
 def train_model(test_only=False):
+    if test_only:
+        raise ValueError("Use --evaluate --checkpoint PATH for read-only evaluation")
     started = time.monotonic()
 
     def log(message):
@@ -1195,7 +1178,12 @@ def train_model(test_only=False):
 
     log("Starting training")
     set_seed(Config.RANDOM_SEED)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    selected_device = getattr(Config, "DEVICE", "auto")
+    if selected_device == "auto":
+        selected_device = "cuda" if torch.cuda.is_available() else "cpu"
+    if selected_device == "cuda" and not torch.cuda.is_available():
+        raise ValueError("CUDA requested but not available")
+    device = torch.device(selected_device)
     if device.type == "cuda":
         log(
             f"Device: {torch.cuda.get_device_name(0)}; "
@@ -1227,7 +1215,7 @@ def train_model(test_only=False):
     log(f"Training artifacts ready; vocabulary_size={len(vocabulary):,}")
     datasets = {
         split: make_dataset(split, vocabulary, feature_encoder, progress=log)
-        for split in ("train", "val", "test")
+        for split in ("train", "val")
     }
     for split, dataset in datasets.items():
         if not dataset:
@@ -1254,7 +1242,6 @@ def train_model(test_only=False):
             **loader_options,
         ),
         "val": DataLoader(datasets["val"], **loader_options),
-        "test": DataLoader(datasets["test"], **loader_options),
     }
     log(
         "Data loaders ready: "
@@ -1310,26 +1297,6 @@ def train_model(test_only=False):
     best_checkpoint_saved = False
     patience_counter = 0
     history = []
-
-    if test_only:
-        log("Test-only mode: skipping the training loop")
-        finish_training(
-            model,
-            loaders,
-            device,
-            log,
-            best_path,
-            final_path,
-            manifest,
-            raw_band_weights,
-            architecture,
-            vocabulary,
-            feature_encoder,
-            baseline_rates,
-            baseline_statistics,
-            history=[],
-        )
-        return
 
     for epoch in range(Config.EPOCHS):
         learning_rate = optimizer.param_groups[0]["lr"]
@@ -1461,6 +1428,8 @@ def train_model(test_only=False):
                 )
                 last_progress = now
         scheduler.step()
+        training_seconds = max(time.monotonic() - epoch_started, 1e-9)
+        training_peak = torch.cuda.max_memory_allocated() if device.type == "cuda" else None
 
         log(f"Epoch {epoch + 1}/{Config.EPOCHS}: validation started")
         val_metrics = evaluate(
@@ -1506,6 +1475,8 @@ def train_model(test_only=False):
         )
         metadata = {
             "epoch": epoch + 1,
+            "experiment": Config.EXPERIMENT_METADATA,
+            "baseline_statistics": baseline_statistics,
             "seed": Config.RANDOM_SEED,
             "split_seed": Config.SPLIT_SEED,
             "validation_metrics": val_metrics,
@@ -1523,6 +1494,7 @@ def train_model(test_only=False):
                 },
             ),
             "dataset": {
+                "selected_samples": {name: len(ds) for name, ds in datasets.items()},
                 "filter_version": FILTER_VERSION,
                 "selection": manifest.get("selection", {}),
                 "runs_by_ascension": manifest.get("distributions", {}).get(
@@ -1546,6 +1518,8 @@ def train_model(test_only=False):
                 "n_heads": Config.N_HEADS,
                 "n_layers": Config.N_LAYERS,
                 "use_map_context": Config.USE_MAP_CONTEXT,
+                "run_fraction": Config.RUN_FRACTION,
+                "architecture": architecture,
             },
         }
         is_best = checkpoint_eligible and selection_score < best_val_score
@@ -1572,6 +1546,8 @@ def train_model(test_only=False):
                 "contextual_baseline_terminal_floor_mae": contextual_mae,
                 "checkpoint_eligible": checkpoint_eligible,
                 "learning_rate": learning_rate,
+                "train_samples_per_second": running_samples / training_seconds,
+                "peak_gpu_memory_bytes": training_peak,
             }
         )
         if is_best:
@@ -1592,7 +1568,8 @@ def train_model(test_only=False):
                 "Checkpoint not selected: eligible but validation relative NLL "
                 f"did not improve best={best_val_score:.4f}"
             )
-        elif epoch + 1 > Config.EARLY_STOPPING_START_EPOCH:
+        if (checkpoint_eligible and not is_best and Config.EARLY_STOPPING_PATIENCE > 0
+                and epoch + 1 > Config.EARLY_STOPPING_START_EPOCH):
             patience_counter += 1
             if patience_counter >= Config.EARLY_STOPPING_PATIENCE:
                 log(
@@ -1641,35 +1618,58 @@ def train_model(test_only=False):
     )
 
 
-if __name__ == "__main__":
+def main(argv=None):
     import argparse
-
-    parser = argparse.ArgumentParser(description="Train the STS value network.")
-    parser.add_argument(
-        "--test-only",
-        action="store_true",
-        help=(
-            "Skip training; load the best checkpoint and run the final test "
-            "evaluation, then save the final checkpoint with test metrics."
-        ),
-    )
-    parser.add_argument(
-        "--data-dir",
-        default=Config.DATA_DIR,
-        help="Processed dataset directory (default: configured DATA_DIR).",
-    )
-    parser.add_argument(
-        "--checkpoint-name",
-        default=Config.CHECKPOINT_NAME,
-        help="Final checkpoint filename; best checkpoint uses a best_ prefix.",
-    )
-    parser.add_argument(
-        "--report-name",
-        default=Config.TRAINING_REPORT_NAME,
-        help="Training report filename.",
-    )
-    args = parser.parse_args()
+    try:
+        from .experiments import EXPERIMENTS, configure_experiment, write_json
+        from .evaluation_v4 import evaluate_checkpoint
+    except ImportError:
+        from experiments import EXPERIMENTS, configure_experiment, write_json
+        from evaluation_v4 import evaluate_checkpoint
+    parser = argparse.ArgumentParser(description="V4 training and read-only checkpoint evaluation")
+    parser.add_argument("--list-experiments", action="store_true")
+    parser.add_argument("--experiment", default="baseline", help="Registry name(s), comma-separated")
+    parser.add_argument("--stage", choices=("pilot", "confirm"), default="pilot")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--epochs", type=int)
+    parser.add_argument("--data-dir", default=Config.DATA_DIR)
+    parser.add_argument("--output-dir")
+    parser.add_argument("--evaluate", "--test-only", dest="evaluate", action="store_true")
+    parser.add_argument("--checkpoint", help="Explicit format-11 checkpoint for read-only evaluation")
+    parser.add_argument("--evaluation-split", choices=("val", "test"), default="val")
+    parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    args = parser.parse_args(argv)
+    if args.list_experiments:
+        print(json.dumps(EXPERIMENTS, indent=2))
+        return
+    if args.evaluate:
+        if not args.checkpoint or not args.output_dir:
+            parser.error("--evaluate requires --checkpoint and a separate --output-dir")
+        return evaluate_checkpoint(args.checkpoint, args.data_dir, args.output_dir,
+                                   args.evaluation_split, args.device)
+    if args.checkpoint:
+        parser.error("--checkpoint is only valid with --evaluate")
+    if args.stage == "confirm" and args.seed not in (42, 43, 44):
+        parser.error("Confirmation seeds are 42, 43, 44")
+    if args.epochs is not None and args.epochs <= 0:
+        parser.error("--epochs must be positive")
+    experiment = configure_experiment(args.experiment, args.stage, args.seed, args.epochs)
+    output = Path(args.output_dir) if args.output_dir else Path(Config.BASE_DIR) / "checkpoints" / "v4" / args.experiment.replace(",", "_") / args.stage / str(args.seed)
+    output.mkdir(parents=True, exist_ok=False)
+    Config.CHECKPOINT_DIR = str(output)
     Config.DATA_DIR = args.data_dir
-    Config.CHECKPOINT_NAME = args.checkpoint_name
-    Config.TRAINING_REPORT_NAME = args.report_name
-    train_model(test_only=args.test_only)
+    Config.DEVICE = args.device
+    write_json(output / "experiment.json", experiment)
+    try:
+        train_model()
+    except torch.cuda.OutOfMemoryError as exc:
+        write_json(output / "status.json", {"status": "cuda_oom", "error": str(exc), "batch_size": 512})
+        raise
+    except Exception as exc:
+        write_json(output / "status.json", {"status": "failed", "error": str(exc)})
+        raise
+    write_json(output / "status.json", {"status": "complete", "held_out_test_evaluated": False})
+
+
+if __name__ == "__main__":
+    main()

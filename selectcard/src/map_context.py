@@ -19,7 +19,7 @@ Packed layout (one act, fixed size, no ragged lists):
     bit 2   current_candidate  possible current position (all zero = unknown)
     bit 3   reachable  reachable from the current position in a future row
     bits 4-5 out_deg   outgoing edge count (0-3)
-    bits 6-7 in_deg    incoming parent count (0-3)
+    bits 6-7 in_deg    unique incoming edge count (0-3)
 - ``history_rooms``: :data:`HISTORY_HORIZON` room ids of the current act's
   realized path before the current floor, most-recent-first (index 0 = the
   room just left), right-padded with 0; no future information.  Earlier
@@ -60,7 +60,7 @@ MAP_FLAG_FEATURES = 7
 
 
 def context_schema():
-    """Stamped into v3 checkpoints and validated on load."""
+    """Stamped into V4 checkpoints and validated on load."""
     return {
         "map_context_version": MAP_CONTEXT_VERSION,
         "history_horizon": HISTORY_HORIZON,
@@ -466,7 +466,6 @@ def inference_context(state: dict):
       ``keys``:               ``{ruby, emerald, sapphire}`` booleans
     """
     act = state.get("act")
-    floor_in_act = state.get("floor_in_act")
     map_nodes = state.get("map_nodes") or []
     walked = [
         s for s in (state.get("history") or []) if s in ROOM_SYMBOL_TO_ID
@@ -547,7 +546,7 @@ def keys_token_features(key_states, map_flags, act: int, key_known_mask=None):
     """Feature vector for the ``[KEYS]`` context token.
 
     ``[ruby, emerald, sapphire, ruby_known, emerald_known, sapphire_known,
-    burning_pending, known_collected/3, act/3]``
+    burning_pending, known_collected/3, act/4]``
     """
     ruby, emerald, sapphire = (list(key_states) + [0, 0, 0])[:3]
     known = (list(key_known_mask) + [0, 0, 0])[:3] if key_known_mask is not None else [1, 1, 1]
