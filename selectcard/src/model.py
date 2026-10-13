@@ -32,12 +32,12 @@ class SetAttention(nn.Module):
         if self.norm_position == "pre":
             norm_x = self.norm1(x)
             attn_out, _ = self.mha(
-                norm_x, norm_x, norm_x, key_padding_mask=key_padding_mask
+                norm_x, norm_x, norm_x, key_padding_mask=key_padding_mask, need_weights=False
             )
             x = x + attn_out
             return x + self.ffn(self.norm2(x))
 
-        attn_out, _ = self.mha(x, x, x, key_padding_mask=key_padding_mask)
+        attn_out, _ = self.mha(x, x, x, key_padding_mask=key_padding_mask, need_weights=False)
         x = self.norm1(x + attn_out)
         return self.norm2(x + self.ffn(x))
 
