@@ -12,16 +12,17 @@
 
 ## Project Architecture
 
-AIPlaySpire：让 AI 自动通关《杀戮尖塔》的研究项目。游戏侧 4 个 Java mod 经 ModTheSpire 加载；Python 侧 agent 对每个非战斗决策执行「枚举候选 → 模拟下一状态 → 价值网络 V(S) 打分取 argmax」；战斗由独立无头游戏实例上的树搜索负责；LLM 只作为非结构化界面的兜底。
+AIPlaySpire：让 AI 自动通关《杀戮尖塔》的研究项目。游戏侧 4 个 Java mod 经 ModTheSpire 加载；Python 侧 agent 对每个非战斗决策执行「枚举候选 → 模拟下一状态 → 价值网络 V(S) 打分取 argmax」；战斗后端正在迁移为 sts_lightspeed 原生回合搜索，旧 Java 双实例链保留作对照；LLM 只作为非结构化界面的兜底。
 
 | 目录 | 职责 |
 |---|---|
-| `sts_ai_framework/` | Python agent 主循环：轮询 CommunicationMod (`:5000`) 状态 → 屏幕分类 → 决策分发 → 提交动作并校验生效。`routing/` 负责 6 层有限视野确定性地图规划（`MAP` 决策 0 LLM）；`llm_agent_parts/` 负责动作分发、价值网络候选打分及非地图非结构化界面的 LLM 兜底；回归测试在 `sts_ai_framework/tests/` |
-| `selectcard/` | 价值网络 V(S)：Set Transformer + bucket-hazard / Heart 输出头；含重放式数据流水线、训练、进程内推理与可选 FastAPI 服务（细节见下文 "Set Transformer v2"） |
+| `sts_ai_framework/` | Python agent 主循环：轮询 CommunicationMod (`:5000`) 状态 → 屏幕分类 → 决策分发 → 提交动作并校验生效。`routing/` 负责 6 层有限视野确定性地图规划（`MAP` 决策 0 LLM）；`llm_agent_parts/` 负责动作分发、价值网络候选打分及非地图非结构化界面的 LLM 兜底；`--policy-checkpoint` / `--policy-mode` / `--policy-types` / `--policy-trace-dir` 接入离线非战斗策略（见 `docs/NONCOMBAT_POLICY.md`）；回归测试在 `sts_ai_framework/tests/` |
+| `selectcard/` | 价值网络 V(S)：Set Transformer + bucket-hazard / Heart 输出头；含重放式数据流水线、训练、进程内推理与可选 FastAPI 服务；`policy/` 为独立的离线非战斗策略（`noncombat-policy-v1`，BC/AWR），与价值网络数据/checkpoint 分离（价值网络细节见下文 "Set Transformer v4 多尺度价值网络"） |
 | `StSCommunicationMod/` | Communication Mod：游戏内 HTTP 桥（`:5000`，`/state` `/action` `/card_info`），结构化事件语义与 Cursed Tome 多步本地流程 |
 | `STSStateSaver/` | Save State Mod：战斗状态完整序列化/恢复（含 RNG）—— 树搜索的回滚原语 |
 | `LudicrousSpeed/` | 无动画、阻塞式执行真实游戏引擎 + JSON 命令接口（含重放状态 diff 校验） |
-| `scumthespire/` | Battle Ai Mod：独立无头游戏实例（`:5125`）上的战斗树搜索与战术评估器 |
+| `scumthespire/` | Battle Ai Mod：真实游戏的状态／动作桥及 UI，保留旧 Java 搜索与战术评估器作对照 |
+| `battle_engine/` | 本地 C++ 回合搜索＋常驻 worker＋Python 标准库网关：三档预算、逐动作校验和路径复用，默认关闭 Java 回退；四角色完整模拟仍在补齐，进度见 `docs/LIGHTSPEED_MIGRATION.md` |
 | `cardcrawl/` | 反编译的原版游戏源码，只读内容目录（数据校验与内容对照用） |
 
 - 战斗流水线（双实例协作、存档目录、mod 构建顺序）见 [AUTOFIGHT.md](AUTOFIGHT.md)；`./build_all.sh` 构建全部 mod 并输出到 `_ModTheSpire/mods/`。
@@ -44,25 +45,25 @@ AIPlaySpire：让 AI 自动通关《杀戮尖塔》的研究项目。游戏侧 4
 
 更新后验证：`mvn package` 并确认 `target/classes/ModTheSpire.json` 中的 `version` 和 `description` 已正确生成，再部署到 `_ModTheSpire/mods/`。
 
-## Set Transformer v4 地图条件化与实验
+## Set Transformer v4 多尺度价值网络
 
-- New processed datasets live in `selectcard/processed_data_v4/`; generated data must not be committed. Keep older dataset directories unchanged.
-- Rebuild it from `selectcard/` with `python src/data_pipeline.py`.
-- Run model tests from `selectcard/src/` with `python -m unittest test_value_network_v2.py`（以及地图和 V4 回归：`test_map_context.py`、`test_value_network_v3.py`、`test_value_network_v4.py`；依赖在 conda `spire` 环境）.
-- Train from `selectcard/` with `python src/train.py --experiment baseline --stage pilot` (1% run-level subset, 8 epochs); confirmation uses `--stage confirm --seed 42/43/44` (20 epochs). Full data rebuilding and GPU training are separate tasks. Evaluate read-only with `--evaluate --checkpoint <path> --output-dir <new-directory>`; `--test-only` is an alias, not a positional checkpoint argument. Test evaluation requires explicit `--evaluation-split test`.
-- The default architecture is one early Global token, Pre-LN attention blocks, and final CLS pooling. Ablations are controlled by `GLOBAL_CONDITIONING` and `NORM_POSITION` in `selectcard/src/config.py`.
-- **V4 延续 v3 地图条件化**（`Config.USE_MAP_CONTEXT`，设计见仓库根 `MODEL_V4_DESIGN.md`，历史设计见 `MODEL_V3_DESIGN.md`）：序列为
-  `[CLS] + [GLOBAL] + [CHARACTER] + [BOSS] + [KEYS] + [MAP×105] + [HISTORY×8] + item tokens`（token 类型 embedding），并新增 3 路 key-progress 辅助头（权重 `KEY_HEAD_LOSS_WEIGHT`）。
-  - `[CHARACTER]` 使用稳定的 `IRONCLAD=0`、`THE_SILENT=1`、`DEFECT=2`、`WATCHER=3` 编码；训练和推理拒绝缺失或未知角色。
-  - 地图上下文由 `selectcard/src/map_context.py` 打包（房间/真实唯一边/带火/current_candidate/reachable + 当前幕走过的路径 history 视野 8）；不再包含 `on_plan`、`plan_rooms` 或 router 计划。
-    归档 run 经 `sts_mapgen.py` 由 `seed_played` 逐位重建整幕真图（历史回验 99.97%），训练/推理共用同一打包格式。
-  - `data_pipeline.py` 为每个样本附加上下文列（`map_rooms/map_flags/history_rooms/key_states/key_known_mask/act`）；历史 `.run` 无法确认的蓝钥匙保持 unknown，训练不使用 plan dropout 或 plan curriculum。
-  - V4 checkpoint 延续 post-action 状态：每条训练样本的特征表示历史选择执行后的 `S′`。本轮提升 preprocessing、map-context 和 checkpoint schema 版本，旧 v3 checkpoint 需重新训练，不兼容加载。
-  - `use_map_context=False` 时仍使用 `[CLS] + [GLOBAL] + [CHARACTER] + [BOSS] + item tokens`；这是新角色 token 契约，不等同于旧 v2 checkpoint 兼容模式。
-  - 框架侧 `sts_ai_framework/llm_agent_parts/map_payload.py` 只注入 GameState 的地图/钥匙/当前幕 path_history，不向价值网络 payload 传递 router 计划。
-- 输出头是 20 个楼层桶的 stopping-hazard + 1 个 Heart-win logit；端点与标签契约定义在 `selectcard/src/data_contract.py`（`VALUE_TARGET_SCHEMA = "bucket-hazard-v1"`）。标量价值 V(S) = E[终止楼层] + `HEART_WIN_BONUS_FLOORS` × P(Heart)。
-- Format-11 checkpoints freeze complete architecture configuration, the 73-item map budget, vocabulary, normalization, training priors, character/key observability and context schemas. Format 10 and earlier checkpoints require retraining. V4 preprocessing is `set-transformer-v10-current-edges`; map context is `map-context-v5-current-edges`.
-- V4 coordinates are float `[x/6,y/14]`. Map bit 2 marks current position candidates only; history is carried by HISTORY tokens. Shared packing derives degrees from final unique edges and adds `map_outgoing_mask[105]` (left/straight/right); row 14 connects to a virtual Boss. Preserve map-generator RNG/bookkeeping behavior.
-- V4 experiments and run-cluster bootstrap tools are documented in `MODEL_V4_DESIGN.md`. Optional components default off; MHA uses `need_weights=False`. Preserve item aggregation/order and the 73-item cap. No automatic test-set evaluation or candidate deployment.
-- Optional HTTP inference server: `uvicorn src.api:app` from `selectcard/` (`POST /recommend/choice`, `/recommend/shop`).
-- Do not commit `selectcard/checkpoints/`, `selectcard/processed_data/`, `selectcard/processed_data_v2/`, `selectcard/processed_data_v3/`, `selectcard/processed_data_v4/`, or `selectcard/experiment_results/` artifacts.
+- 新数据放在 `selectcard/processed_data_v4/a10plus_multiscale_v1/`；旧数据、checkpoint 原样保留，生成物不提交。
+- Python 依赖使用 conda `spire`，不添加依赖。完整数据重建和 GPU 训练是独立任务，不自动执行。
+- 从 `selectcard/` 执行 `python src/rebuild_multiscale.py --input-dir "STS Data"`：A10+ 原始结果重建后在新目录注入 visible Boss。审计用 `python src/inspect_multiscale.py --data-dir <目录> --split train --output <新报告路径>`。
+- Agent 仍对候选 post-action 状态评分。`V(S)=(E[终止楼层]+3*P(Heart))/60`，终止楼层来自原始结果，Heart 胜利规范到 57。中途退出保留删失，不伪造失败标签。
+- 默认多尺度目标 `multiscale-hazard-v1`：当前进度段保留细桶，未来按 34/51/57 合并粗桶。模型输出 20 个细 hazard、3 个粗 hazard、23 个条件停止位置和 1 个条件 Heart；训练、探针和推理共用分布合成。
+- 四段边界为 17/34/51/57。全局特征为四段 one-hot、段内进度、floor/57、HP 比例/绝对值、max HP、金币、进阶，共 11 维；训练与推理共享顺序，禁止硬编码字段索引。
+- 序列保持 `[CLS]+[GLOBAL]+[CHARACTER]+[BOSS]+[KEYS]+[MAP×105]+[HISTORY×8]+item tokens`。角色编码稳定为 IRONCLAD=0、THE_SILENT=1、DEFECT=2、WATCHER=3，缺失和未知角色拒绝。
+- 地图采用浮点 `[x/6,y/14]`、真实唯一边、current_candidate、reachable、三个方向出边；history 仅当前幕已离开的 8 个房间。不得加入 router 计划，不改变地图生成 RNG/bookkeeping。
+- 钥匙使用 value＋known mask；已确认绿钥匙跨幕持有，后续地图缺失也不能丢失。无法确认的状态保持 unknown，蓝钥匙在历史记录进入 Act IV 前保持 unknown。
+- 格式为 checkpoint **12**、preprocessing `set-transformer-v11-multiscale`、global features `global-features-v7-floor`、map context `map-context-v6-persistent-keys`、training artifact cache **4**。旧数据和格式 11 及更早 checkpoint 需要重建／重训，不进行隐式转换。
+- Checkpoint 冻结架构、resolution、全部损失权重、词表、归一化、训练先验和 **73-item cap**。缓存先验的正例/有效数与 manifest 训练计数逐项校验；不得用验证或测试集拟合统计。
+- 默认结构为 192 维、5 层、4 heads、ReLU、Pre-LN、early Global、CLS；额外结构实验默认关闭，MHA 使用 `need_weights=False`，item 聚合和顺序保持。
+- 初筛为固定 run hash 的 1% train/val、8 轮；确认默认完整 train/val、**10 轮**，batch 512、AdamW lr 2.8e-4、前三轮屏蔽地图/history，余弦覆盖实际预算。seed 默认 42，可独立使用 43/44 检验稳定性。
+- `train_multiscale10.sbatch` 准备五组：full_fine_legacy、full_fine_new、multiscale、multiscale+depth8、multiscale+width256；同数据、同训练统计、同 10 轮预算。旧 pilot/confirm15 的全零先验结果仅为历史参考。
+- 共同评分固定使用 17/34/51/57 到达概率与 Heart，不随候选训练损失改变；同时报告真实楼层 MAE、角色/进阶/楼层/预测距离分组及 37/57 的近远端覆盖。
+- 评估用 `python src/train.py --evaluate --checkpoint <format12路径> --data-dir <目录> --output-dir <新目录>`，默认 val。`--test-only` 是布尔别名，test 必须明确 `--evaluation-split test`。不得改写源 checkpoint，不自动部署或评估 test。
+- 比较工具按整局配对 bootstrap；要求相同已完成预算、数据、共同评分与种子集合，不再硬编码 20 轮/三个种子。共同 NLL 改善且无显著 MAE/机制排序退化才报告可晋级；证据不足保留参考组，单种子明确 run-cluster-only 不确定性。
+- 回归从 `selectcard/src/` 执行 `python -m unittest test_multiscale test_map_context test_value_network_v2 test_value_network_v3 test_value_network_v4 test_data_pipeline test_api`。原始归档缺失时仍必须执行合成数据闭环，并说明跳过项。
+- HTTP 推理入口仍为 `uvicorn src.api:app`，`POST /recommend/choice` 与 `/recommend/shop`。设计与命令见根目录 `MODEL_V4_DESIGN.md`。
+- 不提交 `selectcard/checkpoints/`、各版本 processed_data 或 `selectcard/experiment_results/`。

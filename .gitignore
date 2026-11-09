@@ -1,6 +1,12 @@
 # Build artifacts (not tracked)
 _ModTheSpire/
 lib/
+/BattleAiMod.jar
+/SaveStateMod.jar
+
+# Local research artifacts
+.research/
+.pytest_tmp/
 
 # STS Data - large JSON.gz run files
 STS Data/
@@ -43,6 +49,7 @@ Thumbs.db
 # Debug output
 debug/
 sendToDevs/
+*.log
 
 # Output files
 out.csv
