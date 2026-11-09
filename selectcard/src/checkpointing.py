@@ -1,3 +1,4 @@
+import math
 import torch
 
 try:
@@ -32,7 +33,7 @@ except ImportError:
     from map_context import context_schema
 
 
-CHECKPOINT_FORMAT_VERSION = 11
+CHECKPOINT_FORMAT_VERSION = 12
 LEGACY_VALUE_TARGET_ERROR = (
     "Checkpoint uses a legacy or incompatible value target. "
     "Rebuild the processed dataset and retrain the character-conditioned bucket hazard model."
@@ -53,6 +54,16 @@ def create_checkpoint(model, model_config, vocabulary, feature_encoder, metadata
         raise ValueError(
             "model_config.num_key_features must match the key context schema"
         )
+    metadata = dict(metadata or {})
+    objective = dict(metadata.get("training_objective", {}))
+    defaults = dict(schema_version="multiscale-loss-v1", mode=Config.VALUE_LOSS_MODE,
+        resolution_mode=model_config["resolution_mode"], far_loss_weight=Config.FAR_LOSS_WEIGHT,
+        mean_loss_weight=Config.MEAN_LOSS_WEIGHT, heart_loss_weight=Config.HEART_HEAD_LOSS_WEIGHT,
+        key_loss_weight=Config.KEY_HEAD_LOSS_WEIGHT, monotonic_loss_weight=Config.MONOTONIC_LOSS_WEIGHT,
+        baseline_entropy_floor=Config.BASELINE_ENTROPY_FLOOR, common_score_heart_weight=1.0)
+    for key, value in defaults.items():
+        objective.setdefault(key, value)
+    metadata["training_objective"] = objective
     return {
         "format_version": CHECKPOINT_FORMAT_VERSION,
         "preprocessing_version": PREPROCESSING_VERSION,
@@ -123,7 +134,7 @@ def load_checkpoint(path, map_location="cpu"):
         raise ValueError("Checkpoint boss schema is incompatible; retraining required")
     required_architecture = {
         "ffn_type", "norm_type", "map_encoder", "map_latents", "coordinate_embedding",
-        "pooling", "register_tokens", "item_token_budget",
+        "pooling", "register_tokens", "item_token_budget", "resolution_mode",
     }
     if not required_architecture.issubset(checkpoint["model_config"]):
         raise ValueError("Incomplete V4 architecture configuration")
@@ -145,6 +156,29 @@ def load_checkpoint(path, map_location="cpu"):
             raise ValueError("Checkpoint key feature count is incompatible; retraining required")
     if checkpoint["global_feature_schema_version"] != GlobalFeatureEncoder.schema_version:
         raise ValueError("Checkpoint global feature schema is incompatible")
+    objective = checkpoint.get("metadata", {}).get("training_objective", {})
+    required_objective = {"mode", "resolution_mode", "far_loss_weight", "mean_loss_weight",
+        "heart_loss_weight", "key_loss_weight", "monotonic_loss_weight", "baseline_entropy_floor",
+        "common_score_heart_weight"}
+    if not required_objective.issubset(objective):
+        raise ValueError("Checkpoint missing frozen loss configuration")
+    for name in ("far_loss_weight", "mean_loss_weight", "heart_loss_weight", "key_loss_weight",
+                 "monotonic_loss_weight", "baseline_entropy_floor"):
+        value = objective[name]
+        if not isinstance(value, (int,float)) or not math.isfinite(value) or value < 0:
+            raise ValueError(f"Invalid frozen loss weight: {name}")
+    if objective["baseline_entropy_floor"] <= 0 or objective["common_score_heart_weight"] != 1.0:
+        raise ValueError("Invalid frozen entropy or common benchmark weight")
+    if objective["mode"] not in {"multiscale", "macro_relative_nll", "micro_nll"}:
+        raise ValueError("Invalid frozen loss mode")
+    if objective["resolution_mode"] != checkpoint["model_config"]["resolution_mode"]:
+        raise ValueError("Checkpoint resolution disagrees with frozen objective")
+    if "baseline_statistics" in checkpoint.get("metadata", {}):
+        try:
+            from .outcome_statistics import validate_statistics
+        except ImportError:
+            from outcome_statistics import validate_statistics
+        validate_statistics(checkpoint["metadata"]["baseline_statistics"])
     vocabulary = ItemVocabulary.from_dict(checkpoint["vocabulary"])
     feature_encoder = GlobalFeatureEncoder.from_dict(
         checkpoint["global_feature_encoder"]

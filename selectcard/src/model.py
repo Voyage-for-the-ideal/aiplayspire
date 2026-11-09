@@ -1,3 +1,8 @@
+try:
+    from .multiscale import ValueOutputs
+except ImportError:
+    from multiscale import ValueOutputs
+
 import torch
 import torch.nn as nn
 
@@ -51,14 +56,22 @@ class STSValueNetwork(nn.Module):
     ITEM_TYPE_ID = 7
 
     def __init__(self, vocab_size, max_upgrade=15, max_count=10, d_model=128,
-                 n_heads=4, n_layers=3, num_global_features=9, num_characters=4,
+                 n_heads=4, n_layers=3, num_global_features=11, num_characters=4,
                  num_bosses=12, dropout=0.1, global_conditioning="token",
                  norm_position="pre", use_map_context=False, num_key_features=9,
                  ffn_type="relu", norm_type="layernorm", map_encoder="none",
                  map_latents=0, coordinate_embedding="linear", pooling="cls",
-                 register_tokens=0, item_token_budget=None):
+                 register_tokens=0, item_token_budget=None, resolution_mode="multiscale",
+                 ablate_map_history=False):
         super().__init__()
+        if resolution_mode not in {"full_fine", "multiscale"}:
+            raise ValueError("Invalid resolution mode")
+        if ablate_map_history and not use_map_context:
+            raise ValueError("map/history ablation requires map context")
+        if ablate_map_history and (map_encoder != "none" or map_latents or coordinate_embedding != "linear"):
+            raise ValueError("map/history ablation requires plain map tokens (no encoder, latents or PLR)")
         self.model_config = {k: v for k, v in locals().items() if k not in {"self", "__class__"}}
+        self.ablate_map_history = ablate_map_history
         if global_conditioning not in {"token", "late_concat"}:
             raise ValueError("Invalid global conditioning")
         if map_encoder not in {"none", "edge", "node_mlp", "dag"}:
@@ -137,6 +150,12 @@ class STSValueNetwork(nn.Module):
         map_rooms, map_flags, history_rooms, history_dist = [
             t.to(device=device, dtype=torch.long) for t in (map_rooms, map_flags, history_rooms, history_dist)
         ]
+        if self.ablate_map_history:
+            # Retain all fixed slots and mask them; leave the key channel intact.
+            map_rooms = torch.zeros_like(map_rooms)
+            map_flags = torch.zeros_like(map_flags)
+            if map_outgoing_mask is not None:
+                map_outgoing_mask = torch.zeros_like(map_outgoing_mask)
         if map_outgoing_mask is None:
             if self.map_encoder != "none" and map_rooms.ne(0).any():
                 raise ValueError("Map encoder requires map_outgoing_mask for a present map")
@@ -162,8 +181,10 @@ class STSValueNetwork(nn.Module):
         if hasattr(self, "map_pool"):
             map_out, map_mask = self.map_pool(map_out, map_mask)
         hist_out = self.map_room_emb(history_rooms) + self.hist_dist_emb(history_dist) + self.token_type_emb.weight[6]
+        history_mask = (torch.ones_like(history_dist, dtype=torch.bool)
+                        if self.ablate_map_history else history_dist.eq(self.HISTORY_DIST_PAD))
         return (keys_out, map_out, hist_out, torch.zeros(batch_size, 1, dtype=torch.bool, device=device),
-                map_mask, history_dist.eq(self.HISTORY_DIST_PAD))
+                map_mask, history_mask)
 
     def forward(self, seq_tokens, upgrades, counts, global_features, character_ids,
                 boss_ids, keys_features=None, map_rooms=None, map_flags=None,
@@ -214,7 +235,7 @@ class STSValueNetwork(nn.Module):
         if self.global_conditioning == "late_concat":
             pooled.append(global_out)
         pooled = torch.cat(pooled, dim=-1)
-        logits = self.value_head(pooled)
+        logits = ValueOutputs.from_flat(self.value_head(pooled))
         if return_keys:
             if not self.use_map_context:
                 raise ValueError("key head requires use_map_context=True")

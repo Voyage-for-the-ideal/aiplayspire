@@ -34,6 +34,7 @@ from dataset import (
     CONTEXTUAL_BASELINE_SCHEMA,
     ChunkShuffleSampler,
     STSDataset,
+    _masked_positive_counts,
     build_training_artifacts,
 )
 from train import dataloader_worker_count, difficulty_weights, weighted_hazard_loss
@@ -83,6 +84,15 @@ def standard_run(**overrides):
     }
     run.update(overrides)
     return run
+
+
+def _manifest_positive_counts(manifest):
+    """Positive counts per target in TARGET_COLUMNS order, from the manifest."""
+    distributions = manifest["distributions"]["positive_samples_by_target"]
+    return [
+        distributions.get(column.removeprefix("target_"), 0)
+        for column in TARGET_COLUMNS
+    ]
 
 
 class ContentCatalogTests(unittest.TestCase):
@@ -486,6 +496,64 @@ class DatasetBuildTests(unittest.TestCase):
         self.assertEqual(len(dataset), 1)
         self.assertEqual(shuffled_indices, [0])
 
+    def test_masked_positive_counts_pair_targets_with_their_own_mask(self):
+        # Regression: ``DataFrame.where`` aligns on column labels, so passing the
+        # ``valid_*`` mask frame against the ``target_*`` frame matched nothing and
+        # returned all zeros, zeroing every baseline rate downstream.
+        frame = pd.DataFrame(
+            {
+                "target_stop_before_03": [0, 1, 0, 1],
+                "target_stop_before_06": [0, 0, 1, 0],
+                "valid_stop_before_03": [True, True, False, False],
+                "valid_stop_before_06": [False, True, True, False],
+            }
+        )
+        targets = frame[list(TARGET_COLUMNS[:2])].astype("int64")
+        masks = frame[list(MASK_COLUMNS[:2])].astype("bool")
+        self.assertEqual(_masked_positive_counts(targets, masks), [1, 1])
+
+    def test_masked_positive_counts_reject_mismatched_widths(self):
+        targets = pd.DataFrame({"target_stop_before_03": [1]})
+        masks = pd.DataFrame(
+            {"valid_stop_before_03": [True], "valid_stop_before_06": [True]}
+        )
+        with self.assertRaisesRegex(ValueError, "same number of columns"):
+            _masked_positive_counts(targets, masks)
+
+    def test_training_baseline_rates_are_calibrated_not_degenerate(self):
+        # A run that dies on floor 1 leaves exactly one stop label set; the
+        # dataset-wide rate must be positive, otherwise entropy collapses to the
+        # floor and every relative-NLL metric (and the skill score) is meaningless.
+        with tempfile.TemporaryDirectory() as directory:
+            input_dir = os.path.join(directory, "input")
+            output_dir = os.path.join(directory, "output")
+            os.makedirs(input_dir)
+            run = standard_run(seed_played="-3775500262246337531")
+            suffix = 0
+            while assign_split(stable_run_id(run)) != "train":
+                suffix += 1
+                run["play_id"] = f"synthetic-{suffix}"
+            with gzip.open(
+                os.path.join(input_dir, "runs.json.gz"), "wt", encoding="utf-8"
+            ) as handle:
+                json.dump([{"event": run}], handle)
+
+            manifest = build_dataset(input_dir, output_dir, workers=1)
+            _, _, baseline_statistics = build_training_artifacts(
+                output_dir, include_baselines=True
+            )
+
+        self.assertEqual(
+            baseline_statistics["global"]["positive"],
+            [int(value) for value in _manifest_positive_counts(manifest)],
+        )
+        self.assertGreater(sum(baseline_statistics["global"]["positive"]), 0)
+        self.assertGreater(sum(baseline_statistics["global"]["rates"]), 0.0)
+        strata = baseline_statistics["strata"]
+        self.assertTrue(strata)
+        self.assertGreater(sum(sum(entry["positive"]) for entry in strata.values()), 0)
+        self.assertGreater(sum(sum(entry["rates"]) for entry in strata.values()), 0.0)
+
     def test_legacy_parquet_schema_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             frame = pd.DataFrame(
@@ -537,14 +605,14 @@ class DifficultyWeightingTests(unittest.TestCase):
         for contribution in contributions[1:]:
             self.assertAlmostEqual(contribution, contributions[0])
 
-        logits = torch.zeros((6, 21))
-        labels = torch.zeros((6, 21))
-        masks = torch.ones((6, 21))
+        logits = torch.zeros((6, 47))
+        labels = torch.zeros((6, 24))
+        masks = torch.ones((6, 24))
         floors = torch.ones(6)
-        globals_ = torch.zeros((6, 9))
-        globals_[:, 8] = torch.tensor([0, 1, 6, 11, 16, 20]) / 20.0
+        globals_ = torch.zeros((6, 11))
+        globals_[:, 10] = torch.tensor([0, 1, 6, 11, 16, 20]) / 20.0
         loss = weighted_hazard_loss(
-            logits, labels, masks, floors, globals_, torch.tensor(weights)
+            logits, labels, masks, floors, globals_, torch.tensor(weights), [.5]*24, terminal_floors=torch.full((6,),57.)
         )
         self.assertTrue(torch.isfinite(loss))
 

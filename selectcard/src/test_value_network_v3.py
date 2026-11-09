@@ -41,7 +41,7 @@ def _v2_model(**overrides):
         d_model=32,
         n_heads=4,
         n_layers=1,
-        num_global_features=9,
+        num_global_features=11,
         num_characters=NUM_CHARACTER_IDS,
         num_bosses=NUM_BOSS_IDS,
         dropout=0.0,
@@ -59,7 +59,7 @@ def _item_batch(batch=3, items=6):
     seq = torch.randint(2, 32, (batch, items))
     upgrades = torch.zeros((batch, items), dtype=torch.long)
     counts = torch.ones((batch, items), dtype=torch.long)
-    globals_ = torch.rand((batch, 9))
+    globals_ = torch.rand((batch, 11))
     character = torch.zeros((batch,), dtype=torch.long)
     boss = torch.zeros((batch,), dtype=torch.long)
     return seq, upgrades, counts, globals_, character, boss
@@ -96,7 +96,7 @@ class ModelTests(unittest.TestCase):
         model = _v2_model()
         seq, upgrades, counts, globals_, character, boss = _item_batch()
         logits = model(seq, upgrades, counts, globals_, character, boss)
-        self.assertEqual(logits.shape, (3, 21))
+        self.assertEqual(logits.shape, (3, 47))
 
     def test_v3_forward_with_context_and_key_head(self):
         model = _v3_model()
@@ -108,14 +108,14 @@ class ModelTests(unittest.TestCase):
             map_flags=context[2], history_rooms=context[3],
             history_dist=context[4], return_keys=True,
         )
-        self.assertEqual(logits.shape, (3, 21))
+        self.assertEqual(logits.shape, (3, 47))
         self.assertEqual(key_logits.shape, (3, 3))
 
     def test_v3_forward_falls_back_to_missing_context(self):
         model = _v3_model()
         seq, upgrades, counts, globals_, character, boss = _item_batch()
         logits = model(seq, upgrades, counts, globals_, character, boss)
-        self.assertEqual(logits.shape, (3, 21))
+        self.assertEqual(logits.shape, (3, 47))
 
     def test_return_keys_rejected_without_context(self):
         model = _v2_model()
@@ -168,7 +168,7 @@ class CheckpointCompatTests(unittest.TestCase):
         config = {
             "vocab_size": 32, "max_upgrade": 15, "max_count": 10,
             "d_model": 32, "n_heads": 4, "n_layers": 1,
-            "num_global_features": 9, "num_characters": NUM_CHARACTER_IDS,
+            "num_global_features": 11, "num_characters": NUM_CHARACTER_IDS,
             "num_bosses": NUM_BOSS_IDS,
             "dropout": 0.0, "global_conditioning": "token", "norm_position": "pre",
         }
@@ -179,7 +179,7 @@ class CheckpointCompatTests(unittest.TestCase):
         config = {
             "vocab_size": 32, "max_upgrade": 15, "max_count": 10,
             "d_model": 32, "n_heads": 4, "n_layers": 1,
-            "num_global_features": 9, "num_characters": NUM_CHARACTER_IDS,
+            "num_global_features": 11, "num_characters": NUM_CHARACTER_IDS,
             "num_bosses": NUM_BOSS_IDS,
             "dropout": 0.0, "global_conditioning": "token", "norm_position": "pre",
             "use_map_context": True,
@@ -212,6 +212,7 @@ class DatasetContextTests(unittest.TestCase):
                 "ascension_band": 3,
                 "character": "IRONCLAD",
                 "state_timing": "post_action",
+                "terminal_known": True, "terminal_floor": 57., "heart_victory": False,
                 "visible_boss": "NO_BOSS",
                 "preprocessing_version": PREPROCESSING_VERSION,
                 "filter_version": FILTER_VERSION,
@@ -241,10 +242,10 @@ class DatasetContextTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             dataset = self._dataset(self._write_parquet(tmp, self._rows()))
             sample = dataset[0]
-            self.assertEqual(len(sample), 17)
+            self.assertEqual(len(sample), 18)
             self.assertEqual(sample[4].item(), 0)  # IRONCLAD
             (keys_features, map_rooms, map_flags,
-             history_rooms, history_dist, key_labels, key_masks, outgoing) = sample[9:]
+             history_rooms, history_dist, key_labels, key_masks, outgoing) = sample[9:-1]
             self.assertEqual(keys_features.shape, (9,))
             self.assertEqual(map_rooms.shape, (MAP_GRID_CELLS,))
             self.assertEqual(map_flags.shape, (MAP_GRID_CELLS,))
@@ -266,7 +267,7 @@ class DatasetContextTests(unittest.TestCase):
             dataset = self._dataset(self._write_parquet(tmp, self._rows()))
             dataset.context_enabled = False
             sample = dataset[0]
-            (_, map_rooms, map_flags, history_rooms, history_dist, _, _, _) = sample[9:]
+            (_, map_rooms, map_flags, history_rooms, history_dist, _, _, _) = sample[9:-1]
             self.assertFalse(map_rooms.any())
             self.assertFalse(map_flags.any())
             self.assertFalse(history_rooms.any())
@@ -282,7 +283,7 @@ class DatasetContextTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             dataset = self._dataset(self._write_parquet(tmp, rows))
             sample = dataset[0]
-            (_, map_rooms, _, _, _, _, key_masks, _) = sample[9:]
+            (_, map_rooms, _, _, _, _, key_masks, _) = sample[9:-1]
             self.assertFalse(map_rooms.any())
             self.assertEqual(key_masks.tolist(), [0.0, 0.0, 0.0])
 
@@ -294,7 +295,7 @@ class TrainingHelperTests(unittest.TestCase):
                 # Removing token 7 raises the predicted value, which violates
                 # the free-relic ordering and must produce a positive loss.
                 present = seq.eq(7).any(dim=1).float()
-                logits = torch.zeros((len(seq), 21), device=seq.device)
+                logits = torch.zeros((len(seq), 47), device=seq.device)
                 logits[:, 0] = present * 2.0 - 1.0
                 return logits
 
@@ -302,7 +303,7 @@ class TrainingHelperTests(unittest.TestCase):
         seq = torch.tensor([[7, 2], [2, 3]])
         upgrades = torch.zeros_like(seq)
         counts = torch.ones_like(seq)
-        globals_ = torch.zeros((2, 9))
+        globals_ = torch.zeros((2, 11))
         character = torch.zeros(2, dtype=torch.long)
         boss = torch.zeros(2, dtype=torch.long)
         floors = torch.ones(2)
@@ -319,7 +320,7 @@ class TrainingHelperTests(unittest.TestCase):
                 # Token 7 is neutral. Removing token 8 improves the prediction,
                 # so a first-Egg-only implementation incorrectly returns zero.
                 second_egg_present = seq.eq(8).any(dim=1).float()
-                logits = torch.zeros((len(seq), 21), device=seq.device)
+                logits = torch.zeros((len(seq), 47), device=seq.device)
                 logits[:, 0] = second_egg_present * 2.0 - 1.0
                 return logits
 
@@ -327,7 +328,7 @@ class TrainingHelperTests(unittest.TestCase):
         seq = torch.tensor([[7, 8, 2]])
         upgrades = torch.zeros_like(seq)
         counts = torch.ones_like(seq)
-        globals_ = torch.zeros((1, 9))
+        globals_ = torch.zeros((1, 11))
         character = torch.zeros(1, dtype=torch.long)
         boss = torch.zeros(1, dtype=torch.long)
         floors = torch.ones(1)
@@ -343,7 +344,7 @@ class TrainingHelperTests(unittest.TestCase):
             def forward(self, seq, upgrades, counts, globals_, character, boss,
                         keys_features=None, **kwargs):
                 present = keys_features[:, 0]
-                logits = torch.zeros((len(seq), 21), device=seq.device)
+                logits = torch.zeros((len(seq), 47), device=seq.device)
                 logits[:, 0] = present * 2.0 - 1.0
                 return logits
 
@@ -351,7 +352,7 @@ class TrainingHelperTests(unittest.TestCase):
         seq = torch.tensor([[2, 3]])
         upgrades = torch.zeros_like(seq)
         counts = torch.ones_like(seq)
-        globals_ = torch.zeros((1, 9))
+        globals_ = torch.zeros((1, 11))
         character = torch.zeros(1, dtype=torch.long)
         boss = torch.zeros(1, dtype=torch.long)
         floors = torch.ones(1)
@@ -386,7 +387,7 @@ class TrainingHelperTests(unittest.TestCase):
                         keys_features=None, **kwargs):
                 self.seen_key_features.append(keys_features.detach().clone())
                 emerald_present = keys_features[:, 1]
-                logits = torch.zeros((len(seq), 21), device=seq.device)
+                logits = torch.zeros((len(seq), 47), device=seq.device)
                 logits[:, 0] = emerald_present * 2.0 - 1.0
                 return logits
 
@@ -394,7 +395,7 @@ class TrainingHelperTests(unittest.TestCase):
         seq = torch.tensor([[2, 3]])
         upgrades = torch.zeros_like(seq)
         counts = torch.ones_like(seq)
-        globals_ = torch.zeros((1, 9))
+        globals_ = torch.zeros((1, 11))
         character = torch.zeros(1, dtype=torch.long)
         boss = torch.zeros(1, dtype=torch.long)
         floors = torch.ones(1)
@@ -441,11 +442,11 @@ class TrainingHelperTests(unittest.TestCase):
         self.assertAlmostEqual(loss.item(), expected.item(), places=6)
 
     def test_split_batch_shapes(self):
-        v2_batch = tuple(torch.zeros(2) for _ in range(9))
+        v2_batch = tuple(torch.zeros(2) for _ in range(10))
         base, context, keys = _split_batch(v2_batch, use_map=False)
         self.assertIsNone(context)
         self.assertIsNone(keys)
-        v3_batch = tuple(torch.zeros(2) for _ in range(17))
+        v3_batch = tuple(torch.zeros(2) for _ in range(18))
         base, context, keys = _split_batch(v3_batch, use_map=True)
         self.assertEqual(len(context), 6)
         self.assertEqual(len(keys), 2)
@@ -454,11 +455,11 @@ class TrainingHelperTests(unittest.TestCase):
 
     @staticmethod
     def _loss_inputs(batch_size=4):
-        logits = torch.zeros((batch_size, 21), requires_grad=True)
-        labels = torch.zeros((batch_size, 21))
-        masks = torch.zeros((batch_size, 21))
-        floors = torch.full((batch_size,), 57.0)
-        globals_ = torch.zeros((batch_size, 9))
+        logits = torch.zeros((batch_size, 47), requires_grad=True)
+        labels = torch.zeros((batch_size, 24))
+        masks = torch.zeros((batch_size, 24))
+        floors = torch.ones(batch_size)
+        globals_ = torch.zeros((batch_size, 11))
         return logits, labels, masks, floors, globals_
 
     def test_macro_loss_gives_supervised_heads_equal_weight(self):
@@ -472,7 +473,7 @@ class TrainingHelperTests(unittest.TestCase):
         masks[:, 1] = 1.0
         masks[:, -1] = 1.0
         components = value_loss_components(
-            logits, labels, masks, floors, globals_, torch.ones(6), [0.5] * 21
+            logits, labels, masks, floors, globals_, torch.ones(6), [0.5] * 24, terminal_floors=torch.full_like(floors,57.)
         )
         first = torch.nn.functional.binary_cross_entropy_with_logits(
             torch.tensor(0.0), torch.tensor(1.0)
@@ -494,27 +495,29 @@ class TrainingHelperTests(unittest.TestCase):
         rate = 0.2
         prior_logit = torch.logit(torch.tensor(rate))
         with torch.no_grad():
+            logits[:, :23] = -100.
             logits[:, 0] = prior_logit
+            logits[:, -1] = torch.logit(torch.tensor(.5/(1-rate)))
         labels[:2, 0] = 1.0
         masks[:, 0] = 1.0
         labels[:5, -1] = 1.0
         masks[:, -1] = 1.0
-        rates = [rate] + [0.5] * 20
+        rates = [rate] + [0.5] * 23
         components = value_loss_components(
-            logits, labels, masks, floors, globals_, torch.ones(6), rates
+            logits, labels, masks, floors, globals_, torch.ones(6), rates, terminal_floors=torch.full_like(floors,57.)
         )
         self.assertAlmostEqual(components["hazard_relative_nll"].item(), 1.0, places=5)
         self.assertAlmostEqual(components["heart_relative_nll"].item(), 1.0, places=5)
         self.assertAlmostEqual(components["relative_value"].item(), 1.0, places=5)
 
     def test_entropy_floor_keeps_extreme_priors_and_gradients_finite(self):
-        entropy = _binary_entropy([0.0] * 21, dtype=torch.float32, device="cpu")
-        torch.testing.assert_close(entropy, torch.full((21,), Config.BASELINE_ENTROPY_FLOOR))
+        entropy = _binary_entropy([0.0] * 24, dtype=torch.float32, device="cpu")
+        torch.testing.assert_close(entropy, torch.full((24,), Config.BASELINE_ENTROPY_FLOOR))
         logits, labels, masks, floors, globals_ = self._loss_inputs(1)
         masks[0, 0] = 1.0
         masks[0, -1] = 1.0
         components = value_loss_components(
-            logits, labels, masks, floors, globals_, torch.ones(6), [0.0] * 21
+            logits, labels, masks, floors, globals_, torch.ones(6), [0.0] * 24, terminal_floors=torch.full_like(floors,57.)
         )
         components["total"].backward()
         self.assertTrue(torch.isfinite(logits.grad).all())
@@ -527,7 +530,7 @@ class TrainingHelperTests(unittest.TestCase):
         from train import weighted_hazard_loss
 
         expected = weighted_hazard_loss(
-            logits, labels, masks, floors, globals_, torch.ones(6)
+            logits, labels, masks, floors, globals_, torch.ones(6), [.5]*24, terminal_floors=torch.full_like(floors,57.)
         )
         expected_gradient = torch.autograd.grad(expected, logits, retain_graph=True)[0]
         actual = value_loss_components(
@@ -537,8 +540,9 @@ class TrainingHelperTests(unittest.TestCase):
             floors,
             globals_,
             torch.ones(6),
-            [0.5] * 21,
+            [0.5] * 24,
             loss_mode="micro_nll",
+            terminal_floors=torch.full_like(floors,57.),
         )["value"]
         actual_gradient = torch.autograd.grad(actual, logits)[0]
         torch.testing.assert_close(actual, expected)
@@ -627,7 +631,7 @@ class InferenceEngineTests(unittest.TestCase):
         config = {
             "vocab_size": 2, "max_upgrade": 15, "max_count": 10,
             "d_model": 32, "n_heads": 4, "n_layers": 1,
-            "num_global_features": 9, "num_characters": NUM_CHARACTER_IDS,
+            "num_global_features": 11, "num_characters": NUM_CHARACTER_IDS,
             "num_bosses": NUM_BOSS_IDS,
             "dropout": 0.0, "global_conditioning": "token", "norm_position": "pre",
         }

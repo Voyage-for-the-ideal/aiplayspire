@@ -31,6 +31,7 @@ try:
     )
     from .reconstructor import RunReconstructor
     from .map_context import MAP_CONTEXT_VERSION, RunMapContextBuilder
+    from .outcome_statistics import OutcomeAccumulator
 except ImportError:
     from config import Config
     from content_catalog import VanillaContentCatalog, canonical_card_id
@@ -48,6 +49,7 @@ except ImportError:
     )
     from reconstructor import RunReconstructor
     from map_context import MAP_CONTEXT_VERSION, RunMapContextBuilder
+    from outcome_statistics import OutcomeAccumulator
 
 
 MIN_GAME_DATE = datetime(2020, 1, 14)
@@ -461,6 +463,9 @@ def process_run(event_data, catalog, min_ascension=0):
                 "ascension_band": validated["ascension_band"],
                 "character": validated["character"],
                 "state_timing": "post_action",
+                "terminal_known": terminal_known,
+                "terminal_floor": 57 if heart_victory else validated["floor_reached"],
+                "heart_victory": heart_victory,
                 # A0 samples carry no resolved boss by product policy; A1+
                 # identity is supplied only by the sidecar enrichment workflow,
                 # never inferred from combat outcomes.
@@ -702,6 +707,8 @@ def build_dataset(
         "valid_samples_by_ascension": Counter(),
         "positive_samples_by_target": Counter(),
         "valid_samples_by_target": Counter(),
+        "train_valid_samples_by_target": Counter(),
+        "train_positive_samples_by_target": Counter(),
         "at_risk_samples_by_hazard": Counter(),
         "stop_samples_by_hazard": Counter(),
         "censored_samples_by_hazard": Counter(),
@@ -716,6 +723,7 @@ def build_dataset(
     chunks = 0
     partition_chunks = Counter()
     buffers = defaultdict(list)
+    training_outcomes = OutcomeAccumulator()
 
     def flush(partition):
         nonlocal chunks
@@ -723,6 +731,8 @@ def build_dataset(
         if not buffer:
             return
         frame = pd.DataFrame(buffer)
+        if partition == "train_valid":
+            training_outcomes.add(frame)
         index = partition_chunks[partition]
         frame.to_parquet(
             staging / f"{partition}_chunk_{index:05d}.parquet", index=False
@@ -759,6 +769,9 @@ def build_dataset(
                         target_name = target_column.removeprefix("target_")
                         if row[mask_column]:
                             dimensions["valid_samples_by_target"][target_name] += 1
+                            if row["split"] == "train":
+                                dimensions["train_valid_samples_by_target"][target_name] += 1
+                                dimensions["train_positive_samples_by_target"][target_name] += int(row[target_column])
                             if row[target_column]:
                                 dimensions["positive_samples_by_target"][target_name] += 1
                     for name, mask_column in zip(HAZARD_NAMES, HAZARD_MASK_COLUMNS):
@@ -808,6 +821,7 @@ def build_dataset(
             },
             "value_target_schema": VALUE_TARGET_SCHEMA,
             "hazard_endpoints": list(HAZARD_ENDPOINTS),
+            "training_outcome_counts": training_outcomes.manifest_counts(),
             "created_at_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
             "input": {
                 "files": len(files),
@@ -856,7 +870,7 @@ def parse_args(argv=None):
     base_dir = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description="Build the standard-vanilla STS dataset")
     parser.add_argument("--input-dir", default=str(base_dir / "STS Data"))
-    parser.add_argument("--output-dir", default=str(base_dir / "processed_data_v4"))
+    parser.add_argument("--output-dir", default=str(base_dir / "processed_data_v4" / "a10plus_multiscale_v1_base"))
     parser.add_argument("--workers", type=int, default=None)
     parser.add_argument("--chunk-size", type=int, default=50000)
     parser.add_argument("--max-files-per-directory", type=int, default=None)

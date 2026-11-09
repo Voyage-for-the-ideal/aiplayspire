@@ -53,7 +53,7 @@ try:
 except ImportError:  # pragma: no cover - package vs script import
     import sts_mapgen
 
-MAP_CONTEXT_VERSION = "map-context-v5-current-edges"
+MAP_CONTEXT_VERSION = "map-context-v6-persistent-keys"
 MAP_GRID_CELLS = sts_mapgen.MAP_HEIGHT * sts_mapgen.MAP_WIDTH  # 105
 HISTORY_HORIZON = 8
 MAP_FLAG_FEATURES = 7
@@ -193,6 +193,10 @@ def split_act_segments(path_per_floor) -> list[tuple[int, list[str]]]:
                 current = []
             continue
         if value == "B":
+            # A20's second Act-III boss belongs to the same Act, not Act IV.
+            if not current and segments and segments[-1][1][-1] == "B" and len(segments) == 3:
+                segments[-1][1].append(value)
+                continue
             current.append(value)
             segments.append((current_start, current))
             current = []
@@ -257,6 +261,8 @@ def forward_consistent_positions(nodes, symbols, wing_from_row=None):
     are modelled like :func:`sts_mapgen.path_is_legal`: charges are granted
     from the pickup row and every non-adjacent move spends one.
     """
+    if not symbols or not nodes:
+        return []
     states: dict[int, int] = {}
     rows: list[set[int]] = []
     for x in range(sts_mapgen.MAP_WIDTH):
@@ -265,13 +271,21 @@ def forward_consistent_positions(nodes, symbols, wing_from_row=None):
             states[x] = WING_CHARGES if (wing_from_row is not None and wing_from_row <= 0) else 0
     rows.append(set(states))
     for y in range(1, len(symbols)):
-        if wing_from_row is not None and y >= wing_from_row:
+        # The real graph has rows 0..14. Boss rooms are virtual and can
+        # include a second boss; never index them into the 105-cell grid.
+        if y >= len(nodes):
+            valid = symbols[y] == "B" and bool(rows[-1])
+            rows.append({3} if valid else set())
+            continue
+        if wing_from_row is not None and y == wing_from_row:
             for x in states:
                 states[x] = max(states[x], WING_CHARGES)
         wanted = symbols[y]
         nxt: dict[int, int] = {}
         for x, charges in states.items():
             for edge in nodes[y - 1][x].edges:
+                if not 0 <= edge.dst_x < len(nodes[y]):
+                    continue
                 if _matches_symbol(nodes[y][edge.dst_x], wanted):
                     nxt[edge.dst_x] = max(nxt.get(edge.dst_x, 0), charges)
             if charges > 0 and wing_from_row is not None and y >= wing_from_row:
@@ -435,9 +449,10 @@ class RunMapContextBuilder:
         if act >= 4:
             return [1, 1, 1], [1, 1, 1]
         ruby = 1 if self.recall is not None and floor > self.recall else 0
-        emerald_floor = self.emerald_floors.get(act)
-        emerald = 1 if emerald_floor is not None and floor > emerald_floor else 0
-        emerald_known = 1 if act in self.act_maps else 0
+        emerald = int(any(previous_act <= act and floor > obtained
+                          for previous_act, obtained in self.emerald_floors.items()))
+        # A proven key persists even when a later map is unavailable.
+        emerald_known = int(bool(emerald) or all(a in self.act_maps for a in range(1, act + 1)))
         # A missing relic on a T floor is ambiguous: it may be an unopened
         # chest, an abandoned reward screen, or a Sapphire pick.  Never infer
         # Sapphire from that absence.

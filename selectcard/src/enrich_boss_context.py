@@ -15,8 +15,12 @@ import tempfile
 
 import pandas as pd
 
-from boss_context import BOSS_RESOLVER_VERSION, BOSS_SCHEMA_VERSION, canonicalize_boss_name
-from data_contract import PREPROCESSING_VERSION
+try:
+    from .boss_context import BOSS_RESOLVER_VERSION, BOSS_SCHEMA_VERSION, canonicalize_boss_name
+    from .data_contract import PREPROCESSING_VERSION
+except ImportError:
+    from boss_context import BOSS_RESOLVER_VERSION, BOSS_SCHEMA_VERSION, canonicalize_boss_name
+    from data_contract import PREPROCESSING_VERSION
 
 
 def visible_boss_for_sample(floor, decision_type, ascension, resolved_context):

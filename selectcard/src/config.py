@@ -10,7 +10,7 @@ class Config:
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     # STS_DATA_DIR 让训练可指向 enrich 后的新数据集目录，而不覆盖旧数据。
     DATA_DIR = os.environ.get(
-        "STS_DATA_DIR", os.path.join(BASE_DIR, "processed_data_v4")
+        "STS_DATA_DIR", os.path.join(BASE_DIR, "processed_data_v4", "a10plus_multiscale_v1")
     )
     TRAIN_SPLIT = 0.8
     VAL_SPLIT = 0.1
@@ -21,7 +21,8 @@ class Config:
     # 训练超参数
     # ==========================
     BATCH_SIZE = 512
-    EPOCHS = 20
+    DEVICE = "auto"
+    EPOCHS = 10
     # lr 2e-4 在 batch 256 下收敛良好；batch 翻倍后按 sqrt 缩放补偿
     # （512/256)^0.5 ≈ 1.41 → 2.8e-4），配合余弦衰减调度。
     LEARNING_RATE = 2.8e-4
@@ -32,8 +33,8 @@ class Config:
     LR_MIN_RATIO = 0.0
     LOG_INTERVAL_SECONDS = 60
     EARLY_STOPPING_PATIENCE = 5
-    # Let the 20-epoch cosine schedule leave its high-learning-rate phase before
-    # treating validation fluctuations as evidence that training has stalled.
+    # Confirmation uses its complete declared 10-epoch cosine budget.
+    # Experiment configurations disable early stopping.
     EARLY_STOPPING_START_EPOCH = 10
     # Worker count is capped by available CPUs; profile memory/throughput on
     # the actual target device rather than extrapolating from older logs.
@@ -55,8 +56,8 @@ class Config:
     N_HEADS = 4              # 注意力头数
     N_LAYERS = 5             # 注意力层数
     # Boss identity is a separate categorical [BOSS] context token, not a numeric
-    # global feature.  Keep this input contract at nine dimensions.
-    NUM_GLOBAL_FEATURES = 9
+    # global feature.  Progress and resource features use the frozen 11-dimensional schema.
+    NUM_GLOBAL_FEATURES = 11
     DROPOUT = 0.1            # Dropout 比例
     GLOBAL_CONDITIONING = "token"  # "token" or "late_concat"
     NORM_POSITION = "pre"           # "pre" or "post"
@@ -71,11 +72,13 @@ class Config:
     EXPERIMENT_METADATA = {}
     RANDOM_SEED = 42
     HEART_WIN_BONUS_FLOORS = 3.0
-    HEART_HEAD_LOSS_WEIGHT = 1.0
-    # ``macro_relative_nll`` gives every stopping bucket equal influence and
-    # scales it by the entropy of its training-set prior.  ``micro_nll`` keeps
-    # the legacy risk-cell average for reproducible ablations.
-    VALUE_LOSS_MODE = "macro_relative_nll"
+    HEART_HEAD_LOSS_WEIGHT = 0.25
+    # Multiscale gives near/far risk cells separate weights. The original macro
+    # relative objective remains available for the full-fine control.
+    VALUE_LOSS_MODE = "multiscale"
+    RESOLUTION_MODE = "multiscale"
+    FAR_LOSS_WEIGHT = 0.25
+    MEAN_LOSS_WEIGHT = 0.1
     BASELINE_ENTROPY_FLOOR = 0.05
     VALUE_DEBUG = os.environ.get("STS_VALUE_DEBUG", "").lower() in {"1", "true", "yes"}
 
@@ -83,8 +86,11 @@ class Config:
     # 地图条件化上下文（[MAP]/[HISTORY]/[KEYS] + key 辅助头）
     # ==========================
     # Master switch for the map-conditioned extension. Checkpoints store their
-    # own architecture; format-10 and earlier checkpoints require retraining.
+    # own architecture; format-11 and earlier checkpoints require retraining.
     USE_MAP_CONTEXT = True
+    # Mask only the 105 [MAP] and 8 [HISTORY] slots. Keep [KEYS], items,
+    # the 73-item budget and every parameter identical to the control.
+    ABLATE_MAP_HISTORY = False
     # First N epochs mask map/history tokens entirely for both train and
     # validation (curriculum warm-up so the v3 run starts from its v2 point).
     CONTEXT_CURRICULUM_EPOCHS = 3

@@ -48,6 +48,7 @@ def supervision_fields(valid=True, label=0.0):
     return {
         **{column: label for column in TARGET_COLUMNS},
         **{column: valid for column in MASK_COLUMNS},
+        "terminal_known": bool(valid), "terminal_floor": 57., "heart_victory": False,
         "key_states": [0, 0, 0],
         "key_known_mask": [1, 1, 0],
     }
@@ -177,38 +178,31 @@ class GlobalFeatureEncoderTests(unittest.TestCase):
         state.update(overrides)
         return state
 
-    def test_feature_schema_has_nine_features_without_floor_progress(self):
-        self.assertEqual(len(self.encoder.feature_names), 9)
+    def test_feature_schema_has_eleven_features_with_absolute_floor(self):
+        self.assertEqual(len(self.encoder.feature_names), 11)
         self.assertNotIn("floor_progress", self.encoder.feature_names)
-        self.assertEqual(len(self.encoder.transform_state(self._state())), 9)
+        self.assertEqual(len(self.encoder.transform_state(self._state())), 11)
 
     def test_act_boundaries_and_progress(self):
-        cases = {
-            0: ((1.0, 0.0, 0.0), 0.0),
-            16: ((1.0, 0.0, 0.0), 1.0),
-            17: ((0.0, 1.0, 0.0), 0.0),
-            33: ((0.0, 1.0, 0.0), 1.0),
-            34: ((0.0, 0.0, 1.0), 0.0),
-            50: ((0.0, 0.0, 1.0), 1.0),
-            51: ((0.0, 0.0, 1.0), 1.0),
-        }
-        for floor, (expected_act, expected_progress) in cases.items():
-            with self.subTest(floor=floor):
-                features = self.encoder.transform_state(self._state(floor=floor))
-                self.assertEqual(tuple(features[:3]), expected_act)
-                self.assertEqual(features[3], expected_progress)
+        for floor in (0,16,17,33,34,50,51,54,57):
+            stage = min(sum(floor >= e for e in (17,34,51)), 3)
+            features = self.encoder.transform_state(self._state(floor=floor))
+            self.assertEqual(features[:4], [float(i == stage) for i in range(4)])
+            self.assertEqual(features[5], floor/57)
+            self.assertGreaterEqual(features[4], 0)
+            self.assertLessEqual(features[4], 1)
 
     def test_hp_preserves_relative_and_absolute_information(self):
         low_ratio = self.encoder.transform_state(self._state(hp=20, max_hp=80))
         high_ratio = self.encoder.transform_state(self._state(hp=20, max_hp=25))
-        self.assertEqual(low_ratio[5], high_ratio[5])
-        self.assertNotEqual(low_ratio[4], high_ratio[4])
+        self.assertEqual(low_ratio[7], high_ratio[7])
         self.assertNotEqual(low_ratio[6], high_ratio[6])
+        self.assertNotEqual(low_ratio[8], high_ratio[8])
 
     def test_gold_is_log_scaled_and_bounded(self):
-        zero = self.encoder.transform_state(self._state(gold=0))[7]
-        normal = self.encoder.transform_state(self._state(gold=100))[7]
-        extreme = self.encoder.transform_state(self._state(gold=10**12))[7]
+        zero = self.encoder.transform_state(self._state(gold=0))[9]
+        normal = self.encoder.transform_state(self._state(gold=100))[9]
+        extreme = self.encoder.transform_state(self._state(gold=10**12))[9]
         self.assertEqual(zero, 0.0)
         self.assertGreater(normal, zero)
         self.assertLess(normal, 1.0)
@@ -216,13 +210,13 @@ class GlobalFeatureEncoderTests(unittest.TestCase):
 
     def test_ascension_maps_a0_a10_and_a20(self):
         self.assertEqual(
-            self.encoder.transform_state(self._state(ascension=0))[8], 0.0
+            self.encoder.transform_state(self._state(ascension=0))[10], 0.0
         )
         self.assertEqual(
-            self.encoder.transform_state(self._state(ascension=10))[8], 0.5
+            self.encoder.transform_state(self._state(ascension=10))[10], 0.5
         )
         self.assertEqual(
-            self.encoder.transform_state(self._state(ascension=20))[8], 1.0
+            self.encoder.transform_state(self._state(ascension=20))[10], 1.0
         )
 
     def test_invalid_values_are_rejected(self):
@@ -426,8 +420,8 @@ class ModelTests(unittest.TestCase):
 
     def test_normalized_ascension_feature_recovers_band_boundaries(self):
         levels = torch.tensor([0, 1, 5, 6, 10, 11, 15, 16, 19, 20])
-        globals_ = torch.zeros((len(levels), 9))
-        globals_[:, 8] = levels / 20.0
+        globals_ = torch.zeros((len(levels), 11))
+        globals_[:, 10] = levels / 20.0
         self.assertEqual(
             ascension_band_tensor(globals_).tolist(),
             [0, 1, 1, 2, 2, 3, 3, 4, 4, 5],
@@ -441,7 +435,7 @@ class ModelTests(unittest.TestCase):
             d_model=16,
             n_heads=4,
             n_layers=2,
-            num_global_features=9,
+            num_global_features=11,
             num_characters=NUM_CHARACTER_IDS,
             num_bosses=NUM_BOSS_IDS,
             dropout=0.0,
@@ -452,7 +446,7 @@ class ModelTests(unittest.TestCase):
 
     def test_permutation_and_extra_padding_do_not_change_value(self):
         model = self._model()
-        globals_ = torch.arange(9, dtype=torch.float32).unsqueeze(0)
+        globals_ = torch.arange(11, dtype=torch.float32).unsqueeze(0)
         with torch.no_grad():
             first = model(
                 torch.tensor([[2, 3, 0]]),
@@ -477,36 +471,36 @@ class ModelTests(unittest.TestCase):
             torch.tensor([[2, 0]]),
             torch.tensor([[0, 0]]),
             torch.tensor([[1, 0]]),
-            torch.zeros((1, 9)),
+            torch.zeros((1, 11)),
             torch.tensor([0]),
             torch.tensor([0]),
         )
         for conditioning in ("token", "late_concat"):
             for norm in ("pre", "post"):
-                self.assertEqual(self._model(conditioning, norm)(*inputs).shape, (1, 21))
+                self.assertEqual(self._model(conditioning, norm)(*inputs).shape, (1, 47))
 
     def test_masked_loss_ignores_invalid_hazard_gradient(self):
-        logits = torch.zeros((1, 21), requires_grad=True)
-        targets = torch.zeros((1, 21))
-        masks = torch.zeros((1, 21))
+        logits = torch.zeros((1, 47), requires_grad=True)
+        targets = torch.zeros((1, 24))
+        masks = torch.zeros((1, 24))
         targets[0, 0] = 1.0
         masks[0, 0] = 1.0
-        globals_ = torch.zeros((1, 9))
+        globals_ = torch.zeros((1, 11))
         loss = weighted_hazard_loss(
-            logits, targets, masks, torch.tensor([1.0]), globals_, torch.ones(6)
+            logits, targets, masks, torch.tensor([1.0]), globals_, torch.ones(6), [.5]*24, terminal_floors=torch.tensor([1.])
         )
         loss.backward()
         self.assertNotEqual(logits.grad[0, 0].item(), 0.0)
-        torch.testing.assert_close(logits.grad[0, 1:], torch.zeros(20))
+        torch.testing.assert_close(logits.grad[0, 1:], torch.zeros(46))
 
     def test_boss_ids_follow_distinct_embedding_paths(self):
         model = self._model()
         self.assertFalse(torch.equal(model.boss_emb.weight[8], model.boss_emb.weight[9]))
         inputs = (
             torch.tensor([[2, 0]]), torch.tensor([[0, 0]]),
-            torch.tensor([[1, 0]]), torch.zeros((1, 9)),
+            torch.tensor([[1, 0]]), torch.zeros((1, 11)),
         )
-        self.assertEqual(model(*inputs, torch.tensor([0]), torch.tensor([0])).shape, (1, 21))
+        self.assertEqual(model(*inputs, torch.tensor([0]), torch.tensor([0])).shape, (1, 47))
 
     def test_character_ids_follow_distinct_embedding_paths(self):
         model = self._model()
@@ -515,22 +509,24 @@ class ModelTests(unittest.TestCase):
         )
 
     def test_hazard_survival_is_monotone_and_heart_is_bounded(self):
-        logits = torch.linspace(-2.0, 2.0, 21).unsqueeze(0)
-        _, survival, heart = hazard_predictions(logits, torch.tensor([10.0]))
-        self.assertTrue(torch.all(survival[:, 1:] <= survival[:, :-1]))
-        self.assertLessEqual(heart.item(), survival[0, -1].item())
+        logits = torch.linspace(-2.0, 2.0, 47).unsqueeze(0)
+        from multiscale import distribution
+        d = distribution(logits, torch.tensor([10.0]))
+        alive = d["survival"][0, d["active"][0]][torch.argsort(d["ends"][d["active"][0]])]
+        self.assertTrue(torch.all(alive[1:] <= alive[:-1]))
+        self.assertLessEqual(float(d["heart_probability"][0]), float(d["final_survival"][0]))
 
     def test_evaluation_reports_hazards_heart_floor_and_baseline(self):
         batch_size = 2
-        targets = torch.zeros((batch_size, 21))
+        targets = torch.zeros((batch_size, 24))
         targets[0, 0] = 1.0
         targets[1, -1] = 1.0
-        masks = torch.ones((batch_size, 21))
+        masks = torch.ones((batch_size, 24))
         batch = (
             torch.tensor([[2, 0], [2, 0]]),
             torch.zeros((batch_size, 2), dtype=torch.long),
             torch.tensor([[1, 0], [1, 0]]),
-            torch.zeros((batch_size, 9)),
+            torch.zeros((batch_size, 11)),
             torch.zeros(batch_size, dtype=torch.long),
             torch.zeros(batch_size, dtype=torch.long),
             torch.ones(batch_size),
@@ -538,9 +534,9 @@ class ModelTests(unittest.TestCase):
             masks,
         )
         metrics = evaluate(
-            self._model(), [batch], torch.device("cpu"), baseline_rates=[0.1] * 21
+            self._model(), [(*batch, torch.tensor([2., 57.]))], torch.device("cpu"), baseline_rates=[0.1] * 24
         )
-        self.assertEqual(len(metrics["hazards"]), HAZARD_OUTPUT_DIM)
+        self.assertEqual(len(metrics["hazards"]), 23)
         self.assertIn("heart_win", metrics)
         self.assertTrue(torch.isfinite(torch.tensor(metrics["terminal_floor_mae"])))
         self.assertIn("constant_baseline", metrics)
@@ -548,22 +544,23 @@ class ModelTests(unittest.TestCase):
 
     def test_evaluation_loss_is_independent_of_batch_partition(self):
         batch_size = 4
-        targets = torch.zeros((batch_size, 21))
+        targets = torch.zeros((batch_size, 24))
         targets[0, 0] = 1.0
         targets[1, 1] = 1.0
         targets[2, -1] = 1.0
-        masks = torch.ones((batch_size, 21))
+        masks = torch.ones((batch_size, 24))
         batch = (
             torch.tensor([[2, 0]] * batch_size),
             torch.zeros((batch_size, 2), dtype=torch.long),
             torch.tensor([[1, 0]] * batch_size),
-            torch.zeros((batch_size, 9)),
+            torch.zeros((batch_size, 11)),
             torch.zeros(batch_size, dtype=torch.long),
             torch.zeros(batch_size, dtype=torch.long),
             torch.ones(batch_size),
             targets,
             masks,
         )
+        batch = (*batch, torch.tensor([2., 5., 57., 34.]))
         split_batches = [
             tuple(value[:1] for value in batch),
             tuple(value[1:] for value in batch),
@@ -598,26 +595,20 @@ class ModelTests(unittest.TestCase):
         assert_checkpoint_safe(together)
 
     def test_scalar_value_rewards_act4_progress_and_heart_win(self):
-        normal_hazards = {endpoint: 0.0 for endpoint in HAZARD_ENDPOINTS}
-        normal_hazards[54] = 1.0
-        _, _, normal_floor, normal_value = compose_hazard_value(
-            normal_hazards, 0.0, 0, heart_bonus_floors=3
-        )
-        deep_hazards = dict(normal_hazards)
-        deep_hazards[54] = 0.0
-        deep_hazards[57] = 1.0
-        _, _, deep_floor, deep_value = compose_hazard_value(
-            deep_hazards, 0.0, 0, heart_bonus_floors=3
-        )
-        self.assertEqual(normal_floor, 51.0)
-        self.assertEqual(deep_floor, 54.0)
-        self.assertGreater(deep_value, normal_value)
-        perfect = {endpoint: 0.0 for endpoint in HAZARD_ENDPOINTS}
-        self.assertAlmostEqual(compose_hazard_value(perfect, 1.0, 0, 3)[-1], 1.0)
-        self.assertNotEqual(
-            compose_hazard_value(normal_hazards, 0.5, 0, 3)[-1],
-            compose_hazard_value(normal_hazards, 0.5, 0, 6)[-1],
-        )
+        from data_contract import active_bins
+        bins = active_bins(0)
+        hazards = {end:0. for _,_,_,end in bins}
+        hazards[57] = 1.
+        means = {end:start for _,_,start,end in bins}
+        normal = compose_hazard_value(hazards,0.,0,stop_means=means)
+        self.assertEqual(normal[2],51.)
+        means[57] = 54.
+        deep = compose_hazard_value(hazards,0.,0,stop_means=means)
+        self.assertEqual(deep[2],54.)
+        self.assertGreater(deep[-1],normal[-1])
+        hazards[57] = 0.
+        perfect = compose_hazard_value(hazards,1.,0,stop_means=means)
+        self.assertEqual(perfect[-1],1.)
 
     def test_boss_relic_hypothetical_replaces_starter_relic(self):
         engine = STSInferenceEngine.__new__(STSInferenceEngine)
@@ -881,7 +872,7 @@ class ModelTests(unittest.TestCase):
             "d_model": 16,
             "n_heads": 4,
             "n_layers": 2,
-            "num_global_features": 9,
+            "num_global_features": 11,
             "num_characters": NUM_CHARACTER_IDS,
             "num_bosses": NUM_BOSS_IDS,
             "dropout": 0.0,
@@ -900,7 +891,7 @@ class ModelTests(unittest.TestCase):
             path = os.path.join(directory, "model.pth")
             save_checkpoint(path, model, config, vocabulary, feature_encoder)
             checkpoint, loaded_vocab, loaded_encoder = load_checkpoint(path)
-        self.assertEqual(checkpoint["format_version"], 11)
+        self.assertEqual(checkpoint["format_version"], 12)
         self.assertEqual(loaded_vocab.to_dict(), vocabulary.to_dict())
         self.assertEqual(loaded_encoder.to_dict(), feature_encoder.to_dict())
 
@@ -913,7 +904,7 @@ class ModelTests(unittest.TestCase):
             "d_model": 16,
             "n_heads": 4,
             "n_layers": 2,
-            "num_global_features": 9,
+            "num_global_features": 11,
             "num_characters": NUM_CHARACTER_IDS,
             "num_bosses": NUM_BOSS_IDS,
             "dropout": 0.0,
@@ -941,7 +932,7 @@ class ModelTests(unittest.TestCase):
                 {"training_objective": objective},
             )
             checkpoint, _, _ = load_checkpoint(path)
-        self.assertEqual(checkpoint["format_version"], 11)
+        self.assertEqual(checkpoint["format_version"], 12)
         self.assertEqual(checkpoint["metadata"]["training_objective"], objective)
 
     def test_wrong_checkpoint_format_is_rejected(self):

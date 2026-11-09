@@ -13,6 +13,10 @@ except ImportError:
 
 EXPERIMENTS = {
     "baseline": {},
+    "full_fine_legacy": {"RESOLUTION_MODE": "full_fine", "VALUE_LOSS_MODE": "macro_relative_nll", "HEART_HEAD_LOSS_WEIGHT": 1.0},
+    "full_fine_new": {"RESOLUTION_MODE": "full_fine"},
+    "multiscale": {},
+    "map_history0": {"ABLATE_MAP_HISTORY": True},
     "depth8": {"N_LAYERS": 8},
     "width256": {"D_MODEL": 256},
     "gelu": {"FFN_TYPE": "gelu"},
@@ -43,10 +47,13 @@ BASELINE = {
     "MAP_LATENTS": 0, "COORDINATE_EMBEDDING": "linear", "POOLING": "cls",
     "REGISTER_TOKENS": 0, "KEY_HEAD_LOSS_WEIGHT": 0.2,
     "MONOTONIC_LOSS_WEIGHT": 0.1, "USE_MAP_CONTEXT": True,
+    "ABLATE_MAP_HISTORY": False,
     "GLOBAL_CONDITIONING": "token", "NORM_POSITION": "pre", "DROPOUT": 0.1,
     "BATCH_SIZE": 512, "LEARNING_RATE": 2.8e-4,
     "CONTEXT_CURRICULUM_EPOCHS": 3, "LR_MIN_RATIO": 0.0,
     "EARLY_STOPPING_PATIENCE": 0,
+    "RESOLUTION_MODE": "multiscale", "VALUE_LOSS_MODE": "multiscale",
+    "HEART_HEAD_LOSS_WEIGHT": 0.25, "FAR_LOSS_WEIGHT": 0.25, "MEAN_LOSS_WEIGHT": 0.1,
 }
 
 
@@ -74,7 +81,7 @@ def configure_experiment(names="baseline", stage="pilot", seed=42, epochs=None):
                 raise ValueError(f"Conflicting experimental settings: {key}")
             seen[key] = value
             updates[key] = value
-    updates.update(RANDOM_SEED=seed, EPOCHS=epochs or (8 if stage == "pilot" else 20),
+    updates.update(RANDOM_SEED=seed, EPOCHS=epochs or (8 if stage == "pilot" else 10),
                    RUN_FRACTION=0.01 if stage == "pilot" else 1.0)
     if updates["EPOCHS"] <= updates["CONTEXT_CURRICULUM_EPOCHS"]:
         raise ValueError("Training needs at least one full-context epoch after curriculum")
@@ -85,7 +92,7 @@ def configure_experiment(names="baseline", stage="pilot", seed=42, epochs=None):
         "names": chosen, "stage": stage, "seed": seed,
         "run_selection": "sha256-aiplayspire-v4-pilot-v1",
         "settings": updates,
-        "confirmation_seeds": [42, 43, 44],
+        "confirmation_seeds": [seed],
         "artifact_fit": "shared-full-training-split-only",
     }
     return Config.EXPERIMENT_METADATA

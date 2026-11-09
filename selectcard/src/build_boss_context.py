@@ -23,9 +23,14 @@ import os
 
 import pandas as pd
 
-from boss_context import BOSS_RESOLVER_VERSION, BossContextResolver, canonicalize_boss_name
-from data_contract import ascension_band
-from data_pipeline import stable_run_id
+try:
+    from .boss_context import BOSS_RESOLVER_VERSION, BossContextResolver, canonicalize_boss_name
+    from .data_contract import ascension_band
+    from .data_pipeline import stable_run_id
+except ImportError:
+    from boss_context import BOSS_RESOLVER_VERSION, BossContextResolver, canonicalize_boss_name
+    from data_contract import ascension_band
+    from data_pipeline import stable_run_id
 
 _BOSS_FLOORS = {16: "act1_boss", 33: "act2_boss", 50: "act3_boss"}
 _ACTS = ("act1_boss", "act2_boss", "act3_boss")

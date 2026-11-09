@@ -31,7 +31,8 @@ class EvaluationRecorder:
     def identities(self, count):
         return [self.dataset.identity(i) for i in range(self.offset, self.offset + count)]
 
-    def add(self, probabilities, targets, masks, weights, probe_counts, probe_violations):
+    def add(self, probabilities, targets, masks, weights, probe_counts, probe_violations,
+            *, floors, predicted, terminal, terminal_known):
         p = np.clip(np.asarray(probabilities, dtype=np.float64), 1e-7, 1 - 1e-7)
         targets = np.asarray(targets, dtype=np.float64)
         elements = -(targets * np.log(p) + (1 - targets) * np.log1p(-p))
@@ -43,6 +44,9 @@ class EvaluationRecorder:
                 "numerator": (elements[i] * weighted_masks[i]).tolist(),
                 "denominator": weighted_masks[i].tolist(),
                 "probe_count": int(probe_counts[i]), "probe_violations": int(probe_violations[i]),
+                "floor": float(floors[i]), "probabilities": p[i].tolist(),
+                "absolute_error": abs(float(predicted[i])-float(terminal[i])) if terminal_known[i] else 0.,
+                "terminal_count": int(terminal_known[i]),
             }
             self.handle.write(json.dumps(row, allow_nan=False) + "\n")
         self.offset += len(p)
@@ -64,7 +68,8 @@ def mechanism_counts(model, observed, seq, upgrades, counts, globals_, character
         from train import _forward_value_model, scalar_state_value
     totals = torch.zeros(len(seq), dtype=torch.long, device=seq.device)
     violations = torch.zeros_like(totals)
-    value = scalar_state_value(observed, floors)
+    resolution = getattr(model,"model_config",{}).get("resolution_mode")
+    value = scalar_state_value(observed, floors, resolution)
     for token_id in egg_ids:
         keep = seq.eq(token_id).any(1) & eligible
         if not keep.any():
@@ -76,7 +81,7 @@ def mechanism_counts(model, observed, seq, upgrades, counts, globals_, character
         local_context = tuple(t[keep] for t in context) if context is not None else None
         other = _forward_value_model(model, *changed, globals_[keep], characters[keep], bosses[keep], local_context)
         totals[keep] += 1
-        violations[keep] += (scalar_state_value(other, floors[keep]) > value[keep] + 1e-6).long()
+        violations[keep] += (scalar_state_value(other, floors[keep], resolution) > value[keep] + 1e-6).long()
     if context is not None:
         for key in range(3):
             keep = key_labels[:, key].gt(0.5) & key_masks[:, key].gt(0.5) & eligible
@@ -91,25 +96,26 @@ def mechanism_counts(model, observed, seq, upgrades, counts, globals_, character
             other = _forward_value_model(model, seq[keep], upgrades[keep], counts[keep],
                                          globals_[keep], characters[keep], bosses[keep], local)
             totals[keep] += 1
-            violations[keep] += (scalar_state_value(other, floors[keep]) > value[keep] + 1e-6).long()
+            violations[keep] += (scalar_state_value(other, floors[keep], resolution) > value[keep] + 1e-6).long()
     return totals.cpu().numpy(), violations.cpu().numpy()
 
 
 def _score(numerator, denominator, objective):
-    include = denominator[:20] > 0
+    include = denominator[:-1] > 0
     if "active_hazards" in objective:
-        expected = np.zeros(20, dtype=bool)
+        expected = np.zeros(len(include), dtype=bool)
         expected[objective["active_hazards"]] = True
         if not include[expected].all():
             return None
         include = expected
-    if not include.any() or denominator[20] <= 0:
+    if denominator[-1] <= 0:
         return None
     entropy = np.asarray(objective["entropy"])
-    hazard = np.mean(numerator[:20][include] / denominator[:20][include] / entropy[:20][include])
-    heart = numerator[20] / denominator[20] / entropy[20]
-    weight = objective["heart_weight"]
-    return float((hazard + weight * heart) / (1 + weight))
+    heart = numerator[-1] / denominator[-1] / entropy[-1]
+    if not include.any():
+        return float(heart)
+    hazard = np.mean(numerator[:-1][include] / denominator[:-1][include] / entropy[:-1][include])
+    return float((hazard + heart) / 2)
 
 
 def _export_headers(paths):
@@ -135,6 +141,15 @@ def compare_exports(baseline_paths, candidate_paths, repetitions=2000, seed=42):
     contracts = [entry[0]["comparison_contract"] for entry in bh.values()]
     if any(c != contracts[0] for c in contracts):
         raise ValueError("Seeds must use the same comparison contract")
+    headers = [h[0] for h in (*bh.values(), *ch.values())]
+    budgets = {h.get("planned_epochs", 0) for h in headers}
+    if len(budgets) != 1:
+        raise ValueError("Paired runs have different training budgets")
+    entropy = np.asarray(contracts[0]["objective"]["entropy"], dtype=float)
+    if entropy.shape != (5,) or not np.isfinite(entropy).all() or (entropy <= 0).any():
+        raise ValueError("Invalid common benchmark normalization")
+    if contracts[0]["objective"].get("heart_weight") != 1.0:
+        raise ValueError("Common benchmark Heart weight must equal one")
     groups = {}
     for experiment_seed in sorted(bh):
         left_header, left_path = bh[experiment_seed]
@@ -151,34 +166,40 @@ def compare_exports(baseline_paths, candidate_paths, repetitions=2000, seed=42):
                     raise ValueError("Paired exports must contain identical samples")
                 left, right = json.loads(ll), json.loads(rr)
                 if any(left[k] != right[k] for k in (
-                    "sample_id", "run_id", "label_fingerprint", "denominator", "probe_count"
+                    "sample_id", "run_id", "label_fingerprint", "denominator", "probe_count", "terminal_count"
                 )):
                     raise ValueError("Paired labels, samples, weights, or probe coverage differ")
-                row = groups.setdefault(left["run_id"], np.zeros((2, 44), dtype=np.float64))
+                row = groups.setdefault(left["run_id"], np.zeros((2, 14), dtype=np.float64))
                 for index, record in enumerate((left, right)):
                     num, den = np.asarray(record["numerator"]), np.asarray(record["denominator"])
-                    if num.shape != (21,) or den.shape != (21,) or not np.isfinite(num).all() or not np.isfinite(den).all() or (den < 0).any() or (num < 0).any():
+                    if num.shape != (5,) or den.shape != (5,) or not np.isfinite(num).all() or not np.isfinite(den).all() or (den < 0).any() or (num < 0).any():
                         raise ValueError("Invalid exported sufficient statistics")
                     if not 0 <= record["probe_violations"] <= record["probe_count"]:
                         raise ValueError("Invalid probe counts")
-                    row[index, :21] += num
-                    row[index, 21:42] += den
-                    row[index, 42] += record["probe_violations"]
-                    row[index, 43] += record["probe_count"]
+                    row[index, :5] += num
+                    row[index, 5:10] += den
+                    row[index, 10] += record["probe_violations"]
+                    row[index, 11] += record["probe_count"]
+                    error, count = record["absolute_error"], record["terminal_count"]
+                    if not np.isfinite(error) or error < 0 or count not in (0, 1) or (den[-1] > 0) != bool(count):
+                        raise ValueError("Invalid exported terminal error")
+                    row[index, 12] += error
+                    row[index, 13] += count
     if not groups:
         raise ValueError("Evaluation exports have no samples")
     values = np.stack(list(groups.values()))
     objective = dict(contracts[0]["objective"])
-    objective["active_hazards"] = np.flatnonzero(values[:, 0, 21:41].sum(0) > 0).tolist()
+    objective["active_hazards"] = np.flatnonzero(values[:, 0, 5:9].sum(0) > 0).tolist()
 
     def differences(total, bootstrap=False):
-        scores = [_score(v[:21], v[21:42], objective) for v in total]
+        scores = [_score(v[:5], v[5:10], objective) for v in total]
         if any(v is None for v in scores):
             return None
-        if bootstrap and (total[:, 43] == 0).any():
+        if bootstrap and (total[:, 11] == 0).any():
             return None
-        probe = total[:, 42] / np.maximum(total[:, 43], 1)
-        return scores[1] - scores[0], probe[1] - probe[0]
+        probe = total[:, 10] / np.maximum(total[:, 11], 1)
+        mae = total[:, 12] / np.maximum(total[:, 13], 1)
+        return scores[1] - scores[0], probe[1] - probe[0], mae[1] - mae[0]
 
     rng = np.random.default_rng(seed)
     samples = []
@@ -193,20 +214,26 @@ def compare_exports(baseline_paths, candidate_paths, repetitions=2000, seed=42):
     if point is None:
         raise ValueError("Exports have no supervised hazard/Heart targets")
     intervals = np.quantile(samples, [0.025, 0.975], axis=0) if samples else None
-    full_confirmation = set(bh) == {42, 43, 44} and contracts[0]["run_fraction"] == 1.0 and contracts[0]["split"] == "val" and all(h[0].get("completed_epochs", 0) >= 20 and h[0].get("stage") == "confirm" for h in (*bh.values(), *ch.values()))
-    probe_evidence = total[0, 43] > 0
+    full_confirmation = (next(iter(budgets)) > 0 and contracts[0]["run_fraction"] == 1.0
+        and contracts[0]["split"] == "val"
+        and all(h.get("completed_epochs", 0) >= h["planned_epochs"] and h.get("stage") == "confirm" for h in headers))
+    probe_evidence = total[0, 11] > 0
     enough = intervals is not None and len(samples) >= repetitions * 0.95 and probe_evidence
     improve = bool(enough and intervals[1, 0] < 0)
-    worse = bool(enough and intervals[0, 1] > 0)
+    worse = bool(enough and (intervals[0, 1] > 0 or intervals[0, 2] > 0))
     return {
         "run_clusters": len(groups), "seeds": sorted(bh), "bootstrap_seed": seed,
         "valid_bootstraps": len(samples), "repetitions": repetitions,
-        "baseline_relative_value_nll": _score(total[0, :21], total[0, 21:42], objective),
-        "candidate_relative_value_nll": _score(total[1, :21], total[1, 21:42], objective),
+        "baseline_relative_value_nll": _score(total[0, :5], total[0, 5:10], objective),
+        "candidate_relative_value_nll": _score(total[1, :5], total[1, 5:10], objective),
         "nll_delta": point[0], "probe_violation_rate_delta": point[1],
         "nll_delta_ci95": intervals[:, 0].tolist() if intervals is not None else None,
         "probe_delta_ci95": intervals[:, 1].tolist() if intervals is not None else None,
-        "probe_comparisons": int(total[0, 43]),
+        "probe_comparisons": int(total[0, 11]),
+        "mae_delta": point[2],
+        "mae_delta_ci95": intervals[:, 2].tolist() if intervals is not None else None,
+        "seed_count": len(bh), "uncertainty": "run-cluster-only" if len(bh) == 1 else "paired-runs-across-seeds",
+        "planned_epochs": next(iter(budgets)),
         "promote": bool(full_confirmation and improve and not worse),
         "status": "confirmed" if full_confirmation and enough else "insufficient_confirmation",
         "rule": "paired-run-cluster-ci95-nll-upper<0-and-probe-not-significantly-worse",
@@ -218,7 +245,8 @@ def evaluate_checkpoint(checkpoint_path, data_dir, output_dir, split="val", devi
         from .config import Config
     except ImportError:
         from config import Config
-    names = ("HEART_HEAD_LOSS_WEIGHT", "BASELINE_ENTROPY_FLOOR", "KEY_HEAD_LOSS_WEIGHT")
+    names = ("HEART_HEAD_LOSS_WEIGHT", "BASELINE_ENTROPY_FLOOR", "KEY_HEAD_LOSS_WEIGHT",
+             "RESOLUTION_MODE", "VALUE_LOSS_MODE", "FAR_LOSS_WEIGHT", "MEAN_LOSS_WEIGHT", "MONOTONIC_LOSS_WEIGHT")
     previous = {name: getattr(Config, name) for name in names}
     try:
         return _evaluate_checkpoint(checkpoint_path, data_dir, output_dir, split, device_name)
@@ -254,6 +282,10 @@ def _evaluate_checkpoint(checkpoint_path, data_dir, output_dir, split="val", dev
     Config.HEART_HEAD_LOSS_WEIGHT = objective["heart_loss_weight"]
     Config.BASELINE_ENTROPY_FLOOR = objective["baseline_entropy_floor"]
     Config.KEY_HEAD_LOSS_WEIGHT = objective["key_loss_weight"]
+    Config.RESOLUTION_MODE = checkpoint["model_config"]["resolution_mode"]
+    for field, key in (("VALUE_LOSS_MODE", "mode"), ("FAR_LOSS_WEIGHT", "far_loss_weight"),
+                       ("MEAN_LOSS_WEIGHT", "mean_loss_weight"), ("MONOTONIC_LOSS_WEIGHT", "monotonic_loss_weight")):
+        setattr(Config, field, objective[key])
     fraction = metadata.get("experiment", {}).get("settings", {}).get("RUN_FRACTION", 1.0)
     if split == "test":
         fraction = 1.0
@@ -261,7 +293,8 @@ def _evaluate_checkpoint(checkpoint_path, data_dir, output_dir, split="val", dev
     dataset = STSDataset(data_dir, vocabulary, encoder, split=split,
                          max_seq_len=architecture["item_token_budget"],
                          max_upgrade=architecture["max_upgrade"], max_count=architecture["max_count"],
-                         use_map_context=architecture["use_map_context"], run_fraction=fraction)
+                         use_map_context=architecture["use_map_context"], run_fraction=fraction,
+                         resolution_mode=architecture["resolution_mode"])
     manifest = load_dataset_manifest(data_dir)
     shard_identity = [(Path(p).name, Path(p).stat().st_size, Path(p).stat().st_mtime_ns)
                       for p in sorted(Path(data_dir).glob("*_valid_chunk_*.parquet"))]
@@ -280,18 +313,23 @@ def _evaluate_checkpoint(checkpoint_path, data_dir, output_dir, split="val", dev
         raise FileExistsError("Evaluation output already exists; choose a new output directory")
     if Path(checkpoint_path).resolve().parent == output.resolve():
         raise ValueError("Evaluation outputs must be separate from source checkpoint directory")
-    rates = statistics["global"]["rates"]
+    rates = statistics["common"]["global"]["rates"]
+    try:
+        from .value_metrics import common_entropy
+    except ImportError:
+        from value_metrics import common_entropy
     header = {
         "experiments": metadata.get("experiment", {}).get("names", ["baseline"]),
         "completed_epochs": len(metadata.get("history", [])),
+        "planned_epochs": metadata["training_config"]["epochs"],
         "stage": metadata.get("experiment", {}).get("stage"),
         "seed": metadata["seed"], "checkpoint": str(Path(checkpoint_path).resolve()),
         "comparison_contract": {
             "dataset_fingerprint": fingerprint([manifest, shard_identity]),
             "artifact_fingerprint": fingerprint([vocabulary.to_dict(), encoder.to_dict(), statistics, weights]),
             "run_fraction": fraction, "split": split,
-            "objective": {"entropy": _numpy_entropy(rates).tolist(),
-                          "heart_weight": objective["heart_loss_weight"]},
+            "objective": {"entropy": common_entropy(rates).tolist(),
+                          "heart_weight": 1.0, "schema": "common-milestone-nll-v1"},
         },
     }
     recorder = EvaluationRecorder(prediction_path, header, dataset)
@@ -340,7 +378,7 @@ def select_pilot_candidates(paths):
             winner = min(["baseline", *available], key=lambda name: (scores[name], name != "baseline", name))
             representatives[family] = {"experiment": winner, "relative_value_nll": scores[winner]}
     return {"baseline_relative_value_nll": scores["baseline"], "representatives": representatives,
-            "next_step": "confirm baseline and each non-baseline representative with seeds 42/43/44; no deployment"}
+            "next_step": "confirm baseline and each non-baseline representative for 10 epochs with the same seed set (initially 42); additional seeds are optional; no deployment"}
 
 
 def main(argv=None):

@@ -3,8 +3,12 @@ import argparse
 import os
 import tempfile
 
-from build_boss_context import build_sidecar
-from enrich_boss_context import enrich_processed_dataset
+try:
+    from .build_boss_context import build_sidecar
+    from .enrich_boss_context import enrich_processed_dataset
+except ImportError:
+    from build_boss_context import build_sidecar
+    from enrich_boss_context import enrich_processed_dataset
 
 
 def generate(raw_dir, processed_dir, output_dir, audit_path, minimum_samples=100):

@@ -23,7 +23,7 @@ dependencies:
   - pip
   # --- deep learning ---
   - pytorch=2.7.1
-  - pytorch-cuda=12.8
+  - pytorch-cuda=12.4
   # --- data processing (reads processed_data_v2/*.parquet) ---
   - numpy
   - pandas>=2.0
@@ -34,3 +34,7 @@ dependencies:
   - fastapi
   - uvicorn
   - pydantic
+
+  - pip:
+    - openai>=1.0.0
+    - requests>=2.31.0

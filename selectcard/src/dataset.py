@@ -1,3 +1,8 @@
+try:
+    from .outcome_statistics import OutcomeAccumulator, validate_statistics
+except ImportError:
+    from outcome_statistics import OutcomeAccumulator, validate_statistics
+
 import bisect
 import glob
 import hashlib
@@ -5,7 +10,9 @@ import json
 import math
 import os
 from functools import lru_cache
+from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset, Sampler
@@ -13,7 +20,8 @@ from torch.utils.data import Dataset, Sampler
 try:
     from .data_contract import (
         FILTER_VERSION, HAZARD_ENDPOINTS, MASK_COLUMNS, PREPROCESSING_VERSION,
-        TARGET_COLUMNS, VALUE_TARGET_SCHEMA,
+        TARGET_COLUMNS, VALUE_TARGET_SCHEMA, OUTCOME_COLUMNS, progress_stage,
+        multiscale_targets, common_targets, COMMON_TARGET_NAMES,
     )
     from .encoding import ItemVocabulary, encode_items, split_items
     from .boss_context import boss_id
@@ -22,7 +30,8 @@ try:
 except ImportError:
     from data_contract import (
         FILTER_VERSION, HAZARD_ENDPOINTS, MASK_COLUMNS, PREPROCESSING_VERSION,
-        TARGET_COLUMNS, VALUE_TARGET_SCHEMA,
+        TARGET_COLUMNS, VALUE_TARGET_SCHEMA, OUTCOME_COLUMNS, progress_stage,
+        multiscale_targets, common_targets, COMMON_TARGET_NAMES,
     )
     from encoding import ItemVocabulary, encode_items, split_items
     from boss_context import boss_id
@@ -33,6 +42,7 @@ except ImportError:
 REQUIRED_COLUMNS = {
     "run_id",
     "split",
+    *OUTCOME_COLUMNS,
     *TARGET_COLUMNS,
     *MASK_COLUMNS,
     "preprocessing_version",
@@ -46,21 +56,25 @@ REQUIRED_COLUMNS = {
 }
 
 TRAINING_ARTIFACT_CACHE_NAME = "training_artifacts.json"
-TRAINING_ARTIFACT_CACHE_VERSION = 2
+# Format 4 includes raw-outcome, multiscale and common benchmark statistics.
+# Version 2 also counted positives as zero; never reinterpret an old cache.
+TRAINING_ARTIFACT_CACHE_VERSION = 4
 ARTIFACT_PROGRESS_INTERVAL = 25
 CONTEXTUAL_BASELINE_SCHEMA = "floor-ascension-band-v1"
 CONTEXTUAL_BASELINE_PRIOR_STRENGTH = 100.0
 
 
 class GlobalFeatureEncoder:
-    schema_version = "global-features-v6"
+    schema_version = "global-features-v7-floor"
     quantile = 0.995
     source_feature_names = ("floor", "hp", "max_hp", "gold", "ascension")
     feature_names = (
         "act_1",
         "act_2",
-        "act_3_plus",
+        "act_3",
+        "act_4",
         "act_progress",
+        "floor_normalized",
         "hp_ratio",
         "hp_absolute",
         "max_hp_absolute",
@@ -133,19 +147,14 @@ class GlobalFeatureEncoder:
         if ascension < 0.0 or ascension > 20.0 or int(ascension) != ascension:
             raise ValueError("ascension must be an integer from 0 to 20")
 
-        if floor <= 16.0:
-            act = (1.0, 0.0, 0.0)
-            act_progress = self._clamp(floor / 16.0)
-        elif floor <= 33.0:
-            act = (0.0, 1.0, 0.0)
-            act_progress = self._clamp((floor - 17.0) / 16.0)
-        else:
-            act = (0.0, 0.0, 1.0)
-            act_progress = self._clamp((floor - 34.0) / 16.0)
-
+        stage = progress_stage(floor)
+        starts, ends = (0., 17., 34., 51.), (17., 34., 51., 57.)
+        act = tuple(float(index == stage) for index in range(4))
+        act_progress = (floor - starts[stage]) / (ends[stage] - starts[stage])
         return [
             *act,
             act_progress,
+            floor / 57.,
             self._clamp(hp / max_hp),
             self._clamp(hp / self.caps["hp_q995"]),
             self._clamp(max_hp / self.caps["max_hp_q995"]),
@@ -203,6 +212,16 @@ def _read_frame(path, columns=None):
     filter_versions = set(frame["filter_version"].dropna().unique())
     if filter_versions != {FILTER_VERSION}:
         raise ValueError(f"Unsupported filter versions: {sorted(filter_versions)}")
+    if all(column in frame for column in OUTCOME_COLUMNS) and "floor" in frame:
+        for name in ("terminal_known", "heart_victory"):
+            if not frame[name].isin([True, False]).all() or frame[name].isna().any():
+                raise ValueError(f"Invalid outcome field: {name}")
+        terminal = pd.to_numeric(frame["terminal_floor"], errors="raise")
+        if (not np.isfinite(terminal).all() or (terminal < frame["floor"]).any()
+                or (terminal > 57).any()):
+            raise ValueError("Invalid terminal floor")
+        if (frame["heart_victory"] & (~frame["terminal_known"] | terminal.ne(57))).any():
+            raise ValueError("Heart victory requires known terminal progress 57")
     return frame
 
 
@@ -235,8 +254,28 @@ def _artifact_source_fingerprint(files):
         source_files.append(
             (os.path.basename(path), stat.st_size, stat.st_mtime_ns)
         )
+    manifest = Path(files[0]).parent / "dataset_manifest.json" if files else None
+    if manifest and manifest.exists():
+        source_files.append(("manifest", hashlib.sha256(manifest.read_bytes()).hexdigest()))
     encoded = json.dumps(source_files, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _masked_positive_counts(target_values, mask_values):
+    """Count true labels per target, pairing each target with its own mask column.
+
+    ``DataFrame.where`` aligns by column *label*, so passing the differently named
+    mask frame (``target_x`` vs ``valid_x``) matched nothing and silently produced
+    all-zero counts. Rename the masks onto the target labels and require an exact
+    column match so the pairing cannot drift again.
+    """
+    if len(target_values.columns) != len(mask_values.columns):
+        raise ValueError(
+            "target and mask frames must define the same number of columns"
+        )
+    aligned_masks = mask_values.copy()
+    aligned_masks.columns = target_values.columns
+    return target_values.where(aligned_masks, 0).sum(axis=0).tolist()
 
 
 def _load_training_artifact_cache(cache_path, source_fingerprint):
@@ -279,9 +318,9 @@ def _save_training_artifact_cache(
             os.remove(temporary_path)
 
 
-def _baseline_statistics(global_positive, global_valid, strata_counts):
+def _baseline_statistics(global_positive, global_valid, strata_counts, target_names=None):
     """Finalize smoothed floor/ascension target rates for evaluation baselines."""
-    target_names = [column.removeprefix("target_") for column in TARGET_COLUMNS]
+    target_names = target_names or [column.removeprefix("target_") for column in TARGET_COLUMNS]
     rates = []
     for name, positive, valid in zip(target_names, global_positive, global_valid):
         if valid < 0 or not 0 <= positive <= valid:
@@ -339,6 +378,7 @@ def build_training_artifacts(
         else:
             if progress:
                 progress(f"Loaded training artifacts from {cache_path}")
+            validate_statistics(artifacts[2], parquet_dir)
             return artifacts if include_baselines else artifacts[:2]
 
     if progress:
@@ -352,6 +392,7 @@ def build_training_artifacts(
     global_positive = [0] * target_count
     global_valid = [0] * target_count
     strata_counts = {}
+    outcomes = OutcomeAccumulator()
     for file_index, path in enumerate(files, start=1):
         frame = _read_frame(path)
         train_frame = frame[
@@ -359,10 +400,11 @@ def build_training_artifacts(
             & frame[list(MASK_COLUMNS)].astype(bool).any(axis=1)
         ]
         feature_frames.append(train_frame[list(GlobalFeatureEncoder.source_feature_names)])
+        outcomes.add(train_frame)
         target_values = train_frame[list(TARGET_COLUMNS)].astype("int64")
         mask_values = train_frame[list(MASK_COLUMNS)].astype("bool")
         valid_counts = mask_values.sum(axis=0).tolist()
-        positive_counts = target_values.where(mask_values, 0).sum(axis=0).tolist()
+        positive_counts = _masked_positive_counts(target_values, mask_values)
         global_valid = [left + int(right) for left, right in zip(global_valid, valid_counts)]
         global_positive = [
             left + int(right) for left, right in zip(global_positive, positive_counts)
@@ -383,7 +425,7 @@ def build_training_artifacts(
                 {"positive": [0] * target_count, "valid": [0] * target_count},
             )
             group_valid = group_masks.sum(axis=0).tolist()
-            group_positive = group_targets.where(group_masks, 0).sum(axis=0).tolist()
+            group_positive = _masked_positive_counts(group_targets, group_masks)
             entry["valid"] = [
                 left + int(right) for left, right in zip(entry["valid"], group_valid)
             ]
@@ -413,6 +455,8 @@ def build_training_artifacts(
     )
     if progress:
         progress("Global feature quantiles ready")
+    outcomes.finish(baseline_statistics, _baseline_statistics)
+    validate_statistics(baseline_statistics, parquet_dir)
     if use_cache:
         try:
             _save_training_artifact_cache(
@@ -445,9 +489,11 @@ class STSDataset(Dataset):
         progress=None,
         use_map_context=False,
         run_fraction=1.0,
+        resolution_mode="multiscale",
     ):
         self.vocabulary = vocabulary
         self.feature_encoder = feature_encoder
+        self.resolution_mode = resolution_mode
         self.split = split
         self.max_seq_len = max_seq_len
         self.max_upgrade = max_upgrade
@@ -476,6 +522,7 @@ class STSDataset(Dataset):
                 columns=[
                     "run_id",
                     "split",
+                    *OUTCOME_COLUMNS,
                     *TARGET_COLUMNS,
                     *MASK_COLUMNS,
                     "preprocessing_version",
@@ -617,8 +664,8 @@ class STSDataset(Dataset):
         global_features = self.feature_encoder.transform_row(row)
         encoded_character = character_id(row["character"])
         encoded_boss = boss_id(row["visible_boss"])
-        targets = [float(row[column]) for column in TARGET_COLUMNS]
-        masks = [float(bool(row[column])) for column in MASK_COLUMNS]
+        targets, masks = multiscale_targets(float(row["floor"]), float(row["terminal_floor"]),
+            bool(row["terminal_known"]), bool(row["heart_victory"]), self.resolution_mode)
         base = (
             torch.tensor(tokens, dtype=torch.long),
             torch.tensor(upgrades, dtype=torch.long),
@@ -631,8 +678,8 @@ class STSDataset(Dataset):
             torch.tensor(masks, dtype=torch.float32),
         )
         if not self.use_map_context:
-            return base
-        return base + self._map_context_tensors(row)
+            return base + (torch.tensor(float(row["terminal_floor"])),)
+        return base + self._map_context_tensors(row) + (torch.tensor(float(row["terminal_floor"])),)
 
 
 class ChunkShuffleSampler(Sampler):

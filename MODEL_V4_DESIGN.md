@@ -1,151 +1,79 @@
-# V4 价值网络：输入修复与可复现实验
+# V4 多尺度价值网络（format 12）
 
-> 更新：2026-10-13。代码、合成回归及实验工具已实现；完整数据重建、GPU 训练及候选部署尚未执行。
+本契约替代历史的全细桶 `bucket-hazard-v1`。本次包含代码、合成回归、审计和运行脚本；完整数据重建和 GPU 训练由操作者另行执行。旧 pilot 与 confirm15 保存了全零先验，不能作为新实验的有效对照。
 
-## 目标与边界
+## 目标与输入
 
-先修复信息丢失与训练／实战输入不一致，再检验容量和结构假设。
-价值契约保持 `bucket-hazard-v1`；标量仍为
-`V(S) = E[终止楼层] + HEART_WIN_BONUS_FLOORS × P(Heart)`。
-保留 post-action 状态、run 级 split、角色／Boss／钥匙／历史上下文。
-item 聚合、词表排序及地图模型的 **73 个 item 上限全部保持原样**。
-不改 Java mod、地图生成 RNG、router 或决策引擎，不增加依赖。
+`V(S)=(E[T|S]+3*P(Heart|S))/60`，其中 T 是真实终止楼层；Heart 胜利规范到 57。模型估计后续发育和行为策略产生的期望，不假定当前牌组冻结。历史玩家策略与 AI 策略差异仍然是建模限制。
 
-## 已确认问题与修复
+原始行保存 terminal_known、terminal_floor、heart_victory。删失轨迹只监督已证实到达的端点，停止位置和 Heart 结果保持未知。run 级 split、post-action 快照、角色和可见 Boss 规则不变。终局差分回放算法不在本轮修改，需后续用原始 run 抽查历史快照。
 
-| 问题 | V4 行为 |
-|---|---|
-| 坐标跟随整数 flags 转换，105 个格子仅剩 4 种坐标 | 坐标始终为浮点数，顺序统一 `[x/6,y/14]`，Python／模型解码一致 |
-| 训练 visited 标历史候选，实战只标当前位置 | bit 2 改为 `current_candidate`；训练标当前行候选集合，实战标准确当前节点；全零表示未知 |
-| `parents` 重复／过时记录使入度偏大 | 两侧共用最终有效边去重、反向入度、出度和可达性计算，不修改地图生成器 |
-| 边没有显式传给模型 | 新增 `map_outgoing_mask[105]`：左／直／右为 bit 0／1／2，连接下一行 |
-| 推理的 item 上限依赖运行时 Config | 从 checkpoint 保存的 `item_token_budget` 加载 |
-| MHA 计算并丢弃注意力权重 | 保留 MHA，使用 `need_weights=False`；前向及梯度等价性有回归覆盖 |
+全局 11 维顺序冻结为 act_1、act_2、act_3、act_4、act_progress、floor_normalized、hp_ratio、hp_absolute、max_hp_absolute、gold_log、ascension。四段按 `[0,17)`、`[17,34)`、`[34,51)`、`[51,57]` 划分，是与价值端点一致的进度段；训练/推理共同解析，不依赖未来结果。段内进度为 `(floor-start)/(end-start)`，绝对楼层为 floor/57。资源归一化继续仅从完整 training split 的 99.5% 分位数拟合。
 
-普通边只接受下一行相邻三列，重复边去重、缺失目标忽略；非法在图内跳边报错。
-有效最后一行节点统一连虚拟 Boss，普通出边位域为 0、出度为 1。
-历史 token 仍只来自当前幕已经离开的房间。候选位置来自已观测路径前缀，绝不使用未来后缀消歧。
-`reachable` 本来就有显式特征；V4 增加的是节点之间的连接关系，不能再表述为“可达性只能靠坐标悟”。
+绿钥匙确认获得后跨幕保持 value=1、known=1，缺失后续地图不得清零；无法确认持有与否保持 unknown。Sapphire 在历史记录进入 Act IV 前仍为 unknown。
 
-## 契约与迁移
+105 格地图、浮点坐标 `[x/6,y/14]`、真实唯一边、出边方向、current_candidate、reachable 与八个已离开的 HISTORY 房间保持。归档当前位置仍只从已观测路径前缀推断。不改变地图生成 RNG/bookkeeping，不加入 router 计划。默认 192 维、5 层、4 heads、ReLU、Pre-LN、CLS，MHA `need_weights=False`。item 聚合/顺序及 73-item cap 保持。
 
-- preprocessing：`set-transformer-v10-current-edges`。
-- map-context：`map-context-v5-current-edges`。
-- checkpoint format：**11**，保存完整架构、item 上限、词表、归一化、训练先验、损失权重与实验设置。
-- 旧数据／format 10 及更早模型明确拒绝加载；需要在新目录重建、重训。不能把修复后的坐标解释强行套在旧权重上。
-- 宽度、层数、FFN、归一化、结构编码、latent 数量、坐标表示、池化和 register 都由 checkpoint 决定，不为每个实验重复提升格式号。
-- 新数据默认目录 `selectcard/processed_data_v4/`；旧数据、checkpoint 原样保留。生成物不提交。
+## 标签、结构化输出与价值
 
-## 实验配置
+| 当前段 | 有效细桶端点 | 有效未来粗桶端点 |
+|---|---|---|
+| 1 | 3/6/9/12/15/17 | 34/51/57 |
+| 2 | 20/23/26/29/32/34 | 51/57 |
+| 3 | 37/40/43/46/49/51 | 57 |
+| 4 | 54/57 | 无 |
 
-修复基线：192 维、5 层、4 heads、ReLU、LayerNorm、pre-LN、CLS；key／monotonic 权重 0.2／0.1。
-所有结构实验默认关闭。实验注册表在 `src/experiments.py`，可用 CLI 列出。
+移除所有 endpoint<=floor 的桶，按剩余端点排序。每个桶的起点是当前 floor 或前一个有效端点。粗桶从原始终止结果重新构造，不能简单复用同名细桶的标签。到达端点标 survival；终止时仅第一个未到达桶标 stop；后续桶屏蔽。
 
-| 配置 | 相对基线的改动 |
-|---|---|
-| `baseline` | 修复后的基线 |
-| `depth8` / `width256` | 单独加深／加宽 |
-| `gelu` / `swiglu` | 只改变 Transformer FFN；SwiGLU 隐层约 8d/3，取最近 8 的倍数 |
-| `rmsnorm` | attention block 和最终 norm；pre-LN 位置不变 |
-| `edges` | 三个出边 bit 的线性投影 |
-| `dag` / `node_mlp` | 逆拓扑后继聚合／同参数量无边控制 |
-| `latent16` / `latent32` | 可学习查询的交叉注意力汇总；保留向量维度和 73 个 item |
-| `dag_latent16` / `dag_latent32` | 仅在独立结果支持后测试组合 |
-| `key0` / `key005` / `key02` | 钥匙损失权重 0／0.05／0.2 |
-| `monotonic0` / `monotonic003` / `monotonic01` | 单调损失权重 0／0.03／0.1 |
-| `plr` | 仅 xy：每坐标 8 个可学习频率、保留原始坐标；二值特征不周期化 |
-| `cls_mean` | 拼接 CLS 和有效 item token 的 masked mean |
-| `register2` / `register4` | 增加 2／4 个内部计算 token，不减少 item 数量 |
+模型输出 ValueOutputs：hazards[23]、means[23]、heart[1]。hazard 前 20 项为原细端点，后三项为 coarse 34/51/57；mean 与 hazard 一一对应。固定 47 个标量通过命名结构访问。full_fine 控制组启用全部未来细桶，粗桶完全屏蔽；它也训练条件停止位置。
 
-DAG 从第 14 行逆序计算到第 0 行。每节点汇总最终有效后继的均值，
-采用 `norm(node + successor_mean + MLP(concat(node, successor_mean)))`；MLP 在所有行共享。
-无边控制使用相同参数，但后继均值与边信号均置零。直接后继残差为远端信息提供传播路径。
-latent 空地图使用安全零 key，随后把全部输出屏蔽，避免全屏蔽注意力 NaN。
-辅助 key 头重构当前已输入的钥匙状态，不是预测未来能否拿到钥匙。
+条件停止均值为 `mu=start+max(0,end-1-start)*sigmoid(mean_logit)`，只对已确认停在本桶的样本监督桶内归一化 MSE；宽度零时不需要位置梯度。概率质量 `q_k=h_k*prod(previous(1-h))`，于是：
 
-## 训练与晋级协议
+`E[T]=sum(q_k*mu_k)+57*prod(all_active(1-h))`
 
-初筛：train／val 各按 `SHA256("aiplayspire-v4-pilot:" + run_id)` 取前 1% 哈希范围，
-同一局全部状态共同入选；seed 42、8 epochs、batch 512、不提前停止。
-确认：完整训练／验证数据，20 epochs，seeds 42／43／44，基线与候选共同重跑。
-两阶段都保留前三轮上下文 curriculum，AdamW lr=2.8e-4、weight decay=0.01、梯度裁剪 1，余弦覆盖实际轮数。
-词表、归一化和先验从同一完整 training split 拟合并缓存，各候选共用；不使用 val／test 拟合。
-显存不足记录 `cuda_oom`，不静默改变 batch。默认训练入口执行初筛而非全量训练。
+`P(Heart)=prod(all_active(1-h))*sigmoid(heart_logit)`。
 
-训练只查看 train／val，不自动读取或评估 test。最终模型确认后显式选择 `--evaluation-split test`。
-评估输出各角色／进阶等级的 MAE、Heart PR-AUC、Brier／ECE、固定定义的 relative NLL。
-额外在固定 1% run-hash 探针集合上比较移除已观察 Egg／已知已收集钥匙的排序；unknown 钥匙不伪造标签。
-保存逐样本加权 NLL 分子／分母、run_id 和探针统计。比较时按整局成组 bootstrap，所有快照及随机种子保持成对。
-仅在三个确认种子、完整 val、完成 20 epochs、具备探针数据时允许晋级；
-NLL 差值 95% 区间上界必须小于 0，探针违反率不得显著恶化（差值区间下界不得大于 0）。
-否则保留基线。有效 bootstrap 不足 95% 也视为证据不足。比较工具流式读取配对导出，内存按局数而非全部快照增长。
-吞吐、参数量、显存和推理成本同时报告；不把合成测试、CPU 耗时当作 GPU 或通关收益证据。
+分布合成在 multiscale.py 统一实现，训练/推理/机制探针共用；生存乘积在 log 空间计算。无效输出不得参与价值、损失或梯度。E[T] 必须在 [floor,57]，停止质量与最终生存和为 1。
 
-## 运行命令
+默认损失为 `near_BCE + .25*far_BCE + .25*Heart_relative_NLL + .1*position_MSE + .2*key_BCE + .1*monotonic`。near/far 各按有效风险单元与固定进阶权重求均值；Heart 除以训练先验熵，下限 .05。空分组损失为零，覆盖数显式输出。原 macro_relative_nll 作为控制组保留，所有权重冻结在 checkpoint。
 
-以下均在 `selectcard/`，先激活 conda `spire`。数据重建与训练由操作者另行执行，本轮未运行。
-输出目录必须独立且未存在，避免覆盖已有模型。
+## 统计、评估与实验
+
+Cache 4 保存全细桶、多尺度两种风险统计及共同评估统计；词表、caps、进阶权重和统计均来自同一完整 training split。检查 positive/valid/rate 自洽，并与 manifest 中 train_positive_samples_by_target、train_valid_samples_by_target 以及 training_outcome_counts 的两种分辨率和共同目标逐项对账。无观测项以 valid=0 标识，评估输出空指标；不能将其当成已验证的 0 分。
+
+共同标签是 reach-17/34/51/57 与 Heart；已经到达的端点不计入未来评分。未完成但已观察到达的端点仍可监督。共同 NLL 固定为 `(四个有效里程碑的平均相对NLL+Heart相对NLL)/2`，Heart benchmark 权重始终 1，不受候选训练权重影响。输出 common_nll，relative_value_nll 是兼容报告别名。真实终止楼层 MAE 只用 terminal_known 行；统计基线的终止均值仅拟合训练结果。
+
+报告角色、进阶、当前楼层、距离 1–3/4–8/9–16/17+、细/粗桶覆盖与 37/57 的 near/far 覆盖。不同分辨率的条件 hazard 不直接横比。检查 Heart PR-AUC、Brier/ECE 和机制排序，不能将预测指标直接解释成通关增益。
+
+逐样本导出包含 run_id、sample_id、共同标签指纹、5 路加权 NLL 分子/分母、概率、真实楼层绝对误差、终止观测数和机制探针统计。按整局成组 bootstrap，种子和全部快照保持配对。共同 NLL 的差值 95% 区间上界<0，且 MAE/机制违反率无显著恶化时报告可晋级；证据不足保留参考组。单 seed 区间明确只表示 run 层不确定性。
+
+Pilot 默认固定 1% run-hash、8 轮；确认默认完整 train/val、10 轮、seed 42。batch 512、AdamW lr 2.8e-4、weight decay .01、clip 1、前三轮屏蔽 map/history、余弦覆盖实际预算，不提前停止。可另跑 43/44 检验稳定性，不强制三个 seed 或 20 轮。比较要求相同声明预算均已完成、种子集合及共同评估契约一致。
+
+五组由 train_multiscale10.sbatch 在普通作业内顺序运行：full_fine_legacy、full_fine_new、multiscale、multiscale+depth8、multiscale+width256。脚本按服务器模板显式加载 conda.sh 并激活 spire，先重建缺失的新数据并审计 train/val，再训练五组；已有完整新数据审计后复用。每组自动输出 val 评估导出；不读 test、不部署。每轮用共同 NLL 在完整上下文且通过真实楼层 MAE guard 的候选中选最优。final 文件保存选中权重和完整训练历史，不是强制最后一轮权重。
+
+## 版本与运行
+
+- checkpoint 12；preprocessing set-transformer-v11-multiscale；global-features-v7-floor；map-context-v6-persistent-keys；value target multiscale-hazard-v1；cache 4。
+- Format 11 及以前和旧数据明确拒绝加载；不得在原权重上重新解释目标或特征。
+- 模型冻结 resolution、架构、47 输出契约、全部权重、73-item cap、词表、caps、先验及可观测性。
+- evaluate_state 仍返回 [0,1] 标量；hazards/survival 仅返回有效端点。evaluate_state_distribution 增加 active_bins 的 kind/start/end/hazard/stop_mean/stop_probability/survival。不要为远期细桶补造概率。
+
+以下从 selectcard 执行，完整操作由用户在数据/GPU 机器独立运行：
 
 ```bash
-# 在新目录重建，不覆盖旧数据
-python src/data_pipeline.py --input-dir "STS Data" --output-dir processed_data_v4
-
-python src/train.py --list-experiments
-python src/train.py --experiment baseline --stage pilot --data-dir processed_data_v4
-python src/train.py --experiment gelu --stage pilot --data-dir processed_data_v4
-
-# 确认阶段对基线和候选分别执行三个 seed
-python src/train.py --experiment baseline --stage confirm --seed 42 --data-dir processed_data_v4
-python src/train.py --experiment baseline --stage confirm --seed 43 --data-dir processed_data_v4
-python src/train.py --experiment baseline --stage confirm --seed 44 --data-dir processed_data_v4
-
-# 只读评估：使用最终 sts_value_model_final.pth，以保留完整训练轮数证据
-python src/train.py --evaluate --checkpoint checkpoints/v4/baseline/confirm/42/sts_value_model_final.pth --data-dir processed_data_v4 --output-dir experiment_results/baseline-42
-
-# --test-only 是 --evaluate 的别名，不接受位置参数；默认评估 val
-# 最终选型完成后才显式 --evaluation-split test
-
-# 初筛报告：每个独立类别只推荐一个改善候选，否则保留基线
-python src/evaluation_v4.py --pilot-metrics experiment_results/baseline-pilot/val_metrics.json experiment_results/gelu-pilot/val_metrics.json --output experiment_results/pilot-selection.json
-
-# baseline/candidate 各提供三个 seed 的 val_predictions.jsonl
-python src/evaluation_v4.py --baseline baseline42.jsonl baseline43.jsonl baseline44.jsonl --candidate candidate42.jsonl candidate43.jsonl candidate44.jsonl --output experiment_results/comparison.json
-
-# 测目标 GPU；本地 CPU 仅供独立报告，不能推断 GPU 加速
-python src/benchmark_v4.py --experiment baseline --device cuda --compare-attention --output experiment_results/benchmark-cuda.json
-python src/benchmark_v4.py --experiment baseline --device cpu --output experiment_results/benchmark-cpu.json
-
-# 已独立晋级的配置可显式组合；冲突参数会报错
-python src/train.py --experiment gelu,rmsnorm --stage pilot --data-dir processed_data_v4
+conda activate spire
+python src/rebuild_multiscale.py --input-dir "STS Data"
+python src/inspect_multiscale.py --split train --output experiment_results/multiscale-train-audit.json
+python src/inspect_multiscale.py --split val --output experiment_results/multiscale-val-audit.json
+sbatch train_multiscale10.sbatch
+python src/evaluation_v4.py --baseline <reference-val_predictions.jsonl> --candidate <candidate-val_predictions.jsonl> --output experiment_results/multiscale-comparison.json
 ```
 
-训练输出 `experiment.json`、`status.json`、best/final checkpoint、`training_metrics.json` 和训练图。
-只读评估输出独立 `val_metrics.json`／`val_predictions.jsonl`；不修改源 checkpoint。
-benchmark 固定 batch 1／8／32，预热 10 次、测量 100 次，记录 median／p95、吞吐及 GPU 峰值显存。
+重建先保留 `processed_data_v4/a10plus_multiscale_v1_base/`，通过可见 Boss 解析与审计后生成 `processed_data_v4/a10plus_multiscale_v1/`；所有输出必须为新路径。已有数据、模型与报告不覆盖。训练文件在 checkpoints/v4/a10plus_multiscale10，评估在 experiment_results/a10plus_multiscale10。
 
 ```bash
 cd src
-python -m unittest test_map_context.py test_value_network_v2.py test_value_network_v3.py test_value_network_v4.py test_data_pipeline.py test_api.py
-# 仓库根
-python -m unittest discover -s sts_ai_framework/tests -t .
+python -m unittest test_multiscale test_map_context test_value_network_v2 test_value_network_v3 test_value_network_v4 test_data_pipeline test_api
 ```
 
-新回归使用合成图，不依赖归档 run。另有 8 条样本的临时 CPU 训练／只读评估冒烟，验证完整链路，不是研究训练。
-旧归档测试在原始数据缺失时仍会跳过，需单独报告。
-
-## 修正原方案的证据与文献结论
-
-- 31M / 2.44M 约 **12.7**，不是 13,000。相邻状态相关，不能由该比例直接判断容量。
-- `v3_train_62013.log` 是 map-context-v2、2,439,576 参数；引用的 0.3518→0.3524 是 epoch 8 内累计训练 loss。
-- 2,440,344 参数来自 `train_v3_75460.log`。其 val relative NLL 在 epoch 8 为 3.9437，epoch 15 降至 3.8002。
-  日志记录 A100 80GB；不能用它推断 Blackwell 32GB 的 kernel 或显存瓶颈。
-- 扩容、深度优先、GELU/SwiGLU/RMSNorm、PLR、register 和 latent 的质量收益都是待检验假设，不是“免费收益”。
-- MHA 可复用 SDPA；先 `need_weights=False`，是否使用融合 GPU kernel 仍需目标环境实测。
-- bucket-hazard 更贴近有删失的离散时间生存模型，不等同于 C51 的类别分布／Bellman 训练。
-- 一个线性输入投影不代表整个注意力＋非线性网络无法表达邻接；坐标嵌入也不能替代真实边关系。
-
-参考：[PyTorch MHA](https://docs.pytorch.org/docs/2.7/generated/torch.nn.MultiheadAttention.html)、
-[GLU variants](https://arxiv.org/abs/2002.05202)、[RMSNorm](https://arxiv.org/abs/1910.07467)、
-[数值嵌入](https://arxiv.org/abs/2203.05556)、[Perceiver](https://arxiv.org/abs/2103.03206)、
-[Graphormer](https://arxiv.org/abs/2106.05234)、[离散时间生存模型](https://arxiv.org/abs/1805.00917)。
-这些论文支持实验动机，不证明本项目收益。PMA、多任务自动加权、消融分支退役暂不实现。
+原始归档缺失时部分 test_map_context 测试跳过，必须继续执行无需归档的 test_multiscale 合成回归及构建→短训练→保存→只读评估→动作评分闭环。完整地图回验、GPU 吞吐和实战收益只能在相应环境验证。

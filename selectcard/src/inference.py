@@ -1,3 +1,11 @@
+import math
+try:
+    from .multiscale import distribution
+    from .data_contract import active_bins, HAZARD_ENDPOINTS, COARSE_ENDPOINTS
+except ImportError:
+    from multiscale import distribution
+    from data_contract import active_bins, HAZARD_ENDPOINTS, COARSE_ENDPOINTS
+
 import torch
 import copy
 from functools import lru_cache
@@ -129,44 +137,33 @@ def _is_excluded(card, exclude_ids):
     return any(parse_item_name(excluded) == wanted for excluded in exclude_ids)
 
 
-def compose_hazard_value(hazards, heart_conditional, floor, heart_bonus_floors=None):
-    """Compose monotone progress survival into an interpretable scalar value."""
-    if set(hazards) != set(HAZARD_ENDPOINTS):
-        raise ValueError("hazards must define every configured bucket endpoint")
-    floor = float(floor)
-    bonus = float(
-        Config.HEART_WIN_BONUS_FLOORS
-        if heart_bonus_floors is None
-        else heart_bonus_floors
-    )
-    if not 0.0 <= floor <= HAZARD_ENDPOINTS[-1]:
-        raise ValueError("floor must be between 0 and 57")
-    if bonus < 0.0:
-        raise ValueError("heart_bonus_floors must be non-negative")
-    if not 0.0 <= float(heart_conditional) <= 1.0:
-        raise ValueError("heart_conditional must be a probability")
-
-    survival = {}
-    cumulative = 1.0
-    expected_floor = floor
-    previous = 0.0
-    for endpoint in HAZARD_ENDPOINTS:
-        probability = float(hazards[endpoint])
-        if not 0.0 <= probability <= 1.0:
-            raise ValueError("hazard values must be probabilities")
-        if endpoint <= floor:
-            survival[endpoint] = 1.0
-        else:
-            cumulative *= 1.0 - probability
-            survival[endpoint] = cumulative
-            width = endpoint - max(floor, previous)
-            expected_floor += width * cumulative
-        previous = float(endpoint)
-    heart_probability = cumulative * float(heart_conditional)
-    scalar = (expected_floor + bonus * heart_probability) / (
-        HAZARD_ENDPOINTS[-1] + bonus
-    )
-    return survival, heart_probability, expected_floor, scalar
+def compose_hazard_value(hazards, heart_conditional, floor, heart_bonus_floors=None,
+                         *, stop_means, resolution="multiscale"):
+    """Compose active-bin probabilities through the shared format-12 calculation."""
+    try:
+        from .multiscale import ValueOutputs
+    except ImportError:
+        from multiscale import ValueOutputs
+    bins = active_bins(float(floor), resolution)
+    endpoints = {end for _,_,_,end in bins}
+    if set(hazards) != endpoints or set(stop_means) != endpoints:
+        raise ValueError("Probabilities and stopping means must define exactly the active bins")
+    bonus = Config.HEART_WIN_BONUS_FLOORS if heart_bonus_floors is None else float(heart_bonus_floors)
+    if not math.isfinite(bonus) or bonus < 0 or not math.isfinite(float(heart_conditional)) or not 0 <= heart_conditional <= 1:
+        raise ValueError("Invalid Heart probability or bonus")
+    flat = torch.zeros((1,47),dtype=torch.float64)
+    for index,_,start,end in bins:
+        probability, mean = float(hazards[end]),float(stop_means[end])
+        if not math.isfinite(probability) or not 0 <= probability <= 1 or not start <= mean <= end-1:
+            raise ValueError("Invalid stopping probability or conditional mean")
+        flat[0,index] = torch.logit(torch.tensor(probability,dtype=torch.float64))
+        width = end-1-start
+        flat[0,23+index] = torch.logit(torch.tensor((mean-start)/width if width else .5,dtype=torch.float64))
+    flat[0,-1] = torch.logit(torch.tensor(float(heart_conditional),dtype=torch.float64))
+    d = distribution(ValueOutputs.from_flat(flat),torch.tensor([float(floor)],dtype=torch.float64),resolution)
+    survival = {end:float(d["survival"][0,index]) for index,_,_,end in bins}
+    heart,expected = float(d["heart_probability"][0]),float(d["expected_floor"][0])
+    return survival,heart,expected,(expected+bonus*heart)/(57+bonus)
 
 class InferenceTokenizer:
     """Use the same frozen canonical item encoding as training."""
@@ -210,6 +207,7 @@ class STSInferenceEngine:
                 "n_heads": Config.N_HEADS,
                 "n_layers": Config.N_LAYERS,
                 "num_global_features": Config.NUM_GLOBAL_FEATURES,
+                "resolution_mode": Config.RESOLUTION_MODE,
                 "num_characters": NUM_CHARACTER_IDS,
                 "num_bosses": NUM_BOSS_IDS,
                 "dropout": Config.DROPOUT,
@@ -292,49 +290,46 @@ class STSInferenceEngine:
         return logits
 
     def _evaluate_state_distribution(self, state, heart_bonus_floors=None):
+        bonus = Config.HEART_WIN_BONUS_FLOORS if heart_bonus_floors is None else float(heart_bonus_floors)
+        if not math.isfinite(bonus) or bonus < 0:
+            raise ValueError("Heart bonus must be finite and non-negative")
+        floor = float(state["floor"])
         with torch.no_grad():
-            logits = self._model_logits(state)
-            probabilities = torch.sigmoid(logits).squeeze(0).tolist()
-        hazards = dict(zip(HAZARD_ENDPOINTS, probabilities[:HAZARD_OUTPUT_DIM]))
-        heart_conditional = probabilities[HAZARD_OUTPUT_DIM]
-        survival, heart_probability, expected_floor, scalar = compose_hazard_value(
-            hazards,
-            heart_conditional,
-            float(state["floor"]),
-            heart_bonus_floors=heart_bonus_floors,
-        )
-        result = {
-            "hazards": hazards,
-            "survival": survival,
-            "heart_conditional": heart_conditional,
-            "heart_probability": heart_probability,
-            "expected_floor": expected_floor,
-            "value": scalar,
-        }
+            outputs = self._model_logits(state)
+            d = distribution(outputs, torch.tensor([floor]), self.model.model_config["resolution_mode"])
+        bins, hazards, survival = [], {}, {}
+        for index, kind, start, end in active_bins(floor, self.model.model_config["resolution_mode"]):
+            h = float(torch.sigmoid(outputs.hazards[0, index]))
+            mu, alive = float(d["means"][0, index]), float(d["survival"][0, index])
+            bins.append(dict(kind=kind, start=start, end=end, hazard=h, stop_mean=mu,
+                             stop_probability=float(d["stop_mass"][0,index]), survival=alive))
+            hazards[end], survival[end] = h, alive
+        expected_floor, heart = float(d["expected_floor"][0]), float(d["heart_probability"][0])
+        result = dict(active_bins=bins, hazards=hazards, survival=survival,
+                      heart_conditional=float(torch.sigmoid(outputs.heart[0])), heart_probability=heart,
+                      expected_floor=expected_floor, value=(expected_floor+bonus*heart)/(57+bonus))
         self._last_evaluation = result
         return result
 
+    def evaluate_state_distribution(self, state):
+        return self._evaluate_state_distribution(state)
+
     def evaluate_state_hazards(self, state):
-        """Return calibrated stopping hazards keyed by bucket endpoint."""
         return self._evaluate_state_distribution(state)["hazards"]
 
     def evaluate_state_survival(self, state):
-        """Return monotone cumulative progress probabilities by endpoint."""
         return self._evaluate_state_distribution(state)["survival"]
 
     def evaluate_state(self, state, heart_bonus_floors=None):
-        """Return expected progress plus the configured Heart-win premium."""
         return self._evaluate_state_distribution(state, heart_bonus_floors)["value"]
 
     def evaluate_state_logits(self, state):
-        """Evaluate a single state dictionary and return raw logits."""
         with torch.no_grad():
-            logits = self._model_logits(state)
-        values = logits.squeeze(0).tolist()
-        return {
-            "hazards": dict(zip(HAZARD_ENDPOINTS, values[:HAZARD_OUTPUT_DIM])),
-            "heart_conditional": values[HAZARD_OUTPUT_DIM],
-        }
+            outputs = self._model_logits(state)
+        bins = active_bins(float(state["floor"]), self.model.model_config["resolution_mode"])
+        return dict(hazards={end: float(outputs.hazards[0,i]) for i,_,_,end in bins},
+                    stop_mean_logits={end: float(outputs.means[0,i]) for i,_,_,end in bins},
+                    heart_conditional=float(outputs.heart[0]))
 
     def evaluate_state_keys(self, state):
         """Return P(ruby/emerald/sapphire collected | S) from the key head."""
@@ -353,7 +348,7 @@ class STSInferenceEngine:
             buckets = " ".join(
                 f"h{endpoint}={result['hazards'][endpoint]:.3f}/"
                 f"S{endpoint}={result['survival'][endpoint]:.3f}"
-                for endpoint in HAZARD_ENDPOINTS
+                for endpoint in result["hazards"]
                 if endpoint > 49
             )
             print(

@@ -1,43 +1,35 @@
-# selectcard — V4 value network
+# selectcard — format-12 multiscale value network
 
-Use the root agent guide. Python dependencies are already in conda `spire`; do not add dependencies, commit generated datasets/checkpoints, or start full training without the task requiring it.
+Follow the root agent guide and `MODEL_V4_DESIGN.md`. Dependencies are in conda `spire`; do not add dependencies, overwrite old artifacts, or run full rebuilding/GPU training without that task being requested.
 
-## Contracts and architecture
+## Contracts
 
-- V4 repairs coordinates, current-position semantics and graph packing before testing architecture changes.
-- Preprocessing: `set-transformer-v10-current-edges`; map context: `map-context-v5-current-edges`; checkpoint format **11**. Older data/checkpoints require rebuilding/retraining.
-- Main value target stays `bucket-hazard-v1`: 20 stopping-hazard outputs and a conditional Heart output. Inference uses expected terminal floor plus the Heart premium.
-- Default configured backbone: d_model=192, layers=5, heads=4, ReLU FFN, LayerNorm, pre-LN, early global token, CLS pooling. MHA uses `need_weights=False`.
-- Unique `(item name, upgrade)` records retain count embeddings; item order and the **73-item map-model cap** are unchanged.
-- Map grid: 105 cells, row-major `y*7+x`; float coordinates `[x/6,y/14]`. Bit 2 means `current_candidate`, not historical visited.
-- Both archived and live contexts normalize unique final edges, derive true in/out degrees and reachability, and pack left/straight/right next-row edges into `map_outgoing_mask`. Row 14 connects to a virtual Boss, out-degree 1 and ordinary outgoing mask 0.
-- Archived positions are candidate sets from observed prefixes. Live positions are exact when known. Unknown position has all-zero current flags. HISTORY retains eight already-left rooms from this act, most recent first.
-- Keys keep value-plus-known-mask observability. Unknown Sapphire is not a negative label. Auxiliary key prediction reconstructs current known key state.
-- Experimental FFNs, RMSNorm, edges/DAG, 16/32 latents, PLR, CLS+item-mean and registers default off. Checkpoints freeze every architecture choice and the item budget.
-- DAG uses reverse row order with successor aggregation and a shared residual MLP. Independent-node MLP is parameter matched. Empty maps are safely masked during latent pooling.
-- See root `MODEL_V4_DESIGN.md` for rationale, experimental protocol and migration.
+- Format 12; preprocessing `set-transformer-v11-multiscale`; map context `map-context-v6-persistent-keys`; global features `global-features-v7-floor`; cache 4. Older inputs require rebuilding/retraining.
+- Value target `multiscale-hazard-v1`: current progress band uses fine hazards, later bands use coarse 34/51/57 hazards. There are 23 hazard and stopping-position heads plus conditional Heart. Use the shared distribution for training, mechanics probes and inference; ignore inactive heads.
+- Raw outcomes are `terminal_known`, `terminal_floor`, `heart_victory`. Heart wins normalize to 57; censored futures never become negative Heart labels or stopping-position targets.
+- Global inputs have 11 named fields. Use the feature-name lookup for ascension. Four progress bands and absolute floor distinguish late states.
+- Green keys persist across acts and missing later maps. Unknown Sapphire stays unknown before Act IV.
+- Preserve 105 map cells, current-candidate semantics, unique final edges, outgoing direction masks, float xy, eight past HISTORY rooms, stable CHARACTER and visible BOSS. Do not inject router plans or change map RNG behavior.
+- Preserve item aggregation, order and the 73-item map-model cap. Optional backbone ablations remain off by default. MHA uses `need_weights=False`.
+- Freeze resolution, all loss weights, full training-only vocabulary/normalization/priors in checkpoints. Audit prior counts against manifest; invalid old caches must not be reused.
 
 ## Commands (from selectcard)
 
 ```bash
 conda activate spire
-python src/data_pipeline.py --input-dir "STS Data" --output-dir processed_data_v4
-python src/train.py --list-experiments
-python src/train.py --experiment baseline --stage pilot --data-dir processed_data_v4
-python src/train.py --experiment baseline --stage confirm --seed 42 --data-dir processed_data_v4
-python src/train.py --evaluate --checkpoint checkpoints/v4/baseline/confirm/42/sts_value_model_final.pth --data-dir processed_data_v4 --output-dir experiment_results/baseline-42
-python src/benchmark_v4.py --experiment baseline --device cuda --compare-attention --output experiment_results/benchmark-cuda.json
-uvicorn src.api:app
+python src/rebuild_multiscale.py --input-dir "STS Data"
+python src/inspect_multiscale.py --split train --output experiment_results/multiscale-audit.json
+python src/train.py --experiment baseline --stage pilot
+python src/train.py --experiment multiscale --stage confirm --seed 42 --epochs 10
+# Regular job: activate spire via the server's conda.sh, rebuild/audit data, then run five experiments.
+sbatch train_multiscale10.sbatch
+python src/train.py --evaluate --checkpoint <format12.pth> --output-dir <new-directory>
 cd src
-python -m unittest test_map_context.py test_value_network_v2.py test_value_network_v3.py test_value_network_v4.py test_data_pipeline.py test_api.py
+python -m unittest test_multiscale test_map_context test_value_network_v2 test_value_network_v3 test_value_network_v4 test_data_pipeline test_api
 ```
 
-Default CLI stage is pilot: deterministic 1% run hash, seed 42, 8 epochs. Confirm uses full data, 20 epochs, seeds 42/43/44. Batch remains 512, AdamW lr 2.8e-4, first three epochs mask map/history. Priors, normalization and vocabulary share a full-training-only cache across candidates. No automatic test-set evaluation; test requires explicit `--evaluation-split test` after model selection.
+Pilot is fixed 1% run hash, 8 epochs. Confirm is full train/val, 10 epochs, default seed 42. Batch 512, lr 2.8e-4, first three epochs mask map/history. Full rebuilding and GPU jobs remain separate tasks.
 
-`--test-only` aliases read-only evaluation and requires `--checkpoint` plus a separate output directory. It is a boolean flag, not a checkpoint-path option. Evaluation loads frozen checkpoint configuration, emits grouped metrics and run-level comparison exports, and never rewrites the source checkpoint.
+Common validation uses reach-17/34/51/57 and Heart with fixed benchmark weights, independent of candidate training loss. Select by common NLL after the raw-floor MAE guard. Bootstrap pairs whole runs and identical seed sets; the declared training budget must be completed. No fixed 20-epoch/three-seed gate. Missing evidence keeps the reference; never deploy automatically or evaluate test without explicit `--evaluation-split test`.
 
-Use `evaluation_v4.py --baseline ... --candidate ... --output ...` with paired validation exports. Promotion requires completed full-data 20-epoch confirmation across all three seeds, a strictly negative upper 95% run-cluster-bootstrap NLL difference, and no significant mechanism-ordering regression. Insufficient evidence keeps the baseline. No automatic deployment.
-
-The model's `STSInferenceEngine` simulates candidate next states for framework/API decisions. Keep vanilla content validation, state timing, character schema, unknown-key masks and the scalar value semantics consistent across training and inference.
-
-Do not modify the map generator to clean up duplicate parents: its behavior mirrors the game. Derive graph features from final unique edges instead. Generated V4 data, checkpoints, caches and experiment reports stay ignored.
+Keep old datasets/checkpoints/results unchanged. Generated artifacts stay ignored. Terminal-deck reconciliation is outside this change and remains a raw-run audit follow-up.
