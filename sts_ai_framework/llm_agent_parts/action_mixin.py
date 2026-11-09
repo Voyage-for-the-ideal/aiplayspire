@@ -305,8 +305,10 @@ class ActionMixin:
 
             # Prefer the structured, locale-independent GRID metadata.  It also
             # represents the exact legal target set, unlike the player's deck.
+            selected_uuids = {card.uuid for card in getattr(state, "grid_selected_cards", None) or []}
             for card in getattr(state, "grid_cards", None) or []:
-                if card.reference == card_to_select and card.choice_index is not None:
+                if (card.reference == card_to_select and card.choice_index is not None
+                        and card.uuid not in selected_uuids):
                     if hasattr(self, "_pending_grid") and self._pending_grid:
                         self._pending_grid["selected_count"] = selected_count + 1
                     print(Fore.MAGENTA +
@@ -440,6 +442,22 @@ class ActionMixin:
             target_ids = self.value_engine.rank_cards_for_purpose(
                 current_state, purpose, num_to_select, exclude_ids=exclude_ids or None
             )
+
+            if target_ids and num_to_select > 1 and grid_cards is not None:
+                # Ranking returns unique references; GRID selects actual card
+                # instances. Expand duplicates, then fill mandatory slots from
+                # the legal grid if there are too few non-curse targets.
+                counts = {}
+                for card in grid_cards:
+                    counts[card.reference] = counts.get(card.reference, 0) + 1
+                expanded = []
+                for ref in dict.fromkeys(target_ids):
+                    expanded.extend([ref] * counts.pop(ref, 0))
+                for card in grid_cards:
+                    if counts.get(card.reference, 0):
+                        expanded.append(card.reference)
+                        counts[card.reference] -= 1
+                target_ids = expanded[:num_to_select]
 
             if target_ids:
                 self._pending_grid = {

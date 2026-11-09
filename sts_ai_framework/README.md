@@ -122,6 +122,14 @@ python -m sts_ai_framework --model deepseek-flash[1m] --interval 2.0
 5. --ascension：自动重开进阶等级（默认取 .env 的 ASCENSION，0 = 普通）。
 6. --no-auto-restart：关闭自动重开。
 7. --restart-delay：对局结束/开局提交后的额外等待（秒）。
+8. --policy-checkpoint：离线非战斗策略 checkpoint 路径；默认关闭。
+9. --policy-mode：策略运行模式 `shadow`（默认，仅影子评分）或 `policy`（接管显式启用的决策类型）。
+10. --policy-types：显式启用策略的决策类型列表；其余保持影子评分。
+11. --policy-trace-dir：策略 trace 输出目录，同时用于采集训练数据。
+12. --policy-runtime-manifest：实际 mod/战斗配置指纹 JSON，作为采集元数据保存。
+13. --max-runs：采集模式下最多运行的局数（需正整数并配合 --policy-trace-dir）。
+
+策略数据、训练与评估说明见 [docs/NONCOMBAT_POLICY.md](../docs/NONCOMBAT_POLICY.md)。
 
 ## 通信与动作协议
 

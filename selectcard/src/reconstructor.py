@@ -23,7 +23,14 @@ class RunReconstructor:
         'WATCHER': 'PureWater'
     }
 
-    def __init__(self, run_data, content_catalog=None):
+    def __init__(self, run_data, content_catalog=None, *, mode="value"):
+        if mode not in ("value", "policy"):
+            raise ValueError("unknown reconstruction mode")
+        self.mode = mode
+        if mode == "policy":
+            from selectcard.policy.run_replay import CausalRunReplay
+            self.policy_replay = CausalRunReplay(run_data, content_catalog)
+            return
         self.raw_data = run_data
         self.content_catalog = content_catalog
         self.character = self.raw_data.get('character_chosen', 'IRONCLAD')
@@ -428,6 +435,9 @@ class RunReconstructor:
         return True
         
     def replay(self) -> Generator[Dict, None, None]:
+        if self.mode == "policy":
+            yield from self.policy_replay.replay()
+            return
         implicit_applied_floors = set()
 
         def apply_implicit_changes(floor):

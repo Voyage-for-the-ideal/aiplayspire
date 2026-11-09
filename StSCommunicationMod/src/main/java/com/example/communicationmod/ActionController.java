@@ -85,10 +85,8 @@ public class ActionController {
                         System.err.println("Cannot use potions outside of a run.");
                         break;
                     }
-                    if (AbstractDungeon.getCurrRoom().phase != AbstractRoom.RoomPhase.COMBAT) {
-                        System.err.println("Cannot use potion outside of combat.");
-                        break;
-                    }
+                    // The real potion.canUse() guard below decides whether a
+                    // potion is usable outside combat (e.g. Fruit Juice).
                     if (!command.has("potion_index")) {
                         System.err.println("Potion command missing potion_index.");
                         break;
@@ -97,6 +95,14 @@ public class ActionController {
                     int potionTargetIndex = command.has("target_index") ? command.get("target_index").getAsInt() : -1;
                     System.out.println("Executing Potion Command: potionIndex=" + potionIndex + ", targetIndex=" + potionTargetIndex);
                     usePotion(potionIndex, potionTargetIndex);
+                    break;
+                case "discard_potion":
+                    if (!inRun || !command.has("potion_index")) break;
+                    int discardIndex = command.get("potion_index").getAsInt();
+                    if (discardIndex < 0 || discardIndex >= AbstractDungeon.player.potions.size()) break;
+                    AbstractPotion discarded = AbstractDungeon.player.potions.get(discardIndex);
+                    if (!(discarded instanceof PotionSlot) && discarded.canDiscard())
+                        AbstractDungeon.topPanel.destroyPotion(discardIndex);
                     break;
                 case "set_ascension":
                     if (!command.has("level")) {

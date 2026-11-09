@@ -53,9 +53,14 @@ def _is_action_effective(prev_state, next_state, action) -> bool:
             return True
         if len(next_state.potions) != len(prev_state.potions):
             return True
+        if [p.id for p in next_state.potions] != [p.id for p in prev_state.potions]:
+            return True
         if [m.current_hp for m in next_state.monsters] != [m.current_hp for m in prev_state.monsters]:
             return True
         return False
+
+    if action.type == ActionType.DISCARD_POTION:
+        return [p.id for p in next_state.potions] != [p.id for p in prev_state.potions]
 
     if action.type == ActionType.END_TURN:
         if prev_state.is_end_turn_button_enabled and not next_state.is_end_turn_button_enabled:
@@ -68,6 +73,8 @@ def _is_action_effective(prev_state, next_state, action) -> bool:
     if next_state.screen_type != prev_state.screen_type:
         return True
     if next_state.choice_list != prev_state.choice_list:
+        return True
+    if next_state.grid_selected_count != prev_state.grid_selected_count:
         return True
     # 角色选择界面的字段变化（选角/难度调整不改变屏幕与选项列表）
     if getattr(next_state, "selected_character", None) != getattr(prev_state, "selected_character", None):
@@ -99,6 +106,7 @@ def _fetch_post_action_state(client, retries: int = 2, delay: float = 0.15):
 def main():
     parser = argparse.ArgumentParser(description="运行杀戮尖塔 AI Agent")
     parser.add_argument("--model", type=str, default=LLM_MODEL, help="使用的模型 (例如 deepseek-flash)")
+    parser.add_argument("--api-base-url", default=STS_API_BASE_URL, help="可指定隔离游戏的 CommunicationMod 地址")
     parser.add_argument("--interval", type=float, default=2.0, help="行动间隔时间 (秒)")
     parser.add_argument("--debug-prompt-file", type=str, default=DEBUG_PROMPT_FILE, help="将最新 Prompt 持续写入到指定文件，便于调试")
     parser.add_argument("--character", type=str, default=CHARACTER,
@@ -110,7 +118,15 @@ def main():
     parser.set_defaults(auto_restart=AUTO_RESTART)
     parser.add_argument("--restart-delay", type=float, default=RESTART_DELAY,
                         help="对局结束/开局提交后的额外等待时间 (秒)")
+    parser.add_argument("--policy-checkpoint", default=None)
+    parser.add_argument("--policy-mode", choices=("shadow", "policy"), default="shadow")
+    parser.add_argument("--policy-types", nargs="*", default=[], help="显式启用的策略决策类型；其余保持影子评分")
+    parser.add_argument("--policy-trace-dir", default=None)
+    parser.add_argument("--policy-runtime-manifest", default=None, help="实际 mod/战斗配置指纹 JSON，作为采集元数据保存")
+    parser.add_argument("--max-runs", type=int, default=None)
     args = parser.parse_args()
+    if args.max_runs is not None and (args.max_runs <= 0 or not args.policy_trace_dir):
+        parser.error("--max-runs requires a positive count and --policy-trace-dir")
 
     # 安装运行日志:此后所有终端输出同时写入 debug/run_YYYYMMDD_HHMMSS.log
     run_log_path = setup_run_log(RUN_LOG_DIR)
@@ -118,7 +134,7 @@ def main():
 
     print(Fore.YELLOW + "正在启动杀戮尖塔 AI 框架..." + Style.RESET_ALL)
     print(f"模型: {args.model}")
-    print(f"连接到 Mod 地址: {STS_API_BASE_URL}")
+    print(f"连接到 Mod 地址: {args.api_base_url}")
     if args.auto_restart:
         print(f"自动重开: 开启 (角色: {args.character}, 进阶: A{args.ascension})")
     else:
@@ -127,7 +143,7 @@ def main():
         print(f"Prompt 调试文件: {args.debug_prompt_file}")
     print(f"运行日志: {run_log_path}")
 
-    client = GameClient(base_url=STS_API_BASE_URL)
+    client = GameClient(base_url=args.api_base_url)
     
     # Check connection
     print("正在检查与 Mod 的连接...")
@@ -145,7 +161,30 @@ def main():
 
     print(Fore.GREEN + "连接成功!" + Style.RESET_ALL)
 
+    trace_recorder = None
+    if args.policy_trace_dir:
+        import json
+        from sts_ai_framework.policy_trace import TraceRecorder, TracingGameClient
+        metadata = {"policy_checkpoint": args.policy_checkpoint, "mode": args.policy_mode, "enabled_types": args.policy_types}
+        if args.policy_runtime_manifest:
+            with open(args.policy_runtime_manifest, encoding="utf-8") as handle:
+                metadata["runtime"] = json.load(handle)
+        trace_recorder = TraceRecorder(args.policy_trace_dir, metadata=metadata)
+        client = TracingGameClient(client, trace_recorder)
     agent = LLMAgent(model_name=args.model, game_client=client, debug_prompt_file=args.debug_prompt_file or None)
+    if args.policy_checkpoint:
+        from sts_ai_framework.policy_runtime import PolicyAgent
+        try:
+            agent = PolicyAgent(agent, args.policy_checkpoint, mode=args.policy_mode, enabled_types=args.policy_types)
+        except Exception:
+            logging.exception("策略 checkpoint 加载失败，保留现有 Agent")
+    if trace_recorder is not None:
+        trace_recorder.metadata["policy_loaded"] = hasattr(agent, "artifact")
+        client.behavior_provider = lambda: getattr(agent, "last_behavior", None) or {"source": "baseline"}
+        if args.policy_checkpoint and trace_recorder.metadata["policy_loaded"]:
+            import hashlib
+            with open(args.policy_checkpoint, "rb") as handle:
+                trace_recorder.metadata["policy_sha256"] = hashlib.sha256(handle.read()).hexdigest()
     
     # 重试计数器
     retry_count = 0
@@ -172,6 +211,9 @@ def main():
                 continue
 
             # 如果成功获取状态，重置计数器并清除之前的重试消息
+            if trace_recorder is not None:
+                if args.max_runs is not None and trace_recorder.completed_runs >= args.max_runs:
+                    break
             if retry_count > 0:
                 sys.stdout.write("\n") # 换行
                 retry_count = 0
@@ -364,6 +406,8 @@ def main():
     except KeyboardInterrupt:
         print("\n正在停止 AI...")
     finally:
+        if trace_recorder is not None:
+            trace_recorder.close()
         # 写入残留行缓冲、恢复 sys.stdout,并关闭日志 handler 确保全部落盘
         tee.close()
         logging.shutdown()

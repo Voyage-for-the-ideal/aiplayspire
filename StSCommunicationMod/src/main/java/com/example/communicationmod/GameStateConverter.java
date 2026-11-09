@@ -72,6 +72,13 @@ public class GameStateConverter {
         }
 
         Map<String, Object> state = new HashMap<>();
+        state.put("seed_group", java.util.UUID.nameUUIDFromBytes(
+                ("seed:" + Settings.seed).getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString());
+        Map<String, Object> runMode = new LinkedHashMap<>();
+        runMode.put("is_daily", Settings.isDailyRun); runMode.put("is_endless", Settings.isEndless);
+        runMode.put("is_trial", Settings.isTrial); runMode.put("is_beta", Settings.isBeta);
+        runMode.put("chose_seed", Settings.seedSet); runMode.put("special_seed", Settings.specialSeed);
+        state.put("run_mode", runMode);
 
         // Player Info
         Map<String, Object> playerInfo = new HashMap<>();
@@ -135,6 +142,11 @@ public class GameStateConverter {
             state.put("game_over_reason", getGameOverReason());
         }
         state.put("choice_list", ChoiceScreenUtils.getCurrentChoiceList());
+        if (currentChoiceType == ChoiceScreenUtils.ChoiceType.SHOP_SCREEN) {
+            state.put("shop_inventory", ShopInventory.items());
+            state.put("shop_purge_cost", com.megacrit.cardcrawl.shop.ShopScreen.actualPurgeCost);
+            state.put("shop_purge_available", AbstractDungeon.shopScreen.purgeAvailable);
+        }
         state.put("can_proceed", ChoiceScreenUtils.isConfirmButtonAvailable());
         state.put("can_cancel", ChoiceScreenUtils.isCancelButtonAvailable());
         Map<String, Object> keys = new LinkedHashMap<>();
@@ -179,6 +191,7 @@ public class GameStateConverter {
                 (java.util.ArrayList<AbstractCard>) ReflectionHacks.getPrivate(
                     grid, GridCardSelectScreen.class, "selectedCards");
             state.put("grid_selected_count", selectedCards.size());
+            state.put("grid_selected_cards", convertCardGroup(selectedCards));
 
             boolean forPurge = (boolean) ReflectionHacks.getPrivate(
                 grid, GridCardSelectScreen.class, "forPurge");
@@ -192,7 +205,7 @@ public class GameStateConverter {
                 purpose = "purge";
             } else if (forUpgrade) {
                 purpose = "upgrade";
-            } else if (forTransform) {
+            } else if (ChoiceScreenUtils.gridIsTransform(forTransform, ChoiceScreenUtils.astrolabeSelectionPending())) {
                 purpose = "transform";
             } else if (AbstractDungeon.getCurrRoom().event != null
                     && "TheLibrary".equals(AbstractDungeon.getCurrRoom().event.getClass().getSimpleName())) {
@@ -452,7 +465,12 @@ public class GameStateConverter {
         ArrayList<RewardItem> rewards = AbstractDungeon.combatRewardScreen.rewards;
         for (int i = 0; i < rewards.size(); i++) {
             RewardItem reward = rewards.get(i);
-            choices.add(combatRewardMetadataFor(reward, i, rewards));
+            Map<String, Object> metadata = combatRewardMetadataFor(reward, i, rewards);
+            if (reward.type == RewardItem.RewardType.GOLD || reward.type == RewardItem.RewardType.STOLEN_GOLD)
+                metadata.put("amount", reward.goldAmt + reward.bonusGold);
+            if (reward.type == RewardItem.RewardType.POTION && reward.potion != null)
+                metadata.put("potion_id", reward.potion.ID);
+            choices.add(metadata);
         }
         return choices;
     }
@@ -683,6 +701,7 @@ public class GameStateConverter {
         // Always include this value so callers can distinguish an unupgraded
         // reward from a payload that omitted upgrade information.
         jsonCard.put("upgrades", card.timesUpgraded);
+        jsonCard.put("misc", card.misc);
 
         // Playability (only valid in combat context really, but useful)
         if (AbstractDungeon.getMonsters() != null) {

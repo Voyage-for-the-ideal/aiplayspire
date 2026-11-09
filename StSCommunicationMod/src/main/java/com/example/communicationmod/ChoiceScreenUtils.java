@@ -3,6 +3,11 @@ package com.example.communicationmod;
 import basemod.ReflectionHacks;
 import com.megacrit.cardcrawl.cards.AbstractCard;
 import com.megacrit.cardcrawl.cards.CardGroup;
+import com.megacrit.cardcrawl.cards.SoulGroup;
+import com.megacrit.cardcrawl.relics.AbstractRelic;
+import com.megacrit.cardcrawl.relics.Astrolabe;
+import com.megacrit.cardcrawl.vfx.AbstractGameEffect;
+import com.megacrit.cardcrawl.vfx.cardManip.ShowCardAndObtainEffect;
 import com.megacrit.cardcrawl.core.CardCrawlGame;
 import com.megacrit.cardcrawl.core.Settings;
 import com.megacrit.cardcrawl.dungeons.AbstractDungeon;
@@ -50,6 +55,56 @@ public class ChoiceScreenUtils {
         MAIN_MENU,
         CHAR_SELECT,
         NONE
+    }
+
+    // Astrolabe opens a plain GRID (all forTransform flags are false); its
+    // own update consumes selectedCards after the third selection.
+    static boolean astrolabeSelectionPending() {
+        if (AbstractDungeon.player == null) return false;
+        for (AbstractRelic relic : AbstractDungeon.player.relics) {
+            if (relic instanceof Astrolabe && !(boolean) ReflectionHacks.getPrivate(
+                    relic, Astrolabe.class, "cardsSelected")) return true;
+        }
+        return false;
+    }
+
+    static boolean gridIsTransform(boolean forTransform, boolean astrolabePending) {
+        return forTransform || astrolabePending;
+    }
+
+    private static boolean bossRewardSelectionSubmitted() {
+        if (AbstractDungeon.bossRelicScreen == null) return false;
+        for (AbstractRelic relic : AbstractDungeon.bossRelicScreen.relics) {
+            if (relic.isObtained) return true;
+        }
+        return false;
+    }
+
+    private static boolean cardObtainEffectsPending() {
+        for (java.util.List<AbstractGameEffect> effects : java.util.Arrays.asList(
+                AbstractDungeon.topLevelEffects, AbstractDungeon.topLevelEffectsQueue,
+                AbstractDungeon.effectList, AbstractDungeon.effectsQueue)) {
+            for (AbstractGameEffect effect : effects) {
+                if (effect instanceof ShowCardAndObtainEffect && !effect.isDone) return true;
+            }
+        }
+        return SoulGroup.isActive();
+    }
+
+    static boolean bossChestMayOpen(boolean chestOpen, boolean choseRelic, boolean submitted) {
+        return !chestOpen && !choseRelic && !submitted;
+    }
+
+    static boolean bossChestMayProceed(boolean choseRelic, boolean animating,
+                                       boolean selectionPending, boolean obtainPending,
+                                       boolean buttonVisible) {
+        return choseRelic && !animating && !selectionPending && !obtainPending && buttonVisible;
+    }
+
+    private static boolean bossChestMayProceedNow(TreasureRoomBoss room, boolean buttonVisible) {
+        return bossChestMayProceed(room.choseRelic,
+                !AbstractDungeon.player.relicsDoneAnimating(), astrolabeSelectionPending(),
+                cardObtainEffectsPending(), buttonVisible);
     }
 
     /**
@@ -174,7 +229,8 @@ public class ChoiceScreenUtils {
             case CARD_REWARD: return ChoiceType.CARD_REWARD;
             case COMBAT_REWARD: return ChoiceType.COMBAT_REWARD;
             case MAP: return ChoiceType.MAP;
-            case BOSS_REWARD: return ChoiceType.BOSS_REWARD;
+            case BOSS_REWARD:
+                return bossRewardSelectionSubmitted() ? ChoiceType.NONE : ChoiceType.BOSS_REWARD;
             case SHOP: return ChoiceType.SHOP_SCREEN;
             case GRID: return ChoiceType.GRID;
             case HAND_SELECT: return ChoiceType.HAND_SELECT;
@@ -193,7 +249,8 @@ public class ChoiceScreenUtils {
             case EVENT: return getEventScreenChoices();
             case CHEST: 
                 if (AbstractDungeon.getCurrRoom() instanceof TreasureRoomBoss) {
-                    if (!((TreasureRoomBoss) AbstractDungeon.getCurrRoom()).chest.isOpen) choices.add("open");
+                    TreasureRoomBoss bossRoom = (TreasureRoomBoss) AbstractDungeon.getCurrRoom();
+                    if (bossChestMayOpen(bossRoom.chest.isOpen, bossRoom.choseRelic, bossRewardSelectionSubmitted())) choices.add("open");
                 } else if (AbstractDungeon.getCurrRoom() instanceof TreasureRoom) {
                     if (!((TreasureRoom) AbstractDungeon.getCurrRoom()).chest.isOpen) choices.add("open");
                 }
@@ -245,8 +302,10 @@ public class ChoiceScreenUtils {
             case EVENT: makeEventChoice(choice_index); break;
             case CHEST: 
                 if (AbstractDungeon.getCurrRoom() instanceof TreasureRoomBoss) {
-                    ((TreasureRoomBoss) AbstractDungeon.getCurrRoom()).chest.isOpen = true;
-                    ((TreasureRoomBoss) AbstractDungeon.getCurrRoom()).chest.open(false);
+                    TreasureRoomBoss bossRoom = (TreasureRoomBoss) AbstractDungeon.getCurrRoom();
+                    if (choice_index != 0 || !bossChestMayOpen(bossRoom.chest.isOpen, bossRoom.choseRelic, bossRewardSelectionSubmitted())) return;
+                    bossRoom.chest.isOpen = true;
+                    bossRoom.chest.open(false);
                 } else if (AbstractDungeon.getCurrRoom() instanceof TreasureRoom) {
                     ((TreasureRoom) AbstractDungeon.getCurrRoom()).chest.isOpen = true;
                     ((TreasureRoom) AbstractDungeon.getCurrRoom()).chest.open(false);
@@ -280,7 +339,10 @@ public class ChoiceScreenUtils {
                 break;
             case MAP: makeMapChoice(choice_index); break;
             case BOSS_REWARD:
-                AbstractDungeon.bossRelicScreen.relics.get(choice_index).bossObtainLogic();
+                if (!bossRewardSelectionSubmitted() && choice_index >= 0
+                        && choice_index < AbstractDungeon.bossRelicScreen.relics.size()) {
+                    AbstractDungeon.bossRelicScreen.relics.get(choice_index).bossObtainLogic();
+                }
                 break;
             case SHOP_SCREEN: makeShopScreenChoice(choice_index); break;
             case GRID:
@@ -757,6 +819,10 @@ public class ChoiceScreenUtils {
         
         // Check Proceed Button
         boolean isHidden = (boolean) ReflectionHacks.getPrivate(AbstractDungeon.overlayMenu.proceedButton, ProceedButton.class, "isHidden");
+        if (AbstractDungeon.getCurrRoom() instanceof TreasureRoomBoss) {
+            if (AbstractDungeon.isScreenUp) return false;
+            return bossChestMayProceedNow((TreasureRoomBoss) AbstractDungeon.getCurrRoom(), !isHidden);
+        }
         return !isHidden;
     }
 
@@ -770,6 +836,13 @@ public class ChoiceScreenUtils {
     }
 
     public static boolean isCancelButtonAvailable() {
+        if (AbstractDungeon.screen == AbstractDungeon.CurrentScreen.GRID && astrolabeSelectionPending()) return false;
+        if (AbstractDungeon.screen == AbstractDungeon.CurrentScreen.CARD_REWARD) {
+            SkipCardButton button = (SkipCardButton) ReflectionHacks.getPrivate(
+                AbstractDungeon.cardRewardScreen, com.megacrit.cardcrawl.screens.CardRewardScreen.class, "skipButton");
+            boolean hidden = (boolean) ReflectionHacks.getPrivate(button, SkipCardButton.class, "isHidden");
+            return isCardRewardSkipAvailable(hidden, button.screenDisabled, PeekButton.isPeeking);
+        }
         // Boss relic selection must choose a relic; do not advertise its UI skip button.
         if (AbstractDungeon.screen == AbstractDungeon.CurrentScreen.BOSS_REWARD) {
             return isBossRewardCancelable();
@@ -788,6 +861,10 @@ public class ChoiceScreenUtils {
     static boolean isBossRewardCancelable() {
         return false;
     }
+
+    static boolean isCardRewardSkipAvailable(boolean hidden, boolean screenDisabled, boolean peeking) {
+        return !hidden && !screenDisabled && !peeking;
+    }
     
     public static void pressConfirmButton() {
         if (!CardCrawlGame.isInARun()) {
@@ -799,7 +876,11 @@ public class ChoiceScreenUtils {
         if (AbstractDungeon.getCurrRoom() == null) {
             return;
         }
+        if (AbstractDungeon.getCurrRoom() instanceof TreasureRoomBoss
+                && AbstractDungeon.screen != AbstractDungeon.CurrentScreen.GRID
+                && !isConfirmButtonAvailable()) return;
         if (AbstractDungeon.screen == AbstractDungeon.CurrentScreen.GRID) {
+            if (astrolabeSelectionPending() && !isConfirmButtonAvailable()) return;
             AbstractDungeon.gridSelectScreen.confirmButton.hb.clicked = true;
         } else if (AbstractDungeon.screen == AbstractDungeon.CurrentScreen.HAND_SELECT) {
             AbstractDungeon.handCardSelectScreen.button.hb.clicked = true;
@@ -830,9 +911,14 @@ public class ChoiceScreenUtils {
         } else if (AbstractDungeon.screen == AbstractDungeon.CurrentScreen.SHOP) {
             AbstractDungeon.overlayMenu.cancelButton.hb.clicked = true;
         } else if (AbstractDungeon.screen == AbstractDungeon.CurrentScreen.GRID) {
+             if (astrolabeSelectionPending()) return;
              AbstractDungeon.closeCurrentScreen();
         } else if (AbstractDungeon.screen == AbstractDungeon.CurrentScreen.CARD_REWARD) {
-             AbstractDungeon.closeCurrentScreen();
+             if (isCancelButtonAvailable()) {
+                 SkipCardButton button = (SkipCardButton) ReflectionHacks.getPrivate(
+                     AbstractDungeon.cardRewardScreen, com.megacrit.cardcrawl.screens.CardRewardScreen.class, "skipButton");
+                 button.hb.clicked = true;
+             }
         } else if (AbstractDungeon.screen == AbstractDungeon.CurrentScreen.COMBAT_REWARD) {
              AbstractDungeon.overlayMenu.cancelButton.hb.clicked = true;
              AbstractDungeon.closeCurrentScreen();

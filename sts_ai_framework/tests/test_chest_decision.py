@@ -87,6 +87,14 @@ class KeyAwareChestValueEngine(ChestValueEngine):
 
 
 class ChestDecisionTests(unittest.TestCase):
+    def test_boss_chest_waits_during_relic_pickup_then_proceeds(self):
+        agent = Harness()
+        state = make_chest_state(chest_boss=True, can_proceed=False)
+        state.choice_list = []
+        self.assertEqual(ActionType.WAIT, agent._handle_chest(state).type)
+        state.can_proceed = True
+        self.assertEqual(ActionType.PROCEED, agent._handle_chest(state).type)
+
     def test_no_cursed_key_auto_opens_without_scoring(self):
         engine = cursed_key_engine(curse_cost=999.0)
         agent = Harness(engine)

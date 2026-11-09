@@ -32,6 +32,16 @@ public class ProtocolContractTest {
     }
 
     @Test
+    public void cardRewardSkipReflectsTheActualButtonState() throws Exception {
+        assertNotNull(com.megacrit.cardcrawl.screens.CardRewardScreen.class.getDeclaredField("skipButton"));
+        assertNotNull(com.megacrit.cardcrawl.ui.buttons.SkipCardButton.class.getDeclaredField("isHidden"));
+        assertTrue(ChoiceScreenUtils.isCardRewardSkipAvailable(false, false, false));
+        assertFalse(ChoiceScreenUtils.isCardRewardSkipAvailable(true, false, false));
+        assertFalse(ChoiceScreenUtils.isCardRewardSkipAvailable(false, true, false));
+        assertFalse(ChoiceScreenUtils.isCardRewardSkipAvailable(false, false, true));
+    }
+
+    @Test
     public void gridConfirmRequiresTheGridConfirmationPhase() throws Exception {
         assertNotNull(GridCardSelectScreen.class.getField("confirmScreenUp"));
         assertFalse(ChoiceScreenUtils.isGridConfirmAvailable(false, false, false, false, false));
@@ -40,6 +50,28 @@ public class ProtocolContractTest {
         assertTrue(ChoiceScreenUtils.isGridConfirmAvailable(false, true, false, false, false));
         assertTrue(ChoiceScreenUtils.isGridConfirmAvailable(false, false, true, false, false));
         assertTrue(ChoiceScreenUtils.isGridConfirmAvailable(false, false, false, true, false));
+    }
+
+    @Test
+    public void bossChestGuardsPickupAndTransition() {
+        assertTrue(ChoiceScreenUtils.bossChestMayOpen(false, false, false));
+        assertFalse(ChoiceScreenUtils.bossChestMayOpen(true, false, false));
+        assertFalse(ChoiceScreenUtils.bossChestMayOpen(false, false, true));
+        assertFalse(ChoiceScreenUtils.bossChestMayOpen(false, true, false));
+        assertFalse(ChoiceScreenUtils.bossChestMayProceed(false, false, false, false, true));
+        assertFalse(ChoiceScreenUtils.bossChestMayProceed(true, true, false, false, true));
+        assertFalse(ChoiceScreenUtils.bossChestMayProceed(true, false, true, false, true));
+        assertFalse(ChoiceScreenUtils.bossChestMayProceed(true, false, false, true, true));
+        assertFalse(ChoiceScreenUtils.bossChestMayProceed(true, false, false, false, false));
+        assertTrue(ChoiceScreenUtils.bossChestMayProceed(true, false, false, false, true));
+    }
+
+    @Test
+    public void astrolabePlainGridIsRecognizedAsTransform() throws Exception {
+        assertNotNull(com.megacrit.cardcrawl.relics.Astrolabe.class.getDeclaredField("cardsSelected"));
+        assertTrue(ChoiceScreenUtils.gridIsTransform(false, true));
+        assertTrue(ChoiceScreenUtils.gridIsTransform(true, false));
+        assertFalse(ChoiceScreenUtils.gridIsTransform(false, false));
     }
 
     @Test

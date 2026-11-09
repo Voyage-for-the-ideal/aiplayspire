@@ -23,9 +23,13 @@ public class CommunicationMod implements PostInitializeSubscriber, PostUpdateSub
 
     @Override
     public void receivePostInitialize() {
+        if (System.getProperty("spire.shopProbeOutput") != null) {
+            ShopGenerationProbe.runIfRequested();
+            return;
+        }
         try {
             CommunicationServer server = new CommunicationServer();
-            server.start(5000);
+            server.start(Integer.getInteger("communicationmod.port", 5000));
         } catch (IOException e) {
             e.printStackTrace();
         }

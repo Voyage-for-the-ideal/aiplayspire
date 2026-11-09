@@ -437,6 +437,47 @@ class StructuredEventTests(unittest.TestCase):
         self.assertIsNotNone(agent._pending_grid)
         self.assertEqual(["Defend_R+1"], agent._pending_grid["target_ids"])
 
+    def test_astrolabe_grid_selects_three_distinct_duplicate_instances(self):
+        state = make_state(choice_list=["strike", "strike", "strike", "defend"])
+        state.screen_type = "GRID"
+        state.grid_purpose = "transform"
+        state.grid_num_cards = 3
+        state.deck = [Card.model_validate(card("Strike_P", index=i, choice_index=i))
+                      for i in range(3)] + [Card.model_validate(card("Defend_P", index=3, choice_index=3))]
+        state.grid_cards = list(state.deck)
+
+        class UniqueRanking(GridRankingEngine):
+            def rank_cards_for_purpose(self, state, purpose, count, exclude_ids=None):
+                return ["Strike_P", "Defend_P"]
+
+        agent = Harness(UniqueRanking())
+        for index in range(3):
+            state.grid_selected_count = index
+            state.grid_selected_cards = state.grid_cards[:index]
+            action = agent._handle_grid_selection(state)
+            self.assertEqual(ActionType.CHOOSE, action.type)
+            self.assertEqual(index, action.choice_index)
+        self.assertEqual(["Strike_P"] * 3, agent._pending_grid["target_ids"])
+
+    def test_transform_fills_mandatory_slots_with_legal_curse(self):
+        state = make_state(choice_list=["strike", "defend", "curse", "curse"])
+        state.screen_type = "GRID"
+        state.grid_purpose = "transform"
+        state.grid_num_cards = 3
+        cards = [card("Strike_P", index=0, choice_index=0),
+                 card("Defend_P", index=1, choice_index=1),
+                 card("Regret", index=2, choice_index=2),
+                 card("Doubt", index=3, choice_index=3)]
+        cards[2]["type"] = cards[3]["type"] = "CURSE"
+        state.deck = [Card.model_validate(c) for c in cards]
+        state.grid_cards = list(state.deck)
+        agent = Harness(GridRankingEngine())
+        self.assertEqual(0, agent._handle_grid_selection(state).choice_index)
+        self.assertEqual(["Strike_P", "Defend_P", "Regret"], agent._pending_grid["target_ids"])
+        state.grid_selected_count = 2
+        state.grid_selected_cards = state.grid_cards[:2]
+        self.assertEqual(2, agent._handle_grid_selection(state).choice_index)
+
     def test_generated_card_grid_uses_value_model_not_llm(self):
         state = make_state(choice_list=["cloak and dagger"])
         state.screen_type = "GRID"

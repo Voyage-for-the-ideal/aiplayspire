@@ -19,6 +19,7 @@ class Card(BaseModel):
     upgrades: int = 0
     is_bottled: bool = False
     can_upgrade: bool = True
+    misc: int = 0
 
     @property
     def reference(self) -> str:
@@ -103,6 +104,8 @@ class RewardChoice(BaseModel):
     relic_id: Optional[str] = None
     key_type: Optional[str] = None
     linked_reward_index: Optional[int] = None
+    amount: Optional[int] = None
+    potion_id: Optional[str] = None
 
 class MapEdgeState(BaseModel):
     x: int
@@ -233,6 +236,13 @@ class GameState(BaseModel):
     card_reward_cards: List[Card] = Field(default_factory=list)
     reward_choices: List[RewardChoice] = Field(default_factory=list)
     grid_cards: List[Card] = Field(default_factory=list)
+    grid_selected_cards: List[Card] = Field(default_factory=list)
+    shop_inventory: List[Dict[str, Any]] = Field(default_factory=list)
+    shop_purge_cost: Optional[int] = None
+    shop_purge_available: bool = False
+    # Split/group metadata, deliberately excluded from policy features.
+    seed_group: Optional[str] = None
+    run_mode: Optional[Dict[str, Any]] = None
     keys: KeyState = Field(default_factory=KeyState)
     event_chances: EventRoomChances = Field(default_factory=EventRoomChances)
     path_history: List[PathHistoryEntry] = Field(default_factory=list)
@@ -264,6 +274,7 @@ class GameState(BaseModel):
 class ActionType(str, Enum):
     PLAY = "play"
     POTION = "potion"
+    DISCARD_POTION = "discard_potion"
     END_TURN = "end_turn"
     WAIT = "wait"
     PROCEED = "proceed"
