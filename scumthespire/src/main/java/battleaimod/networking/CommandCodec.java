@@ -25,7 +25,11 @@ public final class CommandCodec {
         JsonObject envelope = jsonElement.getAsJsonObject();
         String commandString = envelope.get("command").getAsString();
         String statePath = envelope.has("state") ? envelope.get("state").getAsString() : null;
-        return decode(commandString, statePath);
+        Command decoded = decode(commandString, statePath);
+        if (!envelope.has("expected_before")) { return decoded; }
+        return envelope.has("expected_context")
+                ? new GuardedCommand(decoded, envelope.getAsJsonObject("expected_before"), envelope.getAsJsonObject("expected_context"))
+                : new GuardedCommand(decoded, envelope.getAsJsonObject("expected_before"));
     }
 
     public static Command decode(String commandString) {

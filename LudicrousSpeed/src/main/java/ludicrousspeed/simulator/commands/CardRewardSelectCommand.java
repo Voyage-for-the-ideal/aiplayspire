@@ -41,6 +41,17 @@ public class CardRewardSelectCommand implements Command {
         if (!StateDiffChecker.check(diffStateString, this.toString())) {
             return;
         }
+        if (cardIndex == -1) {
+            CardRewardScreen screen = AbstractDungeon.cardRewardScreen;
+            boolean skippable = basemod.ReflectionHacks.getPrivate(screen, CardRewardScreen.class, "skippable");
+            if (!skippable) throw new IllegalStateException("Card reward selection is mandatory");
+            com.megacrit.cardcrawl.ui.buttons.SkipCardButton button = basemod.ReflectionHacks
+                    .getPrivate(screen, CardRewardScreen.class, "skipButton");
+            button.hb.clicked = true;
+            button.update();
+            AbstractDungeon.actionManager.phase = GameActionManager.Phase.EXECUTING_ACTIONS;
+            return;
+        }
 
         AbstractCard selectedCard = AbstractDungeon.cardRewardScreen.rewardGroup.get(cardIndex);
 

@@ -64,6 +64,18 @@ public interface ActionState {
                 .getMonsters().monsters.get(index);
     }
 
+    /** Resolves a creature to its index while tolerating creatures that are
+     *  no longer on the board (e.g. a pending action targeting a monster that
+     *  died before a selection screen froze the action queue). */
+    static int indexOrMissing(AbstractCreature creature) {
+        try {
+            return indexForCreature(creature);
+        } catch (IllegalStateException e) {
+            System.err.println("Creature no longer on board for action state: " + creature);
+            return NULL_INDEX;
+        }
+    }
+
     Set<Class<? extends AbstractGameAction>> IGNORED_ACTIONS = new HashSet<Class<? extends AbstractGameAction>>() {{
         add(VFXAction.class);
         add(ShoutAction.class);

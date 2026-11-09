@@ -23,6 +23,15 @@ public enum SearchProfile {
         return timeoutMillis;
     }
 
+    /** Native turn search budget; legacy Java baseline budgets stay unchanged. */
+    public long nativeTimeoutMillis() {
+        switch (this) {
+            case FAST: return 250L;
+            case DEEP: return 10_000L;
+            default: return 2_000L;
+        }
+    }
+
     public boolean streamCommands() {
         return streamCommands;
     }

@@ -5,7 +5,7 @@ import com.megacrit.cardcrawl.orbs.AbstractOrb;
 import com.megacrit.cardcrawl.orbs.Lightning;
 
 public class LightningOrbState extends OrbState {
-    public static String LOOKUP_KEY = new Lightning().getClass().getSimpleName();
+    public static String LOOKUP_KEY = Lightning.class.getSimpleName();
 
     public LightningOrbState(AbstractOrb orb) {
         super(orb);

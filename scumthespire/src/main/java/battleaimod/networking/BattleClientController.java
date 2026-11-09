@@ -51,13 +51,22 @@ public class BattleClientController {
     private static Process serverProcess;
     private static final ReplayRecoveryState replayRecoveryState = new ReplayRecoveryState();
 
+    private static final int MAX_CONNECTION_RECOVERY_ATTEMPTS = 3;
+    private static final long CONNECTION_RECOVERY_DELAY_MILLIS = 5000;
+    private static int connectionRecoveryAttempts = 0;
+    private static long nextConnectionRecoveryAtMillis = 0;
+
     public BattleClientController() {
         startButton = new StartUIButton();
         backendButton = new BackendButton();
+        if (BackendEndpoint.external() && !BattleAiMod.isServer) {
+            ExternalBackendMonitor.start();
+        }
     }
 
     public void update() {
         maybeAutoReplan();
+        maybeRecoverConnection();
         if (!isEnabled()) {
             return;
         }
@@ -187,7 +196,7 @@ public class BattleClientController {
         @Override
         public void render(SpriteBatch sb) {
             Color color;
-            if (serverReady) {
+            if (backendReady()) {
                 color = Color.WHITE;
             } else if (waitingForSeverStartup()) {
                 color = Color.YELLOW;
@@ -222,6 +231,10 @@ public class BattleClientController {
     }
 
     private static void startServerThread() {
+        if (BackendEndpoint.external()) {
+            ExternalBackendMonitor.start();
+            return;
+        }
         if (serverProcess != null && serverProcess.isAlive()) {
             System.out.println("Server game is already running");
             return;
@@ -355,7 +368,11 @@ public class BattleClientController {
     }
 
     public static boolean canSendState() {
-        return serverReady && canRequestState();
+        return backendReady() && canRequestState();
+    }
+
+    private static boolean backendReady() {
+        return BackendEndpoint.external() ? ExternalBackendMonitor.ready() : serverReady;
     }
 
     public static boolean canRequestState() {
@@ -375,16 +392,32 @@ public class BattleClientController {
             }
         }
 
+        // A selection screen is a decision point even after the single-action
+        // controller has finished: the action that opened the screen consumed
+        // the controller's only command, and the native worker still needs a
+        // fresh state to emit HAND_SELECT/GRID_SELECT/CARD_REWARD_SELECT.  The
+        // shouldStep() gate below would otherwise wait for a human click
+        // (stalls on in-combat Discovery from Skill/Attack/Power/Potion-use).
+        if (isSelectionScreenUp()) {
+            return true;
+        }
+
         if (AbstractDungeon.actionManager.turnHasEnded
                 || (AbstractDungeon.actionManager.currentAction != null && AbstractDungeon.actionManager.phase == GameActionManager.Phase.EXECUTING_ACTIONS)
                 || !AbstractDungeon.actionManager.isEmpty()) {
-            if (!(AbstractDungeon.isScreenUp
-                    && (AbstractDungeon.screen == AbstractDungeon.CurrentScreen.HAND_SELECT || AbstractDungeon.screen == AbstractDungeon.CurrentScreen.GRID || AbstractDungeon.screen == AbstractDungeon.CurrentScreen.CARD_REWARD))) {
-                return false;
-            }
+            return false;
         }
 
         return LudicrousSpeedMod.shouldStep();
+    }
+
+    private static boolean isSelectionScreenUp() {
+        if (!AbstractDungeon.isScreenUp) {
+            return false;
+        }
+        return AbstractDungeon.screen == AbstractDungeon.CurrentScreen.HAND_SELECT
+                || AbstractDungeon.screen == AbstractDungeon.CurrentScreen.GRID
+                || AbstractDungeon.screen == AbstractDungeon.CurrentScreen.CARD_REWARD;
     }
 
     public enum ControllerMode {
@@ -490,6 +523,61 @@ public class BattleClientController {
         replayRecoveryState.reset();
         AiClient.autoReplanPending = false;
         LudicrousSpeedMod.mustRestart = false;
+        resetConnectionRecovery();
+    }
+
+    /** Arms a delayed, capped automatic resend after the connection to the
+     *  search server was lost or a request failed mid-battle. Safe to call
+     *  repeatedly; the attempt budget is only refilled by battle/run boundary
+     *  resets and manual Start Steve clicks. */
+    public static void onClientDisconnected() {
+        if (connectionRecoveryAttempts >= MAX_CONNECTION_RECOVERY_ATTEMPTS) {
+            System.err.println("Battle AI connection recovery exhausted; click Start Steve to retry");
+            BattleAiMod.steveMessage = "Connection lost; click Start Steve to retry";
+            return;
+        }
+
+        connectionRecoveryAttempts++;
+        nextConnectionRecoveryAtMillis = System.currentTimeMillis() + CONNECTION_RECOVERY_DELAY_MILLIS;
+        System.err.println("Battle AI connection lost; recovery attempt "
+                + connectionRecoveryAttempts + "/" + MAX_CONNECTION_RECOVERY_ATTEMPTS
+                + " scheduled");
+    }
+
+    public static void resetConnectionRecovery() {
+        connectionRecoveryAttempts = 0;
+        nextConnectionRecoveryAtMillis = 0;
+    }
+
+    /** Fires the armed connection recovery once the battle is back at a
+     *  decision point: replans from the live state on the same server. */
+    private static void maybeRecoverConnection() {
+        if (connectionRecoveryAttempts == 0 || nextConnectionRecoveryAtMillis == 0) {
+            return;
+        }
+        if (!inCombat()) {
+            resetConnectionRecovery();
+            return;
+        }
+        if (System.currentTimeMillis() < nextConnectionRecoveryAtMillis || !canSendState()) {
+            return;
+        }
+
+        nextConnectionRecoveryAtMillis = 0;
+        System.err.println("Battle AI: connection recovery attempt "
+                + connectionRecoveryAttempts + "/" + MAX_CONNECTION_RECOVERY_ATTEMPTS);
+        if (BattleAiMod.aiClient == null) {
+            try {
+                BattleAiMod.aiClient = new AiClient();
+            } catch (IOException e) {
+                e.printStackTrace();
+                return;
+            }
+        }
+
+        if (BattleAiMod.aiClient != null) {
+            BattleAiMod.aiClient.sendState();
+        }
     }
 
     private boolean isEnabled() {

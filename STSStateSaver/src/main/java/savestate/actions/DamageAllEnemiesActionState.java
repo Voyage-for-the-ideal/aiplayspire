@@ -13,7 +13,7 @@ public class DamageAllEnemiesActionState implements ActionState {
     private final AbstractGameAction.AttackEffect effect;
     private final int baseDamage;
     private final boolean utilizeBaseDamage;
-    private final AbstractCreature source;
+    private final int sourceIndex;
 
     public DamageAllEnemiesActionState(AbstractGameAction action) {
         this((DamageAllEnemiesAction) action);
@@ -25,14 +25,16 @@ public class DamageAllEnemiesActionState implements ActionState {
         this.utilizeBaseDamage = ReflectionHacks.getPrivate(action, DamageAllEnemiesAction.class, "utilizeBaseDamage");
         type = action.damageType;
         effect = action.attackEffect;
-        source = action.source;
+        sourceIndex = ActionState.indexOrMissing(action.source);
     }
 
     @Override
     public DamageAllEnemiesAction loadAction() {
+        AbstractCreature source = ActionState.creatureForIndex(sourceIndex);
         if(utilizeBaseDamage)
         {
-            return new DamageAllEnemiesAction((AbstractPlayer) source, baseDamage, type, effect);
+            return new DamageAllEnemiesAction(source instanceof AbstractPlayer
+                    ? (AbstractPlayer) source : null, baseDamage, type, effect);
         }
         else
         {

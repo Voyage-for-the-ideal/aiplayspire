@@ -129,12 +129,12 @@ public final class CombatFeatures {
                 int enemyStrength = CreaturePowerUtils.strengthOf(monster);
                 features.enemyStrengthScaling += Math.max(0, enemyStrength);
 
-                int monsterIncoming = ThreatEvaluator.immediateDamageOf(monster);
+                int monsterIncoming = ThreatEvaluator.immediateDamageOf(monster, currentState.playerState);
                 incoming += monsterIncoming;
                 incomingHits += ThreatEvaluator.incomingHitCountOf(monster);
                 highestIncoming = Math.max(highestIncoming, monsterIncoming);
 
-                int monsterThreat = ThreatEvaluator.threatOf(monster);
+                int monsterThreat = ThreatEvaluator.threatOf(monster, currentState.playerState);
                 threat += monsterThreat;
                 highestThreat = Math.max(highestThreat, monsterThreat);
 
@@ -150,10 +150,13 @@ public final class CombatFeatures {
         }
 
         // Block absorbs the incoming damage that would land this turn
-        features.currentIncomingDamage = Math.max(0, incoming - features.playerBlock);
+        features.currentIncomingDamage = ThreatEvaluator.incomingDamage(currentState);
         features.currentIncomingHitCount = incomingHits;
         features.highestEnemyIncomingDamage = highestIncoming;
-        features.aliveThreat = threat;
+        // Keep future strength/block threat, but use the same effective current
+        // damage as survival (including shared block and Buffer consumption).
+        features.aliveThreat = threat - incoming * TacticalEvaluator.IMMEDIATE_THREAT_WEIGHT
+                + features.currentIncomingDamage * TacticalEvaluator.IMMEDIATE_THREAT_WEIGHT;
         features.highestSingleEnemyThreat = highestThreat;
         features.nearLethalAttackingCount = nearLethalAttacking;
         features.allEnemiesDead = features.aliveEnemyCount == 0;

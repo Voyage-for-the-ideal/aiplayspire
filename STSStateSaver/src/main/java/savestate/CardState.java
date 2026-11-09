@@ -16,6 +16,15 @@ import java.util.function.Function;
 import static savestate.SaveStateMod.shouldGoFast;
 
 public class CardState {
+    public int getCostForTurn() { return costForTurn; }
+    public int getDamage() { return damage; }
+    public int getBlock() { return block; }
+    public int getMagicNumber() { return magicNumber; }
+    public boolean isExhaust() { return exhaust; }
+    public boolean isRetained() { return retain || selfRetain; }
+    public boolean isEthereal() { return isEthereal; }
+    public boolean isFreeToPlayOnce() { return freeToPlayOnce; }
+
     public static boolean IGNORE_MOD_SUBTYPES = false;
     private static HashMap<String, LinkedList<AbstractCard>> freeCards;
 
@@ -139,7 +148,7 @@ public class CardState {
         }
 
         JsonElement modsElement = parsed.get("modifiers");
-        if (modsElement.isJsonNull()) {
+        if (modsElement == null || modsElement.isJsonNull()) {
             this.cardModifiers = null;
         } else {
             this.cardModifiers = new ArrayList<>();
@@ -191,7 +200,7 @@ public class CardState {
         }
 
         JsonElement modsElement = cardJson.get("modifiers");
-        if (modsElement.isJsonNull()) {
+        if (modsElement == null || modsElement.isJsonNull()) {
             this.cardModifiers = null;
         } else {
             this.cardModifiers = new ArrayList<>();

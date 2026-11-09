@@ -11,6 +11,8 @@ import com.megacrit.cardcrawl.dungeons.AbstractDungeon;
 import com.megacrit.cardcrawl.screens.select.GridCardSelectScreen;
 
 public class GridSelectCommand implements Command {
+    public int getCardIndex() { return cardIndex; }
+
     private final int cardIndex;
     private static boolean ignoreHoverLogic = false;
 

@@ -39,6 +39,8 @@ import static savestate.SaveStateMod.addRuntime;
 import static savestate.SaveStateMod.shouldGoFast;
 
 public class SaveState {
+    public int getTotalDiscardedThisTurn() { return totalDiscardedThisTurn; }
+
     private final boolean isScreenUp;
     public int floorNum;
     public int turn;

@@ -16,6 +16,9 @@ import savestate.CardState;
 import savestate.SaveState;
 import savestate.StateFactories;
 import savestate.relics.RelicState;
+import battleaimod.strategy.CharacterStrategies;
+import battleaimod.strategy.MechanismScore;
+import battleaimod.strategy.StrategyContext;
 
 import java.util.Optional;
 import java.util.stream.Collectors;
@@ -122,19 +125,34 @@ public final class TacticalEvaluator {
         }
         result.lethalScore += features.nearLethalAttackingCount * NEAR_LETHAL_BONUS;
 
-        // 5. Player scaling (powers: strength, dexterity, focus, ...)
-        result.scalingScore = powerScore(currentState);
+        // Death and victory are authoritative. Temporary powers and resources
+        // cannot turn mutual death into victory or favor a buffed winning line.
+        if (features.playerCurrentHp <= 0) {
+            result.survivalScore = DEATH_PENALTY;
+            result.damageProgressScore = result.threatScore = result.lethalScore = 0;
+        } else if (features.allEnemiesDead) {
+            result.survivalScore = 0;
+            result.threatScore = 0;
+            result.resourceScore = ValueFunctions.terminalResourceScore(currentState, startingPlayerHealth);
+        } else {
+            // 5. Player scaling (powers: strength, dexterity, focus, ...)
+            result.scalingScore = powerScore(currentState);
 
-        // 6. Resources retained for the rest of the run
-        result.resourceScore = resourceScore(currentState);
+            MechanismScore mechanisms = CharacterStrategies.evaluate(new StrategyContext(currentState, features));
+            result.mechanismScore = mechanisms.total();
+            result.mechanismRules = mechanisms.rules();
 
-        // 7. Encounter-specific adjustment (Phase 2+)
-        result.encounterScore = 0;
+            // 6. Resources retained for the rest of the run
+            result.resourceScore = resourceScore(currentState);
 
-        // External extension hooks keep working exactly as before
-        result.resourceScore += BattleAiMod.additionalValueFunctions.stream()
-                .map(function -> function.apply(currentState))
-                .collect(Collectors.summingInt(Integer::intValue));
+            // 7. Encounter-specific adjustment (Phase 2+)
+            result.encounterScore = 0;
+
+            // External extension hooks keep working exactly as before
+            result.resourceScore += BattleAiMod.additionalValueFunctions.stream()
+                    .map(function -> function.apply(currentState))
+                    .collect(Collectors.summingInt(Integer::intValue));
+        }
 
         result.computeTotal();
 
@@ -153,10 +171,18 @@ public final class TacticalEvaluator {
      */
     private static int powerScore(SaveState state) {
         return state.playerState.powers.stream()
+                // These powers are valued by their real engine/fuel instead of
+                // being counted once here and again in a class mechanism.
+                .filter(power -> !isMechanismPower(power.powerId))
                 .map(powerState -> ValueFunctions.POWER_VALUES.getOrDefault(powerState.powerId, 0)
                         * powerState.amount)
                 .reduce(Integer::sum)
                 .orElse(0);
+    }
+
+    private static boolean isMechanismPower(String id) {
+        return id.equals("Strength") || id.equals("Focus") || id.equals("Dark Embrace")
+                || id.equals("Feel No Pain") || id.equals("Accuracy") || id.equals("Echo Form");
     }
 
     /**
@@ -166,9 +192,6 @@ public final class TacticalEvaluator {
      */
     private static int resourceScore(SaveState state) {
         int score = 0;
-
-        int numOrbScore = state.playerState.maxOrbs == 0 ? -1000 : 0;
-        score += numOrbScore;
 
         int numRitualDaggers = 0;
         int totalRitualDaggerDamage = 0;

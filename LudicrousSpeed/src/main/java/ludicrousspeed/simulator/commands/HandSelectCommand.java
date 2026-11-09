@@ -7,6 +7,8 @@ import com.megacrit.cardcrawl.dungeons.AbstractDungeon;
 import com.megacrit.cardcrawl.screens.select.HandCardSelectScreen;
 
 public class HandSelectCommand implements Command {
+    public int getCardIndex() { return cardIndex; }
+
     private final int cardIndex;
     public final String diffStateString;
 

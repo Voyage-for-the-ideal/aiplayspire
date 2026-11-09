@@ -10,17 +10,26 @@ import java.util.List;
 
 /** Runs a returned command path from its original state on the game update thread. */
 public class BattleReplayController implements Controller {
-    private final SaveState startState;
     private final List<Command> commands;
     private int commandIndex;
-    private boolean loaded;
     private boolean done;
     private String finalStateKey;
+    private com.google.gson.JsonObject finalProjection;
+    private com.google.gson.JsonObject finalSnapshot;
     private String error;
 
     public BattleReplayController(SaveState startState, List<Command> commands) {
-        this.startState = startState;
         this.commands = commands;
+        // Construction happens on the game update thread. Bootstrap here: a fresh
+        // server starts in EmptyRoom, where LudicrousSpeed deliberately never steps
+        // a controller. Deferring loadState to step() deadlocks the first REPLAY.
+        try {
+            LudicrousSpeedMod.mustRestart = false;
+            startState.loadState();
+        } catch (RuntimeException e) {
+            error = e.toString();
+            done = true;
+        }
     }
 
     @Override
@@ -29,12 +38,6 @@ public class BattleReplayController implements Controller {
             return;
         }
         try {
-            if (!loaded) {
-                LudicrousSpeedMod.mustRestart = false;
-                startState.loadState();
-                loaded = true;
-                return;
-            }
             if (commandIndex < commands.size()) {
                 Command command = commands.get(commandIndex++);
                 if (command != null) {
@@ -42,7 +45,10 @@ public class BattleReplayController implements Controller {
                 }
                 return;
             }
-            finalStateKey = SearchStateKey.fromSaveState(new SaveState()).toString();
+            SaveState finalState = new SaveState();
+            finalStateKey = SearchStateKey.fromSaveState(finalState).toString();
+            finalSnapshot = finalState.jsonEncode();
+            finalProjection = BattleStateProjection.fromSnapshot(finalSnapshot);
             if (LudicrousSpeedMod.mustRestart) {
                 error = "mustRestart was requested during replay";
             }
@@ -61,6 +67,9 @@ public class BattleReplayController implements Controller {
     public String finalStateKey() {
         return finalStateKey;
     }
+
+    public com.google.gson.JsonObject finalProjection() { return finalProjection; }
+    public com.google.gson.JsonObject finalSnapshot() { return finalSnapshot; }
 
     public String error() {
         return error;

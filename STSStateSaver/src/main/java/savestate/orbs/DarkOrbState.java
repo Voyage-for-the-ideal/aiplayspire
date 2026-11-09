@@ -5,7 +5,7 @@ import com.megacrit.cardcrawl.orbs.AbstractOrb;
 import com.megacrit.cardcrawl.orbs.Dark;
 
 public class DarkOrbState extends OrbState {
-    private static String LOOKUP_KEY = new Dark().getClass().getSimpleName();
+    private static String LOOKUP_KEY = Dark.class.getSimpleName();
 
     public DarkOrbState(AbstractOrb orb) {
         super(orb);

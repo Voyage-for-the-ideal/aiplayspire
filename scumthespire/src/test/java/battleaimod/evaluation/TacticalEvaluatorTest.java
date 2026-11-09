@@ -185,7 +185,7 @@ public class TacticalEvaluatorTest {
 
         assertEquals(result.survivalScore + result.damageProgressScore + result.lethalScore
                 + result.threatScore + result.scalingScore + result.resourceScore
-                + result.encounterScore, result.totalScore);
+                + result.encounterScore + result.mechanismScore, result.totalScore);
         // encounter adjustment is 0 until Phase 2
         assertEquals(0, result.encounterScore);
     }

@@ -1,0 +1,6 @@
+/cmake-build-*/
+/build/
+/files/
+/.idea/
+__pycache__/
+*.log

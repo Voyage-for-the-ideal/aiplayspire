@@ -144,9 +144,8 @@ public class BattleAiMod implements PostInitializeSubscriber, PostUpdateSubscrib
 
         CardCrawlGame.screenShake = new ScreenShakeFast();
 
-        cardPlayHeuristics.add(IronCladPlayOrder.COMPARATOR);
-        cardPlayHeuristics.add(DefectPlayOrder.COMPARATOR);
-        cardPlayHeuristics.add(SilentPlayOrder.COMPARATOR);
+        // Built-in class ranks now live in CharacterStrategies. This list is
+        // reserved for additional heuristics registered by extensions.
 
         actionHeuristics.put(DiscardAction.class, DiscardOrder.COMPARATOR);
         actionHeuristics.put(ExhaustAction.class, ExhaustOrder.COMPARATOR);
@@ -578,6 +577,18 @@ public class BattleAiMod implements PostInitializeSubscriber, PostUpdateSubscrib
                 AbstractDungeon.currMapNode.room = new EmptyRoom();
 
                 CardCrawlGame.mode = CardCrawlGame.GameMode.GAMEPLAY;
+            }
+        }
+    }
+
+    /** Optional seeded-run fixture. With no property the ordinary seed flow is unchanged. */
+    @SpirePatch(clz = com.megacrit.cardcrawl.screens.charSelect.CharacterSelectScreen.class, method = "updateButtons")
+    public static class SeededRunFixturePatch {
+        @SpirePrefixPatch
+        public static void beforeBegin(com.megacrit.cardcrawl.screens.charSelect.CharacterSelectScreen __instance) {
+            if (__instance.confirmButton.hb.clicked) {
+                Long seed = battleaimod.networking.BackendEndpoint.runSeed();
+                if (seed != null) { Settings.seed = seed; Settings.seedSet = true; }
             }
         }
     }

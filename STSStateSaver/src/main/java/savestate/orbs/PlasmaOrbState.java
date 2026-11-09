@@ -5,7 +5,7 @@ import com.megacrit.cardcrawl.orbs.AbstractOrb;
 import com.megacrit.cardcrawl.orbs.Plasma;
 
 public class PlasmaOrbState extends OrbState {
-    public static String LOOKUP_KEY = new Plasma().getClass().getSimpleName();
+    public static String LOOKUP_KEY = Plasma.class.getSimpleName();
 
     public PlasmaOrbState(AbstractOrb orb) {
         super(orb);

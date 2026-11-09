@@ -1,0 +1,30 @@
+{
+  "floor_num": 1, "turn": 1, "screen_name": "NONE", "is_screen_up": false,
+  "ascension_level": 0, "total_discarded_this_turn": 0,
+  "cards_played_this_turn_backup": [], "cards_played_this_combat": [],
+  "player_state": {
+    "chosen_class_name": "IRONCLAD", "game_hand_size": 5,
+    "energy_manager_energy": 3, "energy_panel_total_energy": 3,
+    "is_ending_turn": false, "card_in_use": null, "limbo": [], "max_orbs": 0,
+    "creature": {"current_health": 70, "max_health": 80, "current_block": 0, "gold": 0, "powers": []},
+    "hand": [
+      {"card_id": "Strike_R", "cost": 1, "cost_for_turn": 1, "times_upgraded": 0},
+      {"card_id": "Defend_R", "cost": 1, "cost_for_turn": 1, "times_upgraded": 0}
+    ],
+    "draw_pile": [
+      {"card_id": "Bash", "cost": 2, "cost_for_turn": 2, "times_upgraded": 0},
+      {"card_id": "Strike_R", "cost": 1, "cost_for_turn": 1, "times_upgraded": 0}
+    ],
+    "discard_pile": [], "exhaust_pile": [],
+    "relics": [{"relic_id": "Burning Blood", "counter": -1}],
+    "potions": [{"id": "Fire Potion", "slot": 0}, {"id": "Potion Slot", "slot": -1}, {"id": "Potion Slot", "slot": -1}],
+    "orbs": [], "orbs_channeled_this_combat": []
+  },
+  "rng_state": {"seed": 12345, "ai_rng_counter": 1, "card_random_rng_counter": 0,
+    "misc_rng_counter": 0, "monster_hp_rng_counter": 1, "potion_rng_counter": 0, "shuffle_rng_counter": 1},
+  "cur_map_node_state": {"phase_name": "COMBAT", "monster_data": [
+    {"creature": {"id": "Cultist", "current_health": 50, "max_health": 50, "current_block": 0,
+       "is_escaping": false, "half_dead": false, "powers": []},
+     "next_move": 3, "intent_name": "BUFF", "move_history": ["3"]}
+  ]}
+}

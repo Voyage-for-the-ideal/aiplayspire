@@ -50,7 +50,7 @@ public class AiClient {
 
         if (connect) {
             try {
-                socket.connect(new InetSocketAddress(HOST_IP, AiServer.PORT_NUMBER), CONNECT_TIMEOUT_MILLIS);
+                socket.connect(new InetSocketAddress(HOST_IP, BackendEndpoint.port()), CONNECT_TIMEOUT_MILLIS);
             } catch (IOException e) {
                 socket.close();
                 throw e;
@@ -85,6 +85,9 @@ public class AiClient {
         }
 
         final SaveState state = new SaveState();
+        final long requestTimeoutMillis = BackendEndpoint.timeoutMillis(BackendEndpoint.external()
+                ? profile.nativeTimeoutMillis() : timeoutMillis);
+        final JsonObject combatCardPools = BackendEndpoint.external() ? BattleCardPools.current() : null;
 
         AbstractDungeon.player.hand.refreshHandLayout();
         waiting = true;
@@ -131,10 +134,11 @@ public class AiClient {
                     runRequest.addProperty("fileName", absoluteFileName);
                     runRequest.addProperty("num_turns", maxExpansions);
                     runRequest.addProperty("max_expansions", maxExpansions);
-                    runRequest.addProperty("timeout_ms", timeoutMillis);
+                    runRequest.addProperty("timeout_ms", requestTimeoutMillis);
                     runRequest.addProperty("search_profile", profile.toString());
                     runRequest.addProperty("command_file", absoluteCommandFileName);
                     runRequest.addProperty("client_cwd", System.getProperty("user.dir"));
+                    if (combatCardPools != null) { runRequest.add("combat_card_pools", combatCardPools); }
 
                     out.writeUTF(runRequest.toString());
                 } catch (Exception e) {
@@ -149,6 +153,7 @@ public class AiClient {
                 socket.setSoTimeout(5000);
 
                 String readLine = "";
+                boolean requestFailed = false;
 
                 while (!readLine.equals(AiServer.doneString)) {
                     try {
@@ -167,6 +172,11 @@ public class AiClient {
                             System.err.println("Search metrics " + parsed.get("metrics"));
                         }
 
+                        if (parsed.has("type") &&
+                                AiServer.errorString.equals(parsed.get("type").getAsString())) {
+                            requestFailed = true;
+                        }
+
                         if (parsed.has("message")) {
                             BattleAiMod.steveMessage = parsed.get("message").getAsString();
                         }
@@ -177,11 +187,17 @@ public class AiClient {
                 }
 
                 System.err.println("Received done");
+                if (requestFailed) {
+                    // The server reported a failed search; treat it like a
+                    // lost connection so the live battle state gets resent.
+                    BattleClientController.onClientDisconnected();
+                }
             } catch (Exception e) {
                 e.printStackTrace();
                 System.err.println("Server disconnected; clearing client for reset.");
                 BattleAiMod.aiClient = null;
                 BattleAiMod.rerunController = null;
+                BattleClientController.onClientDisconnected();
             } finally {
                 waiting = false;
             }
@@ -201,6 +217,7 @@ public class AiClient {
                 System.err.println("Server disconnected; clearing client for reset.");
                 BattleAiMod.aiClient = null;
                 BattleAiMod.rerunController = null;
+                BattleClientController.onClientDisconnected();
             }
         });
     }

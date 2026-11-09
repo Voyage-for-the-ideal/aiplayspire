@@ -5,6 +5,9 @@ import com.megacrit.cardcrawl.orbs.AbstractOrb;
 import com.megacrit.cardcrawl.orbs.EmptyOrbSlot;
 
 public class EmptyOrbSlotState extends OrbState {
+    @Override
+    public String getLookupKey() { return "EmptyOrbSlot"; }
+
     public EmptyOrbSlotState(AbstractOrb orb) {
         super(orb);
     }

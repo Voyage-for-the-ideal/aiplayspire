@@ -33,15 +33,18 @@ public class EvaluationResult {
     /** Encounter-specific adjustment. Zero for the generic evaluator (Phase 2+). */
     public int encounterScore;
 
+    public int mechanismScore;
+    public String mechanismRules = "";
+
     public void computeTotal() {
         totalScore = survivalScore + damageProgressScore + lethalScore + threatScore
-                + scalingScore + resourceScore + encounterScore;
+                + scalingScore + resourceScore + encounterScore + mechanismScore;
     }
 
     @Override
     public String toString() {
-        return String.format("total=%d survival=%d damage=%d lethal=%d threat=%d scaling=%d resource=%d encounter=%d",
+        return String.format("total=%d survival=%d damage=%d lethal=%d threat=%d scaling=%d resource=%d encounter=%d mechanism=%d [%s]",
                 totalScore, survivalScore, damageProgressScore, lethalScore, threatScore,
-                scalingScore, resourceScore, encounterScore);
+                scalingScore, resourceScore, encounterScore, mechanismScore, mechanismRules);
     }
 }

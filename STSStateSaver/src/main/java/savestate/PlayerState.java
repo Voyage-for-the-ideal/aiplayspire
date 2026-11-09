@@ -467,6 +467,11 @@ public class PlayerState extends CreatureState {
         return damagedThisCombat;
     }
 
+    /** Snapshot-only access; never reads or changes the live player. */
+    public String getStanceId() {
+        return stance;
+    }
+
     public String getHandString() {
         return String
                 .format("hand:%s discard:%s", Arrays.stream(hand).map(CardState::getName).sorted()

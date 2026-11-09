@@ -1,0 +1,101 @@
+{
+  "game_state": {
+    "seed": 123,
+    "ascension_level": 20,
+    "act": 2,
+    "floor": 24,
+    "class": "DEFECT",
+    "current_hp": 48,
+    "max_hp": 75,
+    "gold": 91,
+    "room_type": "MonsterRoom",
+    "relics": [
+      {"id": "Cracked Core", "counter": -1},
+      {"id": "Emotion Chip", "counter": -1}
+    ],
+    "potions": [],
+    "combat_state": {
+      "turn": 3,
+      "cards_played_this_turn": 1,
+      "powers_played_this_combat": 2,
+      "attacks_played_this_turn": 0,
+      "skills_played_this_turn": 1,
+      "cards_discarded_this_turn": 0,
+      "times_damaged": 1,
+      "lightning_channeled_this_combat": 7,
+      "frost_channeled_this_combat": 5,
+      "emotion_chip_pending": true,
+      "draw_pile": [],
+      "discard_pile": [],
+      "hand": [
+        {
+          "id": "Gash",
+          "upgrades": 0,
+          "cost": 0,
+          "misc": 0,
+          "base_damage": 11
+        },
+        {
+          "id": "Steam",
+          "upgrades": 1,
+          "cost": 0,
+          "misc": 0,
+          "base_block": 4
+        },
+        {
+          "id": "Genetic Algorithm",
+          "upgrades": 0,
+          "cost": 1,
+          "misc": 17
+        }
+      ],
+      "exhaust_pile": [],
+      "player": {
+        "energy": 2,
+        "block": 9,
+        "orb_slots": 4,
+        "orbs": [
+          {
+            "id": "Lightning",
+            "name": "Lightning",
+            "evoke_amount": 8,
+            "passive_amount": 3
+          },
+          {
+            "id": "Dark",
+            "name": "Dark",
+            "evoke_amount": 31,
+            "passive_amount": 6
+          },
+          {
+            "id": "Plasma",
+            "name": "Plasma",
+            "evoke_amount": 2,
+            "passive_amount": 1
+          },
+          {
+            "id": "Empty",
+            "name": "Empty",
+            "evoke_amount": 0,
+            "passive_amount": 0
+          }
+        ],
+        "powers": [
+          {"id": "Focus", "name": "Focus", "amount": 2}
+        ]
+      },
+      "monsters": [
+        {
+          "id": "Chosen",
+          "is_gone": false,
+          "half_dead": false,
+          "current_hp": 72,
+          "max_hp": 98,
+          "block": 0,
+          "move_id": 1,
+          "powers": []
+        }
+      ]
+    }
+  }
+}

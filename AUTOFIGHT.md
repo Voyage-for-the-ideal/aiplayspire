@@ -2,6 +2,10 @@
 
 本文档说明 `STSStateSaver`、`LudicrousSpeed`、`scumthespire` 三个模块如何共同组成《杀戮尖塔》自动战斗功能。该能力基于 boardengineer 的同名开源项目体系继续集成和改进，目标是在本仓库中形成可构建、可审阅、可扩展的战斗搜索流水线。
 
+C++ 实验链已加入回合搜索、常驻 worker、三档预算和路径复用，启动时不拉起 Java 搜索实例。
+四角色完整替代仍在推进：归档分支、离线报告及剩余机制见 [LIGHTSPEED_MIGRATION.md](docs/LIGHTSPEED_MIGRATION.md)。
+启动步骤见 [BATTLE_ENGINE.md](docs/BATTLE_ENGINE.md)；本文以下双实例流程描述保留的旧 Java 搜索链。
+
 ## 范围
 
 自动战斗只负责战斗内决策和执行，不覆盖地图、事件、商店、选卡等非战斗场景。非战斗决策由 `sts_ai_framework` 和 `selectcard` 负责。
@@ -116,6 +120,69 @@ flowchart LR
 - 丢弃、消耗、复制、梦魇等选择动作的卡牌排序。
 - 对特定卡牌组合做优先或延后处理，例如 `Dropkick`、`Heel Hook`、`Catalyst`、`Turbo`。
 
+## 四角色机制策略
+
+`scumthespire` 的 `strategy` 包在真实引擎搜索之上提供机制评分和动态命令排序。
+`CharacterStrategies` 按主角色提供默认顺序，异色卡按实际颜色选择机制规则；无色卡使用主角色兜底。
+各角色机制评分按实际牌与能力生效，因此棱彩碎片等跨角色组合也可获得对应收益。
+
+| 角色 | 主要适配 |
+|---|---|
+| 铁甲 | 力量与攻击牌、腐化与消耗引擎、可保留格挡、格挡后身体撞击 |
+| 静默 | 两回合毒伤、刀舞能力、弃牌触发、幽魂形态的后续保护与敏捷代价 |
+| 机器人 | 有序球槽、集中后的实际球输出、首球激发、暗球蓄积、等离子能量需求；无球槽不再统一扣分 |
+| 观者 | 愤怒承伤与退出费用、平静退出、真言进度、保留牌与姿态循环 |
+
+毒伤和球的未来收益只观察两回合，第二回合折半，伤害潜力按存活敌人剩余 HP 封顶。
+已结算的伤害、格挡和能量不再次计分；集中直接反映在球输出中，不再额外按层数奖励。
+机制总分限制在 ±20,000，死亡不获得胜利奖励；胜利路径仍按 HP、药水及永久成长比较。
+这些是用于引导搜索的启发式估计，实际胜负与伤害由游戏引擎决定。
+
+来袭伤害估算共用于威胁和生存评分，按敌方力量／虚弱、玩家易伤、姿态、无实体、逐次格挡和缓冲计算。
+缓冲只消耗于穿过格挡的正伤害，多段攻击逐次结算。它不替代原版完整伤害与遗物触发系统。
+
+弃牌、消耗、占卜、检索与保留各使用独立选择目标。占卜先考虑坏牌，随后确认，最后才探索丢弃有用牌；
+零选确认、多选和原有全部合法命令均保留。未识别的选择动作维持原顺序。
+排序键在节点展开时一次计算，比较器只比较固定整数键，同分保持原枚举顺序。
+`BattleAiMod.cardPlayHeuristics` 保留为附加排序扩展，`additionalValueFunctions` 保留为评分扩展。
+
+评分器只读 `SaveState`，新增访问器不改变存档格式；手牌／网格选择命令的索引访问器不改变命令 JSON。
+球类型读取不再构造活游戏球对象，使合成快照与真实快照评分可在无图形环境运行。
+搜索档位、扩展上限、时间上限、50 动作保护和回放校验保持原逻辑。
+服务端添加 `-Dbattleai.debugEvaluation=true` 可输出评分分项、机制规则及命令优先级。
+
+### 策略回归与真实引擎对照
+
+从仓库根执行，按依赖顺序构建并部署：
+
+```powershell
+mvn -f STSStateSaver/pom.xml package
+mvn -f LudicrousSpeed/pom.xml package
+mvn -f scumthespire/pom.xml package
+```
+
+改动前将三个原始 jar 留存于独立 baseline 目录。`scumthespire/tools/benchmark_characters.py`
+使用 conda `spire` 中的 Python 标准库，在输出目录建立独立游戏、JRE、mod 和配置副本。
+它不修改源战斗存档，使用独立端口 15125，并隔离 ModTheSpire 会写入的启用列表。
+固定清单优先按角色选择普通怪、精英和 Boss，再补齐每角色四场；现有存档缺少某类时不能据此宣称该类已验证。
+旧版整数索引式战斗历史不做隐式转换，筛选时跳过。
+
+```powershell
+conda run --no-capture-output -n spire python scumthespire/tools/benchmark_characters.py --game-dir "D:/Program Files/Slay the Spire" --baseline-dir debug/character-strategies/baseline --output-dir debug/character-strategies/comparison --phase baseline
+conda run --no-capture-output -n spire python scumthespire/tools/benchmark_characters.py --game-dir "D:/Program Files/Slay the Spire" --baseline-dir debug/character-strategies/baseline --output-dir debug/character-strategies/comparison --phase candidate
+```
+
+默认 BALANCED 跑完整 16 场清单，FAST／DEEP 各跑每角色一场。预算耗尽时继续从真实结束状态重新规划，
+每段都通过测试模式 `REPLAY` 检查命令状态 diff 和最终状态键；结果记录胜负、HP、药水、耗时、扩展数及回放结果。
+`--manifest-only` 仅生成清单；生成后可独立验证 16 个真实快照的解析和确定性评分：
+
+```powershell
+mvn -f scumthespire/pom.xml "-Dbattleai.realStateManifest=D:/code/aiplayspire/debug/character-strategies/comparison/manifest.json" test
+```
+
+普通构建不依赖本机历史存档，该可选测试未指定清单时跳过。完整引擎对照需要可启动的 ModTheSpire；
+启动失败、缺少场景或回放差异必须单独报告，不得将静态评分通过视作实战胜率提升。
+
 ## 模块间协作流程
 
 ### 发起请求
@@ -160,7 +227,8 @@ startstates/<seed>/<floor>/<index>/start.txt
 - **统一构建顺序**：`build_all.sh` 按依赖顺序构建 `STSStateSaver`、`LudicrousSpeed`、`StSCommunicationMod`、`scumthespire`。
 - **状态兼容性增强**：`SaveState` 对可选字段和旧字段提供默认值读取，并补充回合结束、选择界面、特殊计数等搜索关键字段。
 - **差异状态校验**：服务端可沿命令路径写入 `diffEncode()` 结果，客户端执行命令前用 `SaveState.diff()` 比对预测状态和真实状态。
-- **客户端/服务端容错**：`AiClient` 使用连接和读取超时，断连时清理客户端控制器；`AiServer` 解析失败或连接中断时清理服务端状态。
+- **客户端/服务端容错**：`AiClient` 使用连接和读取超时，断连或收到服务端 `ERROR` 时清理客户端控制器，并自动安排从当前战斗状态延时重发（限次）；`AiServer` 按连接循环 accept，单个请求用全量兜底隔离失败（堆栈写入服务端日志、向客户端回传 `ERROR`），解析失败或连接中断时清理状态并继续等待下一个请求。
+- **状态编码安全性**：动作/选择界面状态只保存轻量索引与快照，动作引用的活游戏对象（生物、视觉特效）分别以场上索引和类名编码，避免状态 diff 序列化被 Gson 反射沿对象引用图撑爆或抛字段冲突。
 - **命令路径热更新**：`CommandRunnerController` 可在已执行部分路径后接收新路径，并校验新旧路径前缀一致。
 - **全败死亡路径兜底**：搜索不存在胜利路线且无可提交进展时，`BattleAiController.noWinFallback()` 改用记录的存活最久死亡线（`deathNode`）作为下发路径，战斗正常打完并以死亡收场。
 - **命令枚举去重**：`CommandList` 对可重复编码的卡牌命令和同名药水命令做去重，降低无意义分支。
@@ -201,6 +269,15 @@ cd scumthespire && mvn package
 4. 进入战斗后点击顶部的 "Start Steve" 按钮，或在配置中启用自动启动。
 
 ## 扩展建议
+
+### 可选本地 C++ 搜索后端
+
+`battle_engine/` 提供 Python 标准库协议网关与隔离 C++ 搜索 worker，默认关闭 Java 回退。
+分别运行 `battle_engine/start.ps1` 和 `battle_engine/start-game.ps1`，即可启动网关和真实游戏客户端；无需第二个游戏实例。
+客户端通过 `-Dbattleai.backend=external -Dbattleai.clientPort=5125` 直接探测网关，不自动启动旧搜索进程。
+当前采用带公开状态与源快照上下文校验的单动作重规划；已有选择界面和未知状态明确报错并留下日志。
+本轮测试聚焦铁甲战士，后续逐项补齐选择与特殊状态，实现完整替代 Java 搜索。
+构建、启动及独立真实引擎验收见 [BATTLE_ENGINE.md](docs/BATTLE_ENGINE.md)。
 
 扩展自动战斗时，应优先确认变更属于哪一层：
 

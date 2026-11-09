@@ -33,6 +33,7 @@ public class AiServer {
 
     public static final String statusUpdateString = "STATUS_UPDATE";
     public static final String commandListString = "COMMAND_LIST";
+    public static final String errorString = "ERROR";
     public static final String pingString = "PING";
     public static final String pongString = "PONG";
     public static final String shutdownString = "SHUTDOWN";
@@ -42,25 +43,85 @@ public class AiServer {
         ThreadFactory namedThreadFactory =
                 new ThreadFactoryBuilder().setNameFormat("server-networking-thread-%d").build();
         ExecutorService executor = Executors.newSingleThreadExecutor(namedThreadFactory);
+        // Exceptions thrown inside this runnable are swallowed by the executor
+        // future, which used to kill the only networking thread silently: the
+        // client saw EOF and stalled mid-battle with no trace in the server
+        // log. Connections are therefore accepted in a loop and every request
+        // is guarded so the client is always told about a failure.
         executor.submit(() -> {
             int port = Integer.getInteger("battleai.port", PORT_NUMBER);
-            try (ServerSocket serverSocket = new ServerSocket(port);
-                 Socket socket = serverSocket.accept();
-                 DataInputStream in = new DataInputStream(new BufferedInputStream(socket
-                         .getInputStream()));
-                 DataOutputStream out = new DataOutputStream(socket.getOutputStream())) {
-
+            try (ServerSocket serverSocket = new ServerSocket(port)) {
                 System.err.println("BATTLEAI_SERVER_READY port=" + port + " testMode=" + isTestMode());
                 while (!BattleAiMod.shutdownRequested) {
-                    if (BattleAiMod.battleAiController == null) {
-                        String requestFilePath = "";
-                        String endSuffix = "/end.txt";
-                        String commandFileName = null;
-                        String clientCwd = null;
-                        boolean statesMatch = true;
-                        boolean shouldWrite = false;
-                        String newContents = "";
-                        try {
+                    try (Socket socket = serverSocket.accept();
+                         DataInputStream in = new DataInputStream(new BufferedInputStream(socket
+                                 .getInputStream()));
+                         DataOutputStream out = new DataOutputStream(socket.getOutputStream())) {
+
+                        System.err.println("BATTLEAI_CLIENT_CONNECTED");
+                        serveClient(in, out);
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                        System.err.println("Client disconnected, clearing server for reset");
+                        clearServerState();
+                    }
+                }
+            } catch (IOException e) {
+                e.printStackTrace();
+                System.err.println("Battle AI server socket failed; server is down");
+                clearServerState();
+            }
+        });
+    }
+
+    /** Serves run requests on one client connection until the client goes
+     *  away; the server then accepts the next connection. */
+    private static void serveClient(DataInputStream in, DataOutputStream out) throws IOException {
+        while (!BattleAiMod.shutdownRequested) {
+            if (BattleAiMod.battleAiController != null) {
+                continue;
+            }
+
+            try {
+                handleRunRequest(in, out);
+            } catch (IOException e) {
+                throw e;
+            } catch (Throwable t) {
+                // A crashing request must not kill the networking thread: log
+                // it (the tee'd server log is the only console this process
+                // has), tell the client, and wait for the next request.
+                t.printStackTrace();
+                System.err.println("Run request failed; notifying client and waiting for the next request");
+                LudicrousSpeedMod.controller = BattleAiMod.battleAiController = null;
+                BattleAiMod.shouldStartAiFromServer = false;
+                sendErrorAndDone(out, t);
+            }
+        }
+    }
+
+    private static void sendErrorAndDone(DataOutputStream out, Throwable cause) throws IOException {
+        try {
+            JsonObject error = new JsonObject();
+            error.addProperty("type", "ERROR");
+            error.addProperty("message", "Battle AI request failed: " + cause);
+            out.writeUTF(error.toString());
+            out.writeUTF(doneString);
+        } catch (IOException e) {
+            System.err.println("Could not deliver error response; client connection is gone");
+            throw e;
+        }
+    }
+
+    private static void handleRunRequest(DataInputStream in, DataOutputStream out) throws IOException {
+        {
+            String requestFilePath = "";
+            String endSuffix = "/end.txt";
+            String commandFileName = null;
+            String clientCwd = null;
+            boolean statesMatch = true;
+            boolean shouldWrite = false;
+            String newContents = "";
+            try {
                             String runRequestString = in.readUTF();
                             JsonObject runRequest = new JsonParser().parse(runRequestString)
                                                                     .getAsJsonObject();
@@ -70,7 +131,7 @@ public class AiServer {
                                 pong.addProperty("type", pongString);
                                 pong.addProperty("test_mode", isTestMode());
                                 out.writeUTF(pong.toString());
-                                continue;
+                                return;
                             }
                             if (runRequest.has("type") && shutdownString.equals(runRequest.get("type").getAsString())) {
                                 if (!isTestMode()) {
@@ -81,11 +142,20 @@ public class AiServer {
                                 shutdown.addProperty("type", shutdownString);
                                 shutdown.addProperty("accepted", true);
                                 out.writeUTF(shutdown.toString());
-                                continue;
+                                return;
                             }
                             if (runRequest.has("type") && replayString.equals(runRequest.get("type").getAsString())) {
                                 handleReplay(runRequest, out);
-                                continue;
+                                return;
+                            }
+                            if (runRequest.has("type") && "CARD_POOLS".equals(runRequest.get("type").getAsString())) {
+                                if (!isTestMode()) { throw new IllegalArgumentException("CARD_POOLS is test-mode only"); }
+                                SaveState.forFile(runRequest.get("fileName").getAsString()).initPlayerAndCardPool();
+                                JsonObject pools = new JsonObject();
+                                pools.addProperty("type", "CARD_POOLS");
+                                pools.add("combat_card_pools", BattleCardPools.current());
+                                out.writeUTF(pools.toString());
+                                return;
                             }
 
                             requestFilePath = runRequest.get("fileName").getAsString();
@@ -130,6 +200,7 @@ public class AiServer {
                             e.printStackTrace();
                             System.err.println("Failed to parse client request; clearing server for reset");
                             clearServerState();
+                            sendErrorAndDone(out, e);
                             return;
                         }
 
@@ -261,16 +332,7 @@ public class AiServer {
 
                         System.err.println("Sending done");
                         out.writeUTF(doneString);
-                    }
-                }
-
-
-            } catch (IOException e) {
-                e.printStackTrace();
-                System.err.println("Client Disconnected, clearing server for reset");
-                clearServerState();
-            }
-        });
+        }
     }
 
     private static void clearServerState() {
@@ -326,6 +388,18 @@ public class AiServer {
             response.addProperty("commands_executed", BattleAiMod.replayController.commandsExecuted());
             response.addProperty("error", BattleAiMod.replayController.error());
             response.addProperty("diff_valid", BattleAiMod.replayController.error() == null);
+            if (request.has("include_projection") && request.get("include_projection").getAsBoolean()) {
+                response.add("projection", BattleAiMod.replayController.finalProjection());
+            }
+            if (request.has("state_file") && BattleAiMod.replayController.error() == null) {
+                Path target = Paths.get(request.get("state_file").getAsString()).toAbsolutePath().normalize();
+                if (target.equals(Paths.get(request.get("fileName").getAsString()).toAbsolutePath().normalize())) {
+                    throw new IllegalArgumentException("REPLAY output must differ from its source snapshot");
+                }
+                java.nio.file.Files.createDirectories(target.getParent());
+                java.nio.file.Files.write(target, BattleAiMod.replayController.finalSnapshot().toString().getBytes(StandardCharsets.UTF_8));
+                response.addProperty("state_file", target.toString());
+            }
         }
         out.writeUTF(response.toString());
         BattleAiMod.replayController = null;
