@@ -122,6 +122,22 @@ conda run --no-capture-output -n spire python -m sts_ai_framework `
 - 客户端随请求导出实际战斗卡池迭代顺序，原生侧用于 Creative AI、Hello World、Discovery 等随机生成。
   缺失卡池且搜索触及相应机制时明确报错；只恢复 seed/counter 仍不足以固定卡牌生成结果。
 
+## `layered-v1` A10 候选
+
+默认仍是原搜索。`search_policy=layered-v1` 启用 1／2／4／6 回合分层搜索；
+`tactical_ordering=false` 用于隔离深度变化。Headless 以 `--combat-search layered-v1`
+显式选用：普通战 5,000 展开／250 ms，精英（含燃烧精英）和 Boss 10,000 展开／500 ms。
+旧式平铺 Headless r10 的接入仅在隔离副本使用：
+`git apply --unidiff-zero --ignore-space-change /absolute/path/layered-v1-r10.patch`。
+带 `--pilot20 --seed-base <新种子起点>` 的独立双 lane 计划每角色共跑 5 局。
+
+同预算基准：`python -m battle_engine.tools.oracle --balanced-ab formal --game-dir <原版游戏目录> --manifest <冻结清单> --worker <候选二进制>`。
+清单结构为 `{"cases":[{"path":"绝对路径","sha256":"…","role":"IRONCLAD","room":"MONSTER","seed":123,"split":"pilot"}]}`；
+房间为 MONSTER／ELITE／BOSS。正式模式每角色每房间要求 3 个 pilot 和 20 个 holdout，
+两组种子不得交叉。`--balanced-ab pilot --pilot-arm legacy|depth|combined` 用于消融，
+`--balanced-ab smoke` 只检查链路。原版回放不一致、超预算和未到终局单独记录。
+部署档和双方 15,000／90 s 的完整档均通过后，才进入服务器候选试跑。
+
 ## 验证命令
 
 ```powershell

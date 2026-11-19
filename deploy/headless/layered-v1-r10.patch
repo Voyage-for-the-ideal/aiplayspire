@@ -1,0 +1,71 @@
+--- a/sts_ai_framework/headless_agent.py
++++ b/sts_ai_framework/headless_agent.py
+@@ -12,0 +13 @@
++from battle_engine.profiles import TURN_POLICIES, deployment_budget
+@@ -100 +101,4 @@
+-    def __init__(self, root, launcher, native, checkpoint, *, max_actions=3000, ascension=10):
++    combat_search = "legacy"
++
++    def __init__(self, root, launcher, native, checkpoint, *, max_actions=3000, ascension=10,
++                 combat_search="legacy"):
+@@ -113,0 +118,7 @@
++        if combat_search not in TURN_POLICIES:
++            raise ValueError("Invalid combat search policy")
++        self.combat_search = combat_search
++
++    @property
++    def combat_policy(self):
++        return "native-fast" if self.combat_search == "legacy" else self.combat_search
+@@ -136 +147 @@
+-            writer = EpisodeWriter(self.root, role=role, seed=seed, policy={"combat": "native-fast", "noncombat": "format12-value+existing-router", "model_sha256": self.model_sha, "ascension": self.ascension, "runtime_sha256": self.runtime_hashes, "profile_manifest_sha256": self.profile_sha, "attempt_id": attempt_id})
++            writer = EpisodeWriter(self.root, role=role, seed=seed, policy={"combat": self.combat_policy, "noncombat": "format12-value+existing-router", "model_sha256": self.model_sha, "ascension": self.ascension, "runtime_sha256": self.runtime_hashes, "profile_manifest_sha256": self.profile_sha, "attempt_id": attempt_id})
+@@ -151,2 +162,6 @@
+-                    native = require(cpp.execute({"snapshot": before.snapshot, "session_id": run,
+-                        "search_profile": "FAST", "max_expansions": 5000, "timeout_ms": 250}, 250))
++                    cap, timeout = deployment_budget(raw.get("room"), self.combat_search)
++                    request = {"snapshot": before.snapshot, "session_id": run,
++                               "search_profile": "FAST", "max_expansions": cap, "timeout_ms": timeout}
++                    if self.combat_search != "legacy":
++                        request["search_policy"] = self.combat_search
++                    native = require(cpp.execute(request, timeout))
+@@ -157 +172 @@
+-                    policy = {"policy": "native-fast", "metrics": native.get("metrics", {})}
++                    policy = {"policy": self.combat_policy, "metrics": native.get("metrics", {})}
+@@ -228,0 +244 @@
++    p.add_argument("--combat-search", choices=TURN_POLICIES, default="legacy")
+@@ -233 +249,2 @@
+-    agent = HeadlessCollector(a.root, a.launcher, a.native, a.checkpoint, max_actions=a.max_actions, ascension=a.ascension)
++    agent = HeadlessCollector(a.root, a.launcher, a.native, a.checkpoint, max_actions=a.max_actions,
++                              ascension=a.ascension, combat_search=a.combat_search)
+--- a/sts_ai_framework/headless_batch160.py
++++ b/sts_ai_framework/headless_batch160.py
+@@ -14,0 +15 @@
++from battle_engine.profiles import TURN_POLICIES
+@@ -169 +170 @@
+-              schedule=None):
++              schedule=None, pilot20=False):
+@@ -173,0 +175,5 @@
++    if pilot20:
++        if seeds is not None or schedule is not None or ascension!=10 or seed_base==5050201:
++            raise ValueError('Pilot requires A10 and a new seed base')
++        global_cases=global_cases[:20]
++        cases=[c for c in global_cases if c['lane']==lane]
+@@ -191 +197 @@
+-                                (20 if seeds is None else None),
++                                (len(cases)//len(ROLES) if seeds is None else None),
+@@ -341,0 +348 @@
++    parser.add_argument('--combat-search',choices=TURN_POLICIES,default='legacy')
+@@ -344,0 +352 @@
++    cohort.add_argument('--pilot20',action='store_true')
+@@ -347,0 +356,4 @@
++    search_options={}
++    if args.combat_search!='legacy':
++        configuration['combat_search']=args.combat_search
++        search_options['combat_search']=args.combat_search
+@@ -351 +363,2 @@
+-                   schedule=read_followup_schedule(args.schedule) if args.schedule else None)
++                   schedule=read_followup_schedule(args.schedule) if args.schedule else None,
++                   pilot20=args.pilot20)
+@@ -364 +377 @@
+-                                           ascension=args.ascension,max_actions=args.max_actions)
++                                           ascension=args.ascension,max_actions=args.max_actions,**search_options)

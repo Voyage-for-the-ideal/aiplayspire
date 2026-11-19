@@ -16,7 +16,7 @@ using namespace sts;
 namespace bridge {
 namespace {
 struct Cache {
-    std::string owner,profile,mode;Json expected,identities,pools,attributes;
+    std::string owner,profile,mode,policy;bool tacticalOrdering=true;Json expected,identities,pools,attributes;
     int cap=0;long budget=0;
     std::vector<search::Action> path;std::size_t offset=0;
 };
@@ -357,8 +357,9 @@ Json search(const Json &request) {
         std::vector<search::Action> actions;search::ActionEnumerationOptions options;
         search::enumerateActions(bc,options,true,actions);
         Json ranks=Json::array();
+        const bool layered=request.value("search_policy",std::string("legacy"))=="layered-v1";
         for(const auto &a:actions)ranks.push_back({{"type",int(a.getActionType())},{"source",a.getSourceIdx()},
-            {"target",a.getTargetIdx()},{"priority",priority(bc,a)}});
+            {"target",a.getTargetIdx()},{"priority",layered?layeredPriority(bc,a):priority(bc,a)}});
         Json selections=Json::array();
         for(int i=0;i<bc.cards.cardsInHand;++i){Json scores=Json::array();
             for(auto purpose:{search::SelectionPurpose::DISCARD,search::SelectionPurpose::EXHAUST,
@@ -408,23 +409,30 @@ Json search(const Json &request) {
     } else currentIds=imported.selectionIdentities;
     auto owner=request.value("session_id",std::string());auto profile=request.value("search_profile",std::string("BALANCED"));
     auto mode=request.value("search_mode",std::string("turn"));
+    const auto policy=request.value("search_policy",std::string("legacy"));
+    const bool tacticalOrdering=request.value("tactical_ordering",true);
     int cap=std::clamp(request.value("max_expansions",15000),1,1000000);long budget=std::clamp(request.value("timeout_ms",2000L),1L,90000L);
     require(profile=="FAST" || profile=="BALANCED" || profile=="DEEP","unknown_search_profile");
     require(mode=="turn" || mode=="mcts","unknown_search_mode");
+    require(policy=="legacy" || (policy=="layered-v1" && mode=="turn"),"unknown_search_policy");
     auto pools=snapshot.value("_combat_card_pools",Json());auto ids=identity(bc,currentIds);auto key=stateKey(bc);auto attributes=cardAttributes(snapshot);
-    bool hit=!owner.empty() && cache.owner==owner && cache.profile==profile && cache.mode==mode && cache.pools==pools && cache.cap==cap && cache.budget==budget &&
+    bool hit=!owner.empty() && cache.owner==owner && cache.profile==profile && cache.mode==mode && cache.policy==policy &&
+        cache.tacticalOrdering==tacticalOrdering && cache.pools==pools && cache.cap==cap && cache.budget==budget &&
         !key.is_null() && key==cache.expected && !ids.is_null() && ids==cache.identities && cache.attributes==attributes && cache.offset<cache.path.size();
     Json cacheDiff;
     if(request.value("debug_keys",false) && cache.owner==owner)cacheDiff={{"state",Json::diff(cache.expected,key)},{"identity",Json::diff(cache.identities,ids)}};
     int expansions=0,duplicates=0;std::string stop="PATH_CACHE";
+    TurnSearchResult effort;
     if(!hit) {
         cache=Cache{};cache.owner=owner;cache.profile=profile;cache.mode=mode;cache.pools=pools;cache.attributes=attributes;
+        cache.policy=policy;cache.tacticalOrdering=tacticalOrdering;
         cache.cap=cap;cache.budget=budget;
         if(mode=="mcts") {
             search::BattleScumSearcher2 solver(bc);solver.allowPotions=true;solver.allowRootPotions=true;solver.search(cap,budget);
             cache.path=solver.bestActionSequence;expansions=int(solver.root.simulationCount);stop=solver.stopReason;
         } else {
-            auto result=turnSearch(bc,cap,budget,profile);cache.path=std::move(result.path);expansions=result.expansions;duplicates=result.duplicates;stop=result.reason;
+            effort=policy=="layered-v1"?layeredTurnSearch(bc,cap,budget,tacticalOrdering):turnSearch(bc,cap,budget,profile);
+            cache.path=std::move(effort.path);expansions=effort.expansions;duplicates=effort.duplicates;stop=effort.reason;
         }
     }
     require(cache.offset<cache.path.size(),"search_no_action");
@@ -491,6 +499,10 @@ Json search(const Json &request) {
         {"cache_hit",hit},{"cached_actions_remaining",cache.path.size()-cache.offset},
         {"search_mode",mode},{"search_profile",profile},{"search_stop_reason",stop}}},
         {"predicted_outcome",int(bc.outcome)}};
+    if(policy=="layered-v1")response["metrics"].update(Json{
+        {"search_policy",policy},{"requested_expansions",cap},{"requested_timeout_ms",budget},
+        {"max_completed_turns",effort.maxCompletedTurns},{"selected_completed_turns",effort.selectedCompletedTurns},
+        {"planner_us",effort.searchMicros}});
     // Supported selectors have an explicit observable screen; terminal cleanup
     // and unknown selectors still have no validated next-state boundary.
     const auto screen=decisionScreen(bc);

@@ -1,5 +1,14 @@
 """Native budgets; Java server expansion counts remain a separate benchmark."""
 PROFILES = {"FAST": (5000, 250), "BALANCED": (15000, 2000), "DEEP": (50000, 10000)}
+TURN_POLICIES = ("legacy", "layered-v1")
+
+
+def deployment_budget(room, policy="layered-v1"):
+    if policy not in TURN_POLICIES:
+        raise ValueError(f"unknown_search_policy:{policy}")
+    if policy == "layered-v1" and room in ("MonsterRoomElite", "MonsterRoomBoss", "ELITE", "BOSS"):
+        return 10000, 500
+    return PROFILES["FAST"]
 
 
 def budgets(request, max_time_ms=90000):

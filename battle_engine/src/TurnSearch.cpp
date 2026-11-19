@@ -6,6 +6,7 @@
 #include "combat/ExecutionBudget.h"
 #include "combat/CharacterSelection.h"
 #include <algorithm>
+#include <deque>
 #include <memory>
 #include <queue>
 #include <unordered_set>
@@ -258,5 +259,182 @@ TurnSearchResult turnSearch(const BattleContext &root,int cap,long timeout,const
     result.victory=bool(win);result.reason=win?"VICTORY":allLose?"ALL_LOSE":result.expansions>=cap?"EXPANSION_LIMIT":std::chrono::steady_clock::now()>=deadline?"TIMEOUT":"SEARCH_EXHAUSTED";
     for(auto n=chosen;n && n->parent;n=n->parent)result.path.push_back(n->action);
     std::reverse(result.path.begin(),result.path.end());return result;
+}
+
+int layeredPriority(const BattleContext &b,const SA &a) {
+    const int base=priority(b,a);
+    if(a.getActionType()!=AT::CARD)return base;
+    const auto &c=b.cards.hand[a.getSourceIdx()];
+    auto handHas=[&](CardId id) {
+        for(int i=0;i<b.cards.cardsInHand;++i)if(b.cards.hand[i].id==id)return true;
+        return false;
+    };
+    auto rank=[&](int p){return p*1000-sts::search::Expert::getPlayOrdering(c.id);};
+    switch(c.id) {
+    case CardId::CORRUPTION:case CardId::DARK_EMBRACE:case CardId::FEEL_NO_PAIN: {
+        bool fuel=false,skill=false;
+        available(b,[&](const CardInstance &card){
+            skill|=card.getType()==CardType::SKILL;
+            fuel|=card.doesExhaust();
+        });
+        fuel|=(power(b,PS::CORRUPTION)>0 && skill) || has(b,CardId::TRUE_GRIT) ||
+              has(b,CardId::SECOND_WIND) || has(b,CardId::FIEND_FIRE) || has(b,CardId::BURNING_PACT);
+        return rank(fuel || (c.id==CardId::CORRUPTION && skill)?90:-60);
+    }
+    case CardId::SPOT_WEAKNESS: {
+        if(!c.requiresTarget())return base;
+        const auto move=b.monsters.arr[a.getTargetIdx()].getMoveBaseDamage(b);
+        return rank(move.attackCount>0 && move.damage>0?70:-100);
+    }
+    case CardId::DUALCAST:case CardId::RECURSION:case CardId::MULTI_CAST: {
+        if(b.player.orbSlots<=0)return rank(-100);
+        switch(b.player.orbTypes[0]) {
+        case Orb::FROST:return rank(incoming(b)>0?65:-30);
+        case Orb::DARK:return rank(b.player.orbData[0]>=enemyHp(b)?100:20);
+        case Orb::LIGHTNING:case Orb::PLASMA:return rank(35);
+        default:return rank(-100);
+        }
+    }
+    case CardId::TURBO: {
+        int demand=0;
+        for(int i=0;i<b.cards.cardsInHand;++i)
+            if(b.cards.hand[i].id!=CardId::TURBO)demand+=std::max(0,int(b.cards.hand[i].costForTurn));
+        return rank(demand>b.player.energy?70:-90);
+    }
+    case CardId::DEFEND_RED:case CardId::DEFEND_GREEN:case CardId::DEFEND_BLUE:case CardId::DEFEND_PURPLE:
+    case CardId::ARMAMENTS:case CardId::IRON_WAVE:case CardId::SHRUG_IT_OFF:case CardId::TRUE_GRIT:
+    case CardId::POWER_THROUGH:case CardId::FLAME_BARRIER:case CardId::IMPERVIOUS:
+        return handHas(CardId::BODY_SLAM)?std::max(base,rank(40)):base;
+    default:return base;
+    }
+}
+TurnSearchResult layeredTurnSearch(const BattleContext &root,int cap,long timeout,bool tacticalOrdering) {
+    using Clock=std::chrono::steady_clock;
+    using namespace std::chrono;
+    const auto started=Clock::now();
+    const auto deadline=started+milliseconds(timeout);
+    constexpr std::array<int,4> horizons{1,2,4,6};
+    constexpr int maxTurns=horizons.back();
+    sts::search::ActionEnumerationOptions options;options.allowPotions=true;options.allowRootPotions=true;
+    struct Node {
+        BattleContext state;
+        std::shared_ptr<Node> parent;
+        SA action;
+        int first=-1,score=0;
+        bool retained=true;
+    };
+    using Ptr=std::shared_ptr<Node>;
+    struct Cursor {Ptr node;std::vector<SA> actions;std::size_t next=0;};
+    struct Branch {Ptr start;std::vector<Cursor> stack;};
+    auto actionsFor=[&](const Ptr &node){
+        Cursor c{node,{},0};
+        sts::search::enumerateActions(node->state,options,!node->parent,c.actions);
+        std::vector<std::pair<int,SA>> ranked;ranked.reserve(c.actions.size());
+        for(const auto &a:c.actions)
+            ranked.emplace_back(tacticalOrdering?layeredPriority(node->state,a):priority(node->state,a),a);
+        std::stable_sort(ranked.begin(),ranked.end(),[](const auto &a,const auto &b){return a.first>b.first;});
+        for(std::size_t i=0;i<ranked.size();++i)c.actions[i]=ranked[i].second;
+        return c;
+    };
+    TurnSearchResult result;
+    auto first=std::make_shared<Node>();first->state=root;
+    auto roots=actionsFor(first);
+    if(roots.actions.size()==1) {
+        result.path=roots.actions;result.reason="FORCED_ROOT_ACTION";
+        result.searchMicros=duration_cast<microseconds>(Clock::now()-started).count();
+        return result;
+    }
+    std::array<std::deque<Branch>,maxTurns> work;
+    std::array<std::vector<Ptr>,maxTurns+1> boundary;
+    // Include the first action in deduplication: equivalent states reached from
+    // different root actions still supply evidence for comparing those actions.
+    std::vector<std::unordered_set<std::string>> seen(roots.actions.size());
+    Ptr win,death,progress;
+    auto depth=[&](const Ptr &n){return std::clamp(n->state.turn-root.turn,0,maxTurns);};
+    auto admit=[&](Ptr n,int level) {
+        auto &pool=boundary[level];
+        pool.push_back(n);
+        std::stable_sort(pool.begin(),pool.end(),[](const Ptr &a,const Ptr &b){return a->score>b->score;});
+        std::vector<int> counts(roots.actions.size());
+        auto it=std::remove_if(pool.begin(),pool.end(),[&](const Ptr &p){
+            if(++counts[p->first]<=2)return false;
+            p->retained=false;return true;
+        });
+        pool.erase(it,pool.end());
+        while(pool.size()>8){pool.back()->retained=false;pool.pop_back();}
+        if(n->retained && level<maxTurns)work[level].push_back({n,{actionsFor(n)}});
+    };
+    auto advance=[&](Cursor &c,int rootIndex,Clock::time_point until,Branch *branch) {
+        auto child=std::make_shared<Node>();
+        child->state=c.node->state;child->parent=c.node;child->action=c.actions[c.next];
+        child->first=rootIndex;
+        try {ExecutionBudget budget(until);child->action.execute(child->state);}
+        catch(const ExecutionTimeout &) {return false;}
+        ++c.next;++result.expansions;
+        if(child->state.undefinedBehaviorEvoked)throw Unsupported("engine_undefined_behavior");
+        child->score=evaluate(root,child->state).total();
+        if(child->state.outcome==Outcome::PLAYER_LOSS || child->state.player.curHp<=0) {
+            if(!death || child->state.turn>death->state.turn)death=child;
+            return true;
+        }
+        if(child->state.outcome==Outcome::PLAYER_VICTORY) {
+            if(!win || child->state.player.curHp>win->state.player.curHp ||
+               (child->state.player.curHp==win->state.player.curHp && child->score>win->score))win=child;
+            return true;
+        }
+        auto key=stateKey(child->state);
+        if(!key.is_null() && !seen[rootIndex].insert(key.dump()).second){++result.duplicates;return true;}
+        if(!progress || child->score>progress->score)progress=child;
+        const int level=depth(child);
+        if(level>(branch?depth(branch->start):0) && !key.is_null()) {
+            result.maxCompletedTurns=std::max(result.maxCompletedTurns,level);
+            admit(child,level);
+        } else if(level<maxTurns) {
+            if(branch)branch->stack.push_back(actionsFor(child));
+            else work[0].push_back({child,{actionsFor(child)}});
+        }
+        return true;
+    };
+    for(int stage=0;stage<int(horizons.size());++stage) {
+        const auto until=started+(deadline-started)*(stage+1)/int(horizons.size());
+        const int ceiling=(cap*(stage+1)+int(horizons.size())-1)/int(horizons.size());
+        while(result.expansions<ceiling && Clock::now()<until) {
+            if(roots.next<roots.actions.size()) {
+                if(!advance(roots,int(roots.next),until,nullptr))break;
+                continue;
+            }
+            int level=horizons[stage]-1;
+            while(level>=0 && work[level].empty())--level;
+            if(level<0)break;
+            auto &queue=work[level];
+            auto branch=std::move(queue.front());queue.pop_front();
+            if(!branch.start->retained)continue;
+            while(!branch.stack.empty() && branch.stack.back().next==branch.stack.back().actions.size())
+                branch.stack.pop_back();
+            if(branch.stack.empty())continue;
+            const bool advanced=advance(branch.stack.back(),branch.start->first,until,&branch);
+            if(advanced)queue.push_back(std::move(branch));
+            else {queue.push_front(std::move(branch));break;}
+        }
+    }
+    Ptr best;
+    for(int level=maxTurns;level>0;--level) {
+        const auto &pool=boundary[level];
+        if(pool.empty())continue;
+        if(!best)best=pool.front();
+        if(std::any_of(pool.begin(),pool.end(),[&](const Ptr &n){return n->first!=pool.front()->first;})) {
+            best=pool.front();break;
+        }
+    }
+    Ptr chosen=win?win:best?best:progress?progress:death;
+    result.victory=bool(win);
+    result.reason=win?"VICTORY":result.expansions>=cap?"EXPANSION_LIMIT":
+        Clock::now()>=deadline?"TIMEOUT":result.maxCompletedTurns==maxTurns?"TURN_HORIZON":"SEARCH_EXHAUSTED";
+    if(chosen)result.selectedCompletedTurns=depth(chosen);
+    result.maxCompletedTurns=std::max(result.maxCompletedTurns,result.selectedCompletedTurns);
+    for(auto n=chosen;n && n->parent;n=n->parent)result.path.push_back(n->action);
+    std::reverse(result.path.begin(),result.path.end());
+    result.searchMicros=duration_cast<microseconds>(Clock::now()-started).count();
+    return result;
 }
 }

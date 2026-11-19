@@ -59,7 +59,12 @@ def main():
     parser.add_argument("--simulations", type=int, default=1000)
     parser.add_argument("--steps", type=int, default=1)
     parser.add_argument("--allow-boundary-fallback", action="store_true")
+    parser.add_argument("--balanced-ab", choices=("smoke", "pilot", "formal"))
+    parser.add_argument("--pilot-arm", choices=("legacy", "depth", "combined"), default="combined")
+    parser.add_argument("--worker", type=Path, help="Explicit candidate binary for --balanced-ab")
     args = parser.parse_args()
+    if args.balanced_ab and not args.worker:
+        parser.error("--balanced-ab requires --worker")
     runtime = ROOT / "out" / f"oracle-{time.time_ns()}"
     mods = runtime / "mods"
     mods.mkdir(parents=True)
@@ -70,14 +75,16 @@ def main():
         shutil.copy2(args.game_dir / name, runtime / name)
     enabled = ["BaseMod.jar", "SaveStateMod.jar", "StSLib.jar", "LudicrousSpeed.jar", "BattleAiMod.jar", "CommunicationMod.jar"]
     for name in enabled:
-        shutil.copy2(ROOT.parent / "_ModTheSpire/mods" / name, mods / name)
+        source = (args.game_dir / "mods" if args.balanced_ab else ROOT.parent / "_ModTheSpire/mods") / name
+        shutil.copy2(source, mods / name)
     env = os.environ.copy()
     env["LOCALAPPDATA"] = env["APPDATA"] = str(runtime / "appdata")
     config = runtime / "appdata/ModTheSpire"
     config.mkdir(parents=True)
     (config / "mod_lists.json").write_text(json.dumps(dict(defaultList="Oracle", lists={"Oracle": enabled})), encoding="utf-8")
     command = [str(args.game_dir.resolve() / "jre/bin/java.exe"), "-DisServer=true", "-DisPlaidMode=true",
-        "-Dbattleai.testMode=true", f"-Dbattleai.port={args.port}", "-Xms512m", "-Xmx2048m", "-jar", "ModTheSpire.jar",
+        "-Dbattleai.testMode=true", f"-Dbattleai.port={args.port}", "-Dcommunicationmod.port=15001",
+        "-Xms512m", "-Xmx2048m", "-jar", "ModTheSpire.jar",
         "--profile", "Oracle", "--skip-launcher", "--skip-intro", "--jre51"]
     with (runtime / "server.log").open("w", encoding="utf-8") as log:
         process = subprocess.Popen(command, cwd=runtime, env=env, stdout=log, stderr=subprocess.STDOUT,
@@ -98,6 +105,14 @@ def main():
                 if time.monotonic() > deadline:
                     raise TimeoutError(f"Java startup timeout: {runtime / 'server.log'}")
                 time.sleep(1)
+            if args.balanced_ab:
+                from battle_engine.tools import balanced_ab
+                return balanced_ab.main([
+                    "--manifest", str(args.manifest.resolve()), "--oracle-port", str(args.port),
+                    "--worker", str(args.worker.resolve()), "--java-jar", str(mods / "BattleAiMod.jar"),
+                    "--output", str(runtime / "balanced-ab"), "--split", args.balanced_ab,
+                    "--pilot-arm", args.pilot_arm,
+                ])
             acceptance_command = [sys.executable, "-u", str(ROOT / "tools/acceptance.py"), "--manifest", str(args.manifest.resolve()),
                 "--oracle-port", str(args.port), "--output", str(runtime / "report.json"),
                 "--timeout-ms", str(args.timeout_ms), "--simulations", str(args.simulations), "--steps", str(args.steps)]
