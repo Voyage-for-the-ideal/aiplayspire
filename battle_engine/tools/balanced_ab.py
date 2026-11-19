@@ -17,7 +17,7 @@ import time
 from zipfile import ZipFile
 
 from battle_engine import protocol
-from battle_engine.profiles import deployment_budget
+from battle_engine.profiles import benchmark_budget
 from battle_engine.state import load, normalize
 from battle_engine.tools.acceptance import card_pools, replay, transition_matches
 from battle_engine.worker import Worker
@@ -205,9 +205,9 @@ def execute_case(port, worker, row, tier, side, workdir, *, policy="layered-v1",
     state = load(state_path)
     initial_hp = state["player_state"]["creature"]["current_health"]
     initial_max_hp, initial_gold = permanent_resources(state)
-    cap, timeout = (15000, 90000) if tier == "complete" else deployment_budget(row["room"])
-    remaining_nodes, remaining_ms = 20 * cap, 20 * timeout
-    result = {"outcome": "incomplete", "steps": [], "allocated": [cap, timeout], "potions_used": 0}
+    (cap, timeout), (remaining_nodes, remaining_ms) = benchmark_budget(row["room"], tier)
+    result = {"outcome": "incomplete", "steps": [], "allocated": [cap, timeout], "potions_used": 0,
+              "fight_budget": [remaining_nodes, remaining_ms]}
     start = time.monotonic()
     try:
         for attempt in range(1000):
@@ -232,16 +232,22 @@ def execute_case(port, worker, row, tier, side, workdir, *, policy="layered-v1",
                 replay_source = state_path
                 snap = normalize(state)
                 snap["_combat_card_pools"] = card_pools(port, state_path)
-                reply = worker.execute(dict(snapshot=snap, search_profile="BALANCED" if tier=="complete" else "FAST",
-                                            search_policy=policy, tactical_ordering=tactical, max_expansions=nodes,
-                                            timeout_ms=ms), ms)
+                request = dict(snapshot=snap, search_profile="BALANCED" if tier=="complete" else "FAST",
+                               search_policy=policy, tactical_ordering=tactical, max_expansions=nodes,
+                               timeout_ms=ms)
+                if policy=="layered-v1":
+                    request["session_id"]=str(directory)
+                reply = worker.execute(request, ms)
                 if not reply.get("supported"):
                     raise ValueError(f"Native unsupported: {reply.get('reason')}")
                 m = reply["metrics"]
-                spent_ms = max(1, math.ceil(m["planner_us"] / 1000)) if policy=="layered-v1" else max(1,m["search_ms"])
+                spent_ms = (0 if m["cache_hit"] else max(1, math.ceil(m["planner_us"] / 1000))) \
+                    if policy=="layered-v1" else max(1,m["search_ms"])
             spent_nodes = m["expanded_nodes"]
             if type(spent_nodes) is not int or not 0 <= spent_nodes <= nodes:
                 raise ValueError("Invalid expansion accounting")
+            if side=="cpp" and m.get("cache_hit") and (spent_nodes or spent_ms):
+                raise ValueError("Unexpected search charged for a cached suffix")
             remaining_nodes -= spent_nodes
             remaining_ms -= spent_ms
             commands = reply.get("commands")
@@ -282,6 +288,8 @@ def execute_case(port, worker, row, tier, side, workdir, *, policy="layered-v1",
             result["reason"] = "action_limit"
     except (ValueError, RuntimeError, TimeoutError, OSError, KeyError, EOFError, subprocess.TimeoutExpired) as error:
         result["reason"] = str(error)
+    result["search_used"]=[result["fight_budget"][0]-remaining_nodes,result["fight_budget"][1]-remaining_ms]
+    result["cached_actions"]=sum(bool(step["metrics"].get("cache_hit")) for step in result["steps"])
     result["elapsed_s"] = round(time.monotonic() - start, 3)
     return result
 

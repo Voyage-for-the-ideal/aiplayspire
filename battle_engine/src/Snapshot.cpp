@@ -17,10 +17,27 @@ namespace bridge {
 namespace {
 struct Cache {
     std::string owner,profile,mode,policy;bool tacticalOrdering=true;Json expected,identities,pools,attributes;
+    Json pathContext, expectedProjection;
     int cap=0;long budget=0;
     std::vector<search::Action> path;std::size_t offset=0;
 };
 Cache cache;
+Json layeredPathContext(const Json &snapshot,const std::array<int,5> &targets,bool exactRngSupported=false) {
+    if(snapshot.value("is_screen_up",false))return nullptr;
+    Json context={{"targets",targets},{"act",snapshot.value("act_num",0)},
+        {"room_type",snapshot.at("cur_map_node_state").value("room_type",std::string())}};
+    if(snapshot.contains("_headless_rng")) {
+        if(!exactRngSupported)return nullptr;
+        const auto &rng=snapshot.at("_headless_rng");
+        const auto &streams=rng.at("streams");
+        Json fixed={{"policy",rng.at("policy")},{"math",rng.at("math")}};
+        // Modeled streams are already part of the physical native key.
+        for(auto name:{"monster","map","event","merchant","treasure","relic"})
+            fixed[name]=streams.at(name);
+        context["headless"]=std::move(fixed);
+    }
+    return context;
+}
 Json cardAttributes(const Json &snapshot) {
     Json result=Json::object();
     for(auto pile:{"hand","draw_pile","discard_pile","exhaust_pile"})for(const auto &card:snapshot.at("player_state").at(pile)) {
@@ -416,9 +433,16 @@ Json search(const Json &request) {
     require(mode=="turn" || mode=="mcts","unknown_search_mode");
     require(policy=="legacy" || (policy=="layered-v1" && mode=="turn"),"unknown_search_policy");
     auto pools=snapshot.value("_combat_card_pools",Json());auto ids=identity(bc,currentIds);auto key=stateKey(bc);auto attributes=cardAttributes(snapshot);
-    bool hit=!owner.empty() && cache.owner==owner && cache.profile==profile && cache.mode==mode && cache.policy==policy &&
+    const bool layered=policy=="layered-v1";
+    const auto pathContext=layered?layeredPathContext(snapshot,imported.monsterMap):Json();
+    const bool layeredReuse=layered && request.value("operation",std::string("search"))=="search" &&
+        request.value("reuse_path",true) && !pathContext.is_null();
+    const bool reusable=layered?layeredReuse:true;
+    bool hit=reusable && !owner.empty() && cache.owner==owner && cache.profile==profile && cache.mode==mode && cache.policy==policy &&
         cache.tacticalOrdering==tacticalOrdering && cache.pools==pools && cache.cap==cap && cache.budget==budget &&
         !key.is_null() && key==cache.expected && !ids.is_null() && ids==cache.identities && cache.attributes==attributes && cache.offset<cache.path.size();
+    if(hit && layered)hit=cache.pathContext==pathContext && cache.expectedProjection==imported.before &&
+        cache.path[cache.offset].isValidAction(bc);
     Json cacheDiff;
     if(request.value("debug_keys",false) && cache.owner==owner)cacheDiff={{"state",Json::diff(cache.expected,key)},{"identity",Json::diff(cache.identities,ids)}};
     int expansions=0,duplicates=0;std::string stop="PATH_CACHE";
@@ -470,11 +494,21 @@ Json search(const Json &request) {
     }
     default: throw Unsupported("selection_action");
     }
+    const int beforeTurn=bc.turn;
     executeImported(imported,action);
     ++cache.offset;
     require(!bc.undefinedBehaviorEvoked,"engine_undefined_behavior");
     bool normal=bc.inputState==InputState::PLAYER_NORMAL && bc.outcome==Outcome::UNDECIDED;
     cache.expected=normal && !imported.roster.changed?stateKey(bc):Json();cache.identities=identity(bc,currentIds);
+    if(layered) {
+        // A suffix may be useful after moves in the same player turn. Never
+        // commit the remainder across an opponent turn, selector or spawn.
+        const bool retain=layeredReuse && action.getActionType()!=search::ActionType::END_TURN && beforeTurn==bc.turn &&
+            imported.selectionScreen.empty() && !cache.expected.is_null() && !cache.identities.is_null() &&
+            cache.offset<cache.path.size();
+        cache.pathContext=retain?layeredPathContext(snapshot,imported.monsterMap):Json();
+        cache.expectedProjection=retain?projection(imported):Json();
+    }
     const auto &source=request.at("snapshot"), &sourcePlayer=source.at("player_state");
     Json context={{"seed",source.at("rng_state").at("seed")},{"floor",source.at("floor_num")},
         {"stance",sourcePlayer.value("stance",std::string("Neutral"))},

@@ -137,6 +137,10 @@ conda run --no-capture-output -n spire python -m sts_ai_framework `
 两组种子不得交叉。`--balanced-ab pilot --pilot-arm legacy|depth|combined` 用于消融，
 `--balanced-ab smoke` 只检查链路。原版回放不一致、超预算和未到终局单独记录。
 部署档和双方 15,000／90 s 的完整档均通过后，才进入服务器候选试跑。
+两边单次预算不变；Boss 整场上限为单次预算的 40 倍，其他房间仍为 20 倍。
+`layered-v1` 只在同一玩家回合复用剩余动作，要求会话、配置、状态键、可见投影、
+卡牌 UUID、原始目标槽位和 RNG 守卫一致。选牌、生成身份未知或跨回合重新搜索；
+命中仍执行单动作和原有后帧校验，计 0 搜索展开和 0 搜索耗时，执行时间另计。
 
 用 `python -m battle_engine.tools.a10_corpus <原版 startstates 路径> [<额外采集路径> ...]`
 统计每角色每房型唯一种子，补齐后加 `--freeze <新清单>`。用 `--exclude-manifest <冒烟清单>`

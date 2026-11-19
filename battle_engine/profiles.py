@@ -11,6 +11,15 @@ def deployment_budget(room, policy="layered-v1"):
     return PROFILES["FAST"]
 
 
+def benchmark_budget(room, tier):
+    """Shared segment and fight caps; use for both A/B arms."""
+    if tier not in ("deployment", "complete"):
+        raise ValueError(f"unknown_benchmark_tier:{tier}")
+    cap, timeout = (15000, 90000) if tier == "complete" else deployment_budget(room)
+    multiplier = 40 if room in ("BOSS", "MonsterRoomBoss") else 20
+    return (cap, timeout), (multiplier * cap, multiplier * timeout)
+
+
 def budgets(request, max_time_ms=90000):
     profile = request.get("search_profile", "BALANCED")
     if profile not in PROFILES:

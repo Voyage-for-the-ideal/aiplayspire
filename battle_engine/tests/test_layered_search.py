@@ -1,12 +1,13 @@
 """Candidate policy, room budgets, and paired acceptance semantics."""
 from collections import defaultdict
+import copy
 import json
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from battle_engine.profiles import deployment_budget
+from battle_engine.profiles import benchmark_budget, deployment_budget
 from battle_engine.tools.balanced_ab import (
     ROLES, ROOMS, execute_case, replay_snapshot_key, replay_snapshots_match, summarize, terminal,
 )
@@ -14,9 +15,16 @@ from battle_engine.tools.a10_corpus import freeze
 from battle_engine.tools.oracle import freeze_oracle_preferences
 from battle_engine.server import execute_worker
 from battle_engine.tests import test_character_strategy as fixtures
+from battle_engine.worker import Worker
 
 
 class CandidatePolicyTests(unittest.TestCase):
+    def test_boss_fight_budget_doubles_without_changing_segment_caps(self):
+        self.assertEqual(benchmark_budget("BOSS","deployment"),((10000,500),(400000,20000)))
+        self.assertEqual(benchmark_budget("BOSS","complete"),((15000,90000),(600000,3600000)))
+        self.assertEqual(benchmark_budget("ELITE","deployment"),((10000,500),(200000,10000)))
+        self.assertEqual(benchmark_budget("MONSTER","deployment"),((5000,250),(100000,5000)))
+
     def test_terminal_cleanup_does_not_require_reward_phase(self):
         state = dict(player_state=dict(creature=dict(current_health=10)),
                      cur_map_node_state=dict(is_battle_over=True, phase_name="COMBAT",
@@ -126,6 +134,42 @@ class CandidatePolicyTests(unittest.TestCase):
 class LayeredNativeTests(unittest.TestCase):
     state = fixtures.CharacterStrategyTests.state
     card = fixtures.CharacterStrategyTests.card
+
+    def test_verified_same_turn_suffix_and_cache_misses(self):
+        state=self.state(role="IRONCLAD",hand=[
+            self.card("Strike_R",uuid="first"),self.card("Strike_R",uuid="second")])
+        state["cur_map_node_state"]["monster_data"][0]["creature"]["current_health"]=12
+        for change in (None,"rng","uuid","turn","room","session","disabled"):
+            with self.subTest(change=change):
+                worker=Worker(fixtures.EXE)
+                try:
+                    args=dict(search_policy="layered-v1",session_id="fixture",max_expansions=300,timeout_ms=500)
+                    first=worker.execute(dict(snapshot=state,**args),500)
+                    self.assertTrue(first["supported"],first)
+                    cmd=json.loads(first["commands"][0]["command"])
+                    self.assertEqual(cmd["type"],"CARD")
+                    self.assertGreater(first["metrics"]["cached_actions_remaining"],0)
+                    after=copy.deepcopy(state)
+                    p=after["player_state"]
+                    card=p["hand"].pop(cmd["card_index"])
+                    p["discard_pile"]=[card]
+                    p["energy_panel_total_energy"]=2
+                    after["cards_played_this_turn_backup"]=[card]
+                    after["cur_map_node_state"]["monster_data"][0]["creature"]["current_health"]=6
+                    if change=="rng":after["rng_state"]["ai_rng_counter"]+=1
+                    if change=="uuid":p["hand"][0]["uuid"]="other"
+                    if change=="turn":after.update(turn=2,cards_played_this_turn=[])
+                    if change=="room":after["cur_map_node_state"]["room_type"]="ELITE"
+                    if change=="session":args["session_id"]="other"
+                    if change=="disabled":args["reuse_path"]=False
+                    second=worker.execute(dict(snapshot=after,**args),500)
+                    self.assertTrue(second["supported"],second)
+                    self.assertEqual(second["metrics"]["cache_hit"],change is None,second)
+                    if change is None:
+                        self.assertEqual(second["metrics"]["expanded_nodes"],0)
+                        self.assertEqual(second["metrics"]["planner_us"],0)
+                finally:
+                    worker.close()
 
     def search(self, state, cap=500, **metadata):
         result = execute_worker(fixtures.EXE, state, cap, 500, "search",
