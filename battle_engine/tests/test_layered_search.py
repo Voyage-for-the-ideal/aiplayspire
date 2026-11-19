@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
+from uuid import UUID
 
 from battle_engine.profiles import benchmark_budget, deployment_budget
 from battle_engine.tools.balanced_ab import (
@@ -168,6 +169,47 @@ class LayeredNativeTests(unittest.TestCase):
                     if change is None:
                         self.assertEqual(second["metrics"]["expanded_nodes"],0)
                         self.assertEqual(second["metrics"]["planner_us"],0)
+                finally:
+                    worker.close()
+
+    def test_headless_suffix_checks_rng_outside_the_native_key(self):
+        try:
+            from sts_ai_framework.tests.test_headless_combat import combat_raw
+        except ImportError:
+            self.skipTest("Requires the headless runtime fixtures")
+        state=combat_raw()["combat"]["snapshot"]
+        state["cur_map_node_state"]["monster_data"][0]["creature"]["current_health"]=12
+        player=state["player_state"]
+        player["hand"]=[dict(player["hand"][0],uuid=str(UUID(int=101+i))) for i in range(2)]
+        player["draw_pile"]=[]
+        player["relics"]=[]
+        player["potions"]=[dict(id="Potion Slot",slot=-1)]*3
+        for changed_stream in (None,"math","event"):
+            with self.subTest(changed_stream=changed_stream):
+                worker=Worker(fixtures.EXE)
+                try:
+                    args=dict(search_policy="layered-v1",session_id="headless",max_expansions=300,timeout_ms=500)
+                    first=worker.execute(dict(snapshot=state,**args),500)
+                    if first.get("rng_restore_mode")!="exact_state":
+                        self.skipTest("Requires exact-RNG Headless worker")
+                    self.assertTrue(first["supported"],first)
+                    cmd=json.loads(first["commands"][0]["command"])
+                    self.assertEqual(cmd["type"],"CARD")
+                    after=copy.deepcopy(state)
+                    p=after["player_state"]
+                    card=p["hand"].pop(cmd["card_index"])
+                    p["discard_pile"]=[card]
+                    p["energy_panel_total_energy"]=2
+                    after["cards_played_this_turn_backup"]=[card]
+                    after["cards_played_this_combat"]=[{"card_state":card}]
+                    after["cur_map_node_state"]["monster_data"][0]["creature"]["current_health"]=6
+                    rng=after["_headless_rng"]
+                    if changed_stream:
+                        target=rng["math"] if changed_stream=="math" else rng["streams"][changed_stream]
+                        target["state0"]="1123456789abcdef"
+                    reply=worker.execute(dict(snapshot=after,**args),500)
+                    self.assertTrue(reply["supported"],reply)
+                    self.assertEqual(reply["metrics"]["cache_hit"],changed_stream is None,reply)
                 finally:
                     worker.close()
 
