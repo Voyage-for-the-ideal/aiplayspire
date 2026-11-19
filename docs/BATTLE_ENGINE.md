@@ -138,6 +138,15 @@ conda run --no-capture-output -n spire python -m sts_ai_framework `
 `--balanced-ab smoke` 只检查链路。原版回放不一致、超预算和未到终局单独记录。
 部署档和双方 15,000／90 s 的完整档均通过后，才进入服务器候选试跑。
 
+用 `python -m battle_engine.tools.a10_corpus <原版 startstates 路径> [<额外采集路径> ...]`
+统计每角色每房型唯一种子，补齐后加 `--freeze <新清单>`。用 `--exclude-manifest <冒烟清单>`
+排除已用于调试的种子；合成样本不进正式验收集。
+`python -m battle_engine.tools.a10_capture --help` 是本机 Windows 原版自动采集入口；
+它使用独立偏好、现有 JAR 和显式的价值权重，按角色跑有时间上限的采集，不走外部 LLM。
+Java 回放从同目录下的起始快照读取命令 guard。完整状态常规先核对哈希；
+哈希不一致时，只归一化已定位的动画几何、空药水槽编号及战斗新卡 UUID，
+保留源卡 UUID、相互引用、牌堆顺序、怪物意图和 RNG。
+
 ## 验证命令
 
 ```powershell

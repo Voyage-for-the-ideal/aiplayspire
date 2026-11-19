@@ -19,6 +19,24 @@ from battle_engine import protocol
 from battle_engine.server import Gateway, ROOT
 
 
+ORACLE_TIPS = (
+    "BLOCK TIP", "CARD_REWARD_TIP", "COMBAT_TIP", "ENERGY_USE_TIP", "INTENT_TIP",
+    "M_POWER_TIP", "NO_FTUE", "POTION_TIP", "POWER_TIP", "RELIC_TIP", "SHUFFLE_TIP",
+)
+
+
+def freeze_oracle_preferences(source, destination):
+    """Copy the profile's unlocks and skip tutorials only inside the oracle."""
+    shutil.copytree(source, destination)
+    # libGDX preferences encode booleans as strings. Slot 0 uses STSTips;
+    # later slots prefix it with the slot number.
+    files = {destination / "STSTips", *(p for p in destination.glob("*STSTips") if p.is_file())}
+    for path in files:
+        tips = json.loads(path.read_text(encoding="utf-8-sig")) if path.is_file() else {}
+        tips.update(dict.fromkeys(ORACLE_TIPS, "true"))
+        path.write_text(json.dumps(tips), encoding="utf-8")
+
+
 def check_fallback(runtime, entries, port):
     options = types.SimpleNamespace(worker=ROOT / "bin/battle-engine-worker.exe", fallback_port=port,
                                     no_fallback=False, max_time_ms=200)
@@ -77,6 +95,7 @@ def main():
     for name in enabled:
         source = (args.game_dir / "mods" if args.balanced_ab else ROOT.parent / "_ModTheSpire/mods") / name
         shutil.copy2(source, mods / name)
+    freeze_oracle_preferences(args.game_dir / "preferences", runtime / "preferences")
     env = os.environ.copy()
     env["LOCALAPPDATA"] = env["APPDATA"] = str(runtime / "appdata")
     config = runtime / "appdata/ModTheSpire"
