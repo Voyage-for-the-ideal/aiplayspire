@@ -147,6 +147,9 @@ conda run --no-capture-output -n spire python -m sts_ai_framework `
 排除已用于调试的种子；合成样本不进正式验收集。
 `python -m battle_engine.tools.a10_capture --help` 是本机 Windows 原版自动采集入口；
 它使用独立偏好、现有 JAR 和显式的价值权重，按角色跑有时间上限的采集，不走外部 LLM。
+`python -m battle_engine.tools.a10_campaign --help` 将补采、预检和两档正式对照串起来；
+以磁盘上的 `status.json` 为准。角色样本未齐或试跑发现真实回放差异时，不使用正式集。
+该入口只跑本机验收，不提交服务器试跑。
 Java 回放从同目录下的起始快照读取命令 guard。完整状态常规先核对哈希；
 哈希不一致时，只归一化已定位的动画几何、空药水槽编号及战斗新卡 UUID，
 保留源卡 UUID、相互引用、牌堆顺序、怪物意图和 RNG。

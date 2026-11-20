@@ -80,10 +80,16 @@ def main():
     parser.add_argument("--balanced-ab", choices=("smoke", "pilot", "formal"))
     parser.add_argument("--pilot-arm", choices=("legacy", "depth", "combined"), default="combined")
     parser.add_argument("--worker", type=Path, help="Explicit candidate binary for --balanced-ab")
+    parser.add_argument("--runtime-dir", type=Path, help="New isolated output directory under battle_engine/out")
     args = parser.parse_args()
     if args.balanced_ab and not args.worker:
         parser.error("--balanced-ab requires --worker")
-    runtime = ROOT / "out" / f"oracle-{time.time_ns()}"
+    output_root = (ROOT / "out").resolve()
+    runtime = args.runtime_dir.resolve() if args.runtime_dir else output_root / f"oracle-{time.time_ns()}"
+    if not runtime.is_relative_to(output_root) or runtime == output_root:
+        parser.error("--runtime-dir must be a new directory under battle_engine/out")
+    if runtime.exists():
+        parser.error("--runtime-dir already exists")
     mods = runtime / "mods"
     mods.mkdir(parents=True)
     with socket.socket() as probe:

@@ -302,6 +302,7 @@ def summarize(pairs, *, repetitions=5000):
     won_max_hp = []
     won_gold = []
     invalid_cpp = 0
+    invalid_java = 0
     for row in pairs:
         c, j = row["cpp"], row["java"]
         counters["cpp", c["outcome"]] += 1
@@ -313,6 +314,8 @@ def summarize(pairs, *, repetitions=5000):
             won_gold.append(c.get("gold_gained",0) - j.get("gold_gained",0))
         if c["outcome"] == "incomplete" and c.get("reason") not in ("cumulative_search_budget", "action_limit"):
             invalid_cpp += 1
+        if j["outcome"] == "incomplete" and j.get("reason") not in ("cumulative_search_budget", "action_limit"):
+            invalid_java += 1
         # Worst case for C++: its incomplete fights lose; Java's win.
         delta = int(c["outcome"] == "win") - int(j["outcome"] != "loss")
         by_role[row["role"]][row["seed"]].append(delta)
@@ -334,12 +337,13 @@ def summarize(pairs, *, repetitions=5000):
         "pairs": len(pairs), "wins_losses_incomplete": {f"{s}_{k}":n for (s,k),n in counters.items()},
         "conservative_delta": statistics.mean(per_role.values()) if per_role else None,
         "conservative_delta_by_role": per_role, "conservative_ci95": interval, "cpp_invalid": invalid_cpp,
+        "java_invalid": invalid_java,
         "common_wins":len(won_hp), "common_wins_delta_hp_lost":statistics.mean(won_hp) if won_hp else None,
         "common_wins_delta_potions":statistics.mean(won_potions) if won_potions else None,
         "common_wins_delta_max_hp":statistics.mean(won_max_hp) if won_max_hp else None,
         "common_wins_delta_gold":statistics.mean(won_gold) if won_gold else None,
         "passed": bool(interval and interval[0]>0 and len(per_role)==len(ROLES)
-                       and min(per_role.values())>=-.05 and invalid_cpp==0),
+                       and min(per_role.values())>=-.05 and invalid_cpp==0 and invalid_java==0),
     }
 
 

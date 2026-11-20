@@ -130,6 +130,16 @@ class CandidatePolicyTests(unittest.TestCase):
         self.assertEqual(report["wins_losses_incomplete"]["cpp_incomplete"], 1)
         self.assertFalse(report["passed"])
 
+    def test_java_replay_failures_also_block_the_gate(self):
+        pairs = [dict(role=role, seed=i, cpp=dict(outcome="win", hp_lost=1, potions_used=0),
+                      java=dict(outcome="loss")) for i, role in enumerate(ROLES) for _ in range(25)]
+        self.assertTrue(summarize(pairs)["passed"])
+        pairs[0]["java"] = dict(outcome="incomplete", reason="Java search and replay disagree")
+        report=summarize(pairs)
+        self.assertGreater(report["conservative_ci95"][0],0)
+        self.assertEqual(report["java_invalid"],1)
+        self.assertFalse(report["passed"])
+
 
 @unittest.skipUnless(fixtures.EXE.is_file(), "Build the native worker first")
 class LayeredNativeTests(unittest.TestCase):

@@ -99,13 +99,27 @@ def drive(client, role, deadline, processes, goal_floor, runs):
     started=False
     completed=0
     previous_action=None
+    progress=None
+    moved_at=time.monotonic()
     while time.monotonic()<deadline:
         if any(p.poll() is not None for p in processes):
             raise RuntimeError("A10 capture game process exited; see game.log")
         state=client.get_state()
         if state is None:
+            if time.monotonic()-moved_at>180:
+                raise TimeoutError("No original game state for 180 seconds")
             time.sleep(.4)
             continue
+        signature=(state.seed_group,state.floor,state.screen_type,state.room_phase,
+                   state.selected_character,state.ascension_level,tuple(state.choice_list or ()),
+                   state.is_end_turn_button_enabled,state.grid_selected_count,
+                   (state.player.current_hp,state.player.block,state.player.energy) if state.player else None,
+                   tuple(c.reference for c in state.hand),
+                   tuple((m.id,m.current_hp,m.block,m.intent) for m in state.monsters))
+        if signature!=progress:
+            progress,moved_at=signature,time.monotonic()
+        elif time.monotonic()-moved_at>180:
+            raise TimeoutError(f"Original game stalled: {role}, floor {state.floor}, {state.screen_type}")
         if state.character and not is_lifecycle_state(state):
             if state.character!=role or state.ascension_level!=10:
                 raise ValueError(f"Wrong run identity: {state.character} A{state.ascension_level}")
