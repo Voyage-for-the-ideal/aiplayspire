@@ -13,6 +13,7 @@ import sys
 import time
 import threading
 import types
+from zipfile import ZipFile, ZipInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from battle_engine import protocol
@@ -45,7 +46,28 @@ def isolated_java_env(runtime):
     # relaunch, unlike a flag passed only to the first process.
     return dict(os.environ,LOCALAPPDATA=str(runtime/"appdata"),APPDATA=str(runtime/"appdata"),
                 TEMP=str(tmp),TMP=str(tmp),TMPDIR=str(tmp),
-                JAVA_TOOL_OPTIONS=f'-Djava.io.tmpdir="{tmp}"')
+                JAVA_TOOL_OPTIONS=f'-Djava.io.tmpdir="{tmp}" -Daiplayspire.disablePhysicalController=true')
+
+
+INPUT_GUARD_JAR = "AIPlaySpireOfflineInputGuard.jar"
+
+
+def build_input_guard(game_dir, build_root):
+    """Build the test-only joystick shim; leave original JARs and mods untouched."""
+    javac=shutil.which("javac")
+    if not javac:
+        raise RuntimeError("The original-engine test launcher needs the existing JDK (javac)")
+    build_root.mkdir(parents=True)
+    source=Path(__file__).with_name("vanilla_support")
+    subprocess.run([javac,"--release","8","-classpath",str(game_dir/"ModTheSpire.jar"),
+                    "-d",str(build_root),str(source/"DisablePhysicalController.java")],
+                   check=True,timeout=60)
+    target=build_root/INPUT_GUARD_JAR
+    with ZipFile(target,"x") as jar:
+        jar.writestr(ZipInfo("ModTheSpire.json"),(source/"ModTheSpire.json").read_bytes())
+        klass="aiplayspire/offline/DisablePhysicalController.class"
+        jar.writestr(ZipInfo(klass),(build_root/klass).read_bytes())
+    return target
 
 
 def check_fallback(runtime, entries, port):
@@ -112,6 +134,9 @@ def main():
     for name in enabled:
         source = (args.game_dir / "mods" if args.balanced_ab else ROOT.parent / "_ModTheSpire/mods") / name
         shutil.copy2(source, mods / name)
+    guard=build_input_guard(args.game_dir.resolve(),runtime/"input-guard")
+    shutil.copy2(guard,mods/guard.name)
+    enabled.append(guard.name)
     freeze_oracle_preferences(args.game_dir / "preferences", runtime / "preferences")
     env = isolated_java_env(runtime)
     config = runtime / "appdata/ModTheSpire"

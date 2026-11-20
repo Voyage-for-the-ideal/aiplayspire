@@ -15,24 +15,25 @@ from types import SimpleNamespace
 from battle_engine import protocol
 from battle_engine.tools.a10_corpus import coverage, inventory
 from battle_engine.tools.balanced_ab import ROLES, digest, write
-from battle_engine.tools.oracle import freeze_oracle_preferences, isolated_java_env
+from battle_engine.tools.oracle import build_input_guard, freeze_oracle_preferences, isolated_java_env
 
 
 MODS=("BaseMod.jar","SaveStateMod.jar","StSLib.jar","LudicrousSpeed.jar","BattleAiMod.jar","CommunicationMod.jar")
 
 
-def launch(stack, install, runtime, flags, *, client=False):
+def launch(stack, install, runtime, flags, input_guard, *, client=False):
     runtime.mkdir()
     for name in ("desktop-1.0.jar","ModTheSpire.jar"):
         shutil.copyfile(install/name,runtime/name)
     (runtime/"mods").mkdir()
     for name in MODS:
         shutil.copyfile(install/"mods"/name,runtime/"mods"/name)
+    shutil.copyfile(input_guard,runtime/"mods"/input_guard.name)
     shutil.copytree(install/"jre",runtime/"jre")
     freeze_oracle_preferences(install/"preferences",runtime/"preferences")
     config=runtime/"appdata"/"ModTheSpire"
     config.mkdir(parents=True)
-    write(config/"mod_lists.json",dict(defaultList="A10Capture",lists={"A10Capture":list(MODS)}))
+    write(config/"mod_lists.json",dict(defaultList="A10Capture",lists={"A10Capture":[*MODS,input_guard.name]}))
     if client:
         options=config/"BattleAIMod"
         options.mkdir()
@@ -189,18 +190,20 @@ def main(argv=None):
     torch.set_num_threads(1)
     result={"role":args.role,"ascension":10,"checkpoint_sha256":digest(args.checkpoint)}
     try:
+        guard=build_input_guard(source,root/"input-guard")
+        result["input_guard_sha256"]=digest(guard)
         with ExitStack() as stack:
             oracle=launch(stack,source,root/"oracle",
                           ["-DisServer=true","-DisPlaidMode=true","-Dbattleai.testMode=true",
-                           f"-Dbattleai.port={args.java_port}",f"-Dcommunicationmod.port={args.oracle_http_port}"])
+                           f"-Dbattleai.port={args.java_port}",f"-Dcommunicationmod.port={args.oracle_http_port}"],guard)
             wait_for_java(oracle,args.java_port)
             client=launch(stack,source,root/"client",
                           ["-Dbattleai.backend=java",f"-Dbattleai.clientPort={args.java_port}",
-                           f"-Dcommunicationmod.port={args.http_port}"],client=True)
+                           f"-Dcommunicationmod.port={args.http_port}"],guard,client=True)
             endpoint=GameClient(f"http://127.0.0.1:{args.http_port}")
             result["stop"],result["completed_runs"]=drive(
                 endpoint,args.role,time.monotonic()+args.timeout_seconds,(oracle,client),args.stop_floor,args.runs)
-    except (RuntimeError,ValueError,OSError,TimeoutError) as error:
+    except (RuntimeError,ValueError,OSError,TimeoutError,subprocess.SubprocessError) as error:
         result["error"]=str(error)
     result["counts"]=coverage(inventory([root/"client"/"startstates"]))
     write(root/"capture.json",result)

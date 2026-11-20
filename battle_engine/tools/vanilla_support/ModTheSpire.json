@@ -1,0 +1,7 @@
+{
+  "modid": "AIPOfflineInputGuard",
+  "name": "AIPlaySpire Offline Input Guard",
+  "author_list": ["AIPlaySpire"],
+  "description": "An opt-in test harness patch that skips native joystick discovery in isolated original game processes. It does not change gameplay or battle search.",
+  "version": "0.1.0"
+}

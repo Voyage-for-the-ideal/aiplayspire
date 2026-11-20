@@ -150,6 +150,8 @@ conda run --no-capture-output -n spire python -m sts_ai_framework `
 `python -m battle_engine.tools.a10_campaign --help` 将补采、预检和两档正式对照串起来；
 以磁盘上的 `status.json` 为准。角色样本未齐或试跑发现真实回放差异时，不使用正式集。
 该入口只跑本机验收，不提交服务器试跑。
+原版自动进程分别使用自己的 JVM 临时目录。启动器用现有 JDK 编译测试专用的
+`AIPOfflineInputGuard`，只在隔离进程跳过物理手柄初始化，不修改已安装游戏、搜索规则或 RNG。
 Java 回放从同目录下的起始快照读取命令 guard。完整状态常规先核对哈希；
 哈希不一致时，只归一化已定位的动画几何、空药水槽编号及战斗新卡 UUID，
 保留源卡 UUID、相互引用、牌堆顺序、怪物意图和 RNG。
