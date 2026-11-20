@@ -51,8 +51,10 @@ def map_context_fields(state: GameState) -> Dict[str, Any]:
             "y": node.y,
             "symbol": str(node.symbol or "?").upper(),
             "burning": bool(node.burning),
+            # Wing Boots grant moves, not permanent connections in the model's map.
             "children": [
                 {"x": edge.x, "y": edge.y} for edge in (node.children or [])
+                if not edge.winged
             ],
         }
         for node in nodes
