@@ -37,6 +37,17 @@ def freeze_oracle_preferences(source, destination):
         path.write_text(json.dumps(tips), encoding="utf-8")
 
 
+def isolated_java_env(runtime):
+    """Keep ModTheSpire native/JAR extraction private, including JRE relaunches."""
+    tmp=(runtime/"tmp").resolve()
+    tmp.mkdir()
+    # ModTheSpire also starts its own JVM. Environment options survive the
+    # relaunch, unlike a flag passed only to the first process.
+    return dict(os.environ,LOCALAPPDATA=str(runtime/"appdata"),APPDATA=str(runtime/"appdata"),
+                TEMP=str(tmp),TMP=str(tmp),TMPDIR=str(tmp),
+                JAVA_TOOL_OPTIONS=f'-Djava.io.tmpdir="{tmp}"')
+
+
 def check_fallback(runtime, entries, port):
     options = types.SimpleNamespace(worker=ROOT / "bin/battle-engine-worker.exe", fallback_port=port,
                                     no_fallback=False, max_time_ms=200)
@@ -102,8 +113,7 @@ def main():
         source = (args.game_dir / "mods" if args.balanced_ab else ROOT.parent / "_ModTheSpire/mods") / name
         shutil.copy2(source, mods / name)
     freeze_oracle_preferences(args.game_dir / "preferences", runtime / "preferences")
-    env = os.environ.copy()
-    env["LOCALAPPDATA"] = env["APPDATA"] = str(runtime / "appdata")
+    env = isolated_java_env(runtime)
     config = runtime / "appdata/ModTheSpire"
     config.mkdir(parents=True)
     (config / "mod_lists.json").write_text(json.dumps(dict(defaultList="Oracle", lists={"Oracle": enabled})), encoding="utf-8")

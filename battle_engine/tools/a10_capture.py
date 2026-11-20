@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from battle_engine import protocol
 from battle_engine.tools.a10_corpus import coverage, inventory
 from battle_engine.tools.balanced_ab import ROLES, digest, write
-from battle_engine.tools.oracle import freeze_oracle_preferences
+from battle_engine.tools.oracle import freeze_oracle_preferences, isolated_java_env
 
 
 MODS=("BaseMod.jar","SaveStateMod.jar","StSLib.jar","LudicrousSpeed.jar","BattleAiMod.jar","CommunicationMod.jar")
@@ -37,7 +37,7 @@ def launch(stack, install, runtime, flags, *, client=False):
         options=config/"BattleAIMod"
         options.mkdir()
         (options/"options.properties").write_text("auto_start_ai=true\nsearch_profile=BALANCED\n")
-    env=dict(os.environ,APPDATA=str(runtime/"appdata"),LOCALAPPDATA=str(runtime/"appdata"))
+    env=isolated_java_env(runtime)
     log=stack.enter_context((runtime/"game.log").open("w",encoding="utf-8"))
     command=[str(runtime/"jre"/"bin"/"java.exe"),*flags,"-Xms256m","-Xmx1536m","-jar","ModTheSpire.jar",
              "--profile","A10Capture","--skip-launcher","--skip-intro","--jre51"]

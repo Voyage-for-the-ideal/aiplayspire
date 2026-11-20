@@ -7,9 +7,21 @@ from unittest.mock import patch
 
 from battle_engine.tools import a10_campaign as c
 from battle_engine.tools.balanced_ab import ROLES, ROOMS
+from battle_engine.tools.oracle import isolated_java_env
 
 
 class CampaignTests(unittest.TestCase):
+    def test_game_jvms_use_separate_temp_roots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            runtimes=[root/"left game",root/"right game"]
+            for path in runtimes:
+                path.mkdir()
+            a,b=(isolated_java_env(path) for path in runtimes)
+            self.assertNotEqual(a["TEMP"],b["TEMP"])
+            self.assertEqual(a["TEMP"],a["TMP"])
+            self.assertIn(a["TEMP"],a["JAVA_TOOL_OPTIONS"])
+
     def fixture(self, root):
         mods=root/"mods"
         mods.mkdir()
