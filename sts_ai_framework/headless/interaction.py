@@ -1452,16 +1452,22 @@ def verify_effect(plan: ActionPlan, after: InteractionFrame) -> EffectCheck:
         added = [c for c in right.deck if c.uuid not in _deck(left)]
         applied = right.screen_type != "CARD_REWARD" and len(added) == 1 and added[0].id == e["card"]["id"] and added[0].upgrades == _acquired_upgrades(left, e["card"]["upgrades"], e["card"]["type"])
     elif kind == "take_combat_card":
-        old = {c.uuid for c in left.hand + left.draw_pile + left.discard_pile + left.exhaust_pile}
-        piles = right.hand + right.discard_pile + (right.draw_pile + right.exhaust_pile if e.get("destination") == "draw_pile" else [])
-        added = [c for c in piles if c.uuid not in old]
-        if e.get("destination") == "draw_pile": added = [c for c in added if c.id == e["card"]["id"]]
-        applied = (right.screen_type != "CARD_REWARD" and right.room_phase == "COMBAT" and left.deck == right.deck
-                   and len(added) == e["copies"] and all(c.id == e["card"]["id"] and c.upgrades == e["card"]["upgrades"]
-                   and (not e["free_for_turn"] or c.cost_for_turn == min(0,e["card"]["cost_for_turn"])) for c in added))
-        if not applied:
-            try:applied=_discovery_with_cleanup(before,after,e)
+        raw=json.loads(before.raw_json)
+        if raw['room']=='EventRoom' and raw['interaction']['card_reward'].get('source_action')=='ChooseOneColorless':
+            from .event_receipts import toolbox_event_pick_receipt
+            try:applied=toolbox_event_pick_receipt(before,after,plan.action.native_args[0])
             except (KeyError,IndexError,TypeError,ValueError,AttributeError):applied=False
+        else:
+            old = {c.uuid for c in left.hand + left.draw_pile + left.discard_pile + left.exhaust_pile}
+            piles = right.hand + right.discard_pile + (right.draw_pile + right.exhaust_pile if e.get("destination") == "draw_pile" else [])
+            added = [c for c in piles if c.uuid not in old]
+            if e.get("destination") == "draw_pile": added = [c for c in added if c.id == e["card"]["id"]]
+            applied = (right.screen_type != "CARD_REWARD" and right.room_phase == "COMBAT" and left.deck == right.deck
+                       and len(added) == e["copies"] and all(c.id == e["card"]["id"] and c.upgrades == e["card"]["upgrades"]
+                       and (not e["free_for_turn"] or c.cost_for_turn == min(0,e["card"]["cost_for_turn"])) for c in added))
+            if not applied:
+                try:applied=_discovery_with_cleanup(before,after,e)
+                except (KeyError,IndexError,TypeError,ValueError,AttributeError):applied=False
     elif kind == "skip_card": applied = right.screen_type != "CARD_REWARD" and right.deck == left.deck and right.player.max_hp == left.player.max_hp
     elif kind == "bowl": applied = right.screen_type != "CARD_REWARD" and right.deck == left.deck and right.player.max_hp == left.player.max_hp + 2
     elif kind == "select":
