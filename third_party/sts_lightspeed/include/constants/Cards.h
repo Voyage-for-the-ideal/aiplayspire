@@ -562,6 +562,7 @@ namespace sts {
             case CardId::IMPERVIOUS:
             case CardId::OFFERING:
             case CardId::REAPER:
+            case CardId::SEEING_RED:
 
             case CardId::PIERCING_WAIL:
             case CardId::BACKSTAB:
@@ -575,6 +576,7 @@ namespace sts {
             case CardId::DOPPELGANGER:
             case CardId::MALAISE:
             case CardId::NIGHTMARE:
+            case CardId::TERROR:
 
             case CardId::BOOT_SEQUENCE:
             case CardId::CHILL:

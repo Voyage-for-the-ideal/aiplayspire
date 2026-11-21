@@ -1064,7 +1064,7 @@ Action Actions::ForethoughtAction(bool upgraded) {
     return {[upgraded](BattleContext &b) {
         if(b.cards.cardsInHand==0)return;
         if(!upgraded && b.cards.cardsInHand==1)b.chooseForethoughtCard(0);
-        else openCharacterSelection(b,CardSelectTask::FORETHOUGHT,upgraded?99:1);
+        else openCharacterSelection(b,b.headlessRngKnown?CardSelectTask::FORETHOUGHT_HAND:CardSelectTask::FORETHOUGHT,upgraded?99:1);
     }};
 }
 

@@ -1884,10 +1884,23 @@ void BattleContext::useSkillCard() {
             }});
             break;
 
-        case CardId::GENETIC_ALGORITHM:
-            addToBot( Actions::GainBlock(calculateCardBlock((up ? 2 : 1) + c.specialData)) );
-            c.specialData += (up ? 3 : 2);
+        case CardId::GENETIC_ALGORITHM: {
+            // GainBlockAction captures the current card block before IncreaseMiscAction
+            // increments the live instances and the matching master-deck instance.
+            const int block=calculateCardBlock(c.specialData);
+            addToBot({[id=c.uniqueId,increment=up?3:2](BattleContext &b) {
+                auto increase=[&](CardInstance &x) {
+                    if(x.id==CardId::GENETIC_ALGORITHM && x.uniqueId==id)x.specialData+=increment;
+                };
+                increase(b.curCardQueueItem.card);
+                for(int i=0;i<b.cards.cardsInHand;++i)increase(b.cards.hand[i]);
+                for(auto *pile:{&b.cards.drawPile,&b.cards.discardPile,&b.cards.exhaustPile})
+                    for(auto &x:*pile)increase(x);
+                if(b.headlessRngKnown && b.masterDeckKnown)for(auto &x:b.masterDeck)increase(x);
+            }});
+            addToBot(Actions::GainBlock(block));
             break;
+        }
 
         case CardId::WHITE_NOISE:
             addToBot( Actions::WhiteNoiseAction(1) );
@@ -2407,29 +2420,6 @@ void BattleContext::onUsePowerCard() {
         addToBot(Actions::DrawCards(p.getStatus<PS::HEATSINKS>()));
     }
 
-    // Force Field: costs 1 less for each Power card played this combat
-    if (c.getId() != CardId::FORCE_FIELD) {
-        for (int i = 0; i < cards.cardsInHand; ++i) {
-            auto &handCard = cards.hand[i];
-            if (handCard.getId() == CardId::FORCE_FIELD) {
-                handCard.updateCost(-1);
-                ++handCard.specialData;
-            }
-        }
-        for (auto &drawCard : cards.drawPile) {
-            if (drawCard.getId() == CardId::FORCE_FIELD) {
-                drawCard.updateCost(-1);
-                ++drawCard.specialData;
-            }
-        }
-        for (auto &discardCard : cards.discardPile) {
-            if (discardCard.getId() == CardId::FORCE_FIELD) {
-                discardCard.updateCost(-1);
-                ++discardCard.specialData;
-            }
-        }
-    }
-
     // ********* Relics onUseCard *********
 
     if (p.hasRelic<R::BIRD_FACED_URN>()) {
@@ -2454,6 +2444,30 @@ void BattleContext::onUsePowerCard() {
 
     if (p.hasRelic<R::MUMMIFIED_HAND>()) {
         mummifiedHandOnUsePower();
+    }
+
+    // UseCardAction calls relics before card triggers. Mummified Hand must
+    // choose from the hand before Force Field discounts take effect.
+    if (c.getId() != CardId::FORCE_FIELD) {
+        for (int i = 0; i < cards.cardsInHand; ++i) {
+            auto &handCard = cards.hand[i];
+            if (handCard.getId() == CardId::FORCE_FIELD) {
+                handCard.updateCost(-1);
+                ++handCard.specialData;
+            }
+        }
+        for (auto &drawCard : cards.drawPile) {
+            if (drawCard.getId() == CardId::FORCE_FIELD) {
+                drawCard.updateCost(-1);
+                ++drawCard.specialData;
+            }
+        }
+        for (auto &discardCard : cards.discardPile) {
+            if (discardCard.getId() == CardId::FORCE_FIELD) {
+                discardCard.updateCost(-1);
+                ++discardCard.specialData;
+            }
+        }
     }
 
     if(headlessRngKnown)for(int i=0;i<monsters.monsterCount;++i) {
@@ -2584,6 +2598,7 @@ void BattleContext::onAfterUseCard() {
             cards.moveToDrawPileTop(c);
 
         } else if (c.id == CardId::TANTRUM) {
+            if(headlessRngKnown)c.costForTurn=c.cost; // The Java Soul settles the shuffled copy.
             cards.shuffleIntoDrawPile(cardRandomRng, c);
 
         } else {
@@ -3798,6 +3813,7 @@ void BattleContext::chooseForethoughtCard(int handIdx) {
         cards.hand[handIdx].freeToPlayOnce = true;
     }
 
+    if(headlessRngKnown)cards.hand[handIdx].costForTurn=cards.hand[handIdx].cost;
     cards.insertToDrawPile(0, cards.hand[handIdx]);
     cards.removeFromHandAtIdx(handIdx);
 }

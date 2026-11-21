@@ -6,7 +6,7 @@ from pathlib import Path
 import unittest
 
 from battle_engine.worker import Worker
-from sts_ai_framework.headless.combat import HeadlessCombatBridge, _fetch_evidence
+from sts_ai_framework.headless.combat import HeadlessCombatBridge, _fetch_evidence, _selection_lineage
 from sts_ai_framework.headless.event_receipts import Stream
 from sts_ai_framework.tests.test_headless_headbutt import headbutt_raw
 
@@ -74,6 +74,45 @@ class FetchGridTests(unittest.TestCase):
         self.assertTrue(played['supported'],played)
         self.assertEqual(played['expected_card_uuids']['exhaust_pile'][-2:],[p['card_in_use']['uuid'],picked])
         self.assertEqual(played['expected_after']['monsters'][0]['hp'],result['projection']['monsters'][0]['hp']-12)
+
+    def test_nested_omniscience_binds_original_and_fresh_queued_copy(self):
+        s=fetch_grid('Omniscience')['combat']['snapshot']
+        player=s['player_state'];grid=s['grid_card_select_screen_state']
+        target=dict(player['card_in_use'],uuid='00000000-0000-0000-0000-000000000982')
+        player['draw_pile'].append(target);grid['group_cards'].insert(0,target)
+        played=self.runop(s,'predict',0)
+        self.assertTrue(played['supported'],played)
+        expected=played['expected_selection']
+        self.assertEqual(expected['pending_card']['uuid'],target['uuid'])
+        clone,=expected['autoplay_queue']
+        self.assertTrue(clone['purge'])
+        self.assertIsNone(clone['uuid'])
+        self.assertEqual(played['expected_card_uuids']['exhaust_pile'],[player['card_in_use']['uuid']])
+        actual=copy.deepcopy(expected)
+        actual['autoplay_queue'][0]['uuid']='00000000-0000-0000-0000-000000000984'
+        self.assertTrue(_selection_lineage(s,s,expected,actual))
+        actual['autoplay_queue'][0]['uuid']=target['uuid']
+        self.assertFalse(_selection_lineage(s,s,expected,actual))
+
+    def test_hologram_letter_opener_applies_once_after_picking(self):
+        s=fetch_grid('Hologram')['combat']['snapshot']
+        player=s['player_state'];grid=s['grid_card_select_screen_state']
+        player['relics'].append({'relic_id':'Letter Opener','counter':0,'_private':{}})
+        source=player['card_in_use']
+        s['cards_played_this_turn_backup'][:0]=[
+            dict(source,card_id='Defend_B',uuid=f'00000000-0000-0000-0000-00000000098{i}')
+            for i in (5,6)]
+        grid['action_queue'].insert(0,{'state_class':'savestate.actions.SelectionLetterOpenerActionState',
+                                       'state':{'amount':5}})
+        actual=self.runop(s)
+        self.assertTrue(actual['supported'],actual)
+        self.assertIn(['selection-letter-opener-v1',5],actual['selection_native_key'])
+        result=self.runop(s,'predict',0)
+        self.assertTrue(result['supported'],result)
+        self.assertEqual(result['expected_after']['monsters'][0]['hp'],actual['projection']['monsters'][0]['hp']-5)
+        self.assertEqual(result['expected_card_uuids']['hand'][-1],grid['group_cards'][0]['uuid'])
+        grid['action_queue'][0]['state']['amount']=6
+        self.assertFalse(self.runop(s)['supported'])
 
     def test_secret_weapon_and_technique_use_randomized_matching_options(self):
         from uuid import UUID

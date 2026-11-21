@@ -289,6 +289,8 @@ Json gamblerSelection(const BattleContext &b,const std::map<int,Json> &identitie
         for(int i=0;i<b.cards.cardsInHand;i++)if(!except.count(b.cards.hand[i].uniqueId))visible.push_back(identities.at(b.cards.hand[i].uniqueId));
         Json result={{"schema","headless-single-hand-v1"},{"remaining",visible},{"selected",selected},{"hidden",hidden},
                      {"pending_card",pending},{"copies",s.data0}};
+        if(s.cardSelectTask==CardSelectTask::FORETHOUGHT_HAND)
+            result.update(Json{{"count",s.pickCount},{"any_number",s.canPickAnyNumber}});
         if(!b.cardQueue.isEmpty()) {
             result["autoplay_queue"]=Json::array();
             for(const auto &item:b.cardQueue.orderedItems()) {
@@ -315,10 +317,27 @@ Json gamblerSelection(const BattleContext &b,const std::map<int,Json> &identitie
             const auto source=seek?CardId::SEEK:omni?CardId::OMNISCIENCE:
                 s.cardSelectTask==CardSelectTask::SECRET_WEAPON_GRID?CardId::SECRET_WEAPON:
                 s.cardSelectTask==CardSelectTask::SECRET_TECHNIQUE_GRID?CardId::SECRET_TECHNIQUE:CardId::HOLOGRAM;
-            require(c.id==source && identities.count(c.uniqueId) &&
-                    identities.at(c.uniqueId).is_string() && !item.purgeOnUse && item.triggerOnUse,"fetch_pending_uuid");
-            auto pending=cardView(c);pending["uuid"]=identities.at(c.uniqueId);pending["exhaust"]=item.exhaustOnUse;
-            return {{"schema","headless-fetch-grid-v1"},{"source",getCardStringId(source)},{"options",options},{"selected",selected},{"count",s.pickCount},{"pending_card",pending}};
+            auto uid=[&](const CardQueueItem &row) -> Json {
+                auto it=identities.find(row.card.uniqueId);
+                if(it!=identities.end())return it->second;
+                require(omni && row.purgeOnUse,"fetch_generated_identity");
+                return nullptr;
+            };
+            require(c.id==source && (!item.purgeOnUse || (omni && item.autoplay)) && item.triggerOnUse,"fetch_pending_uuid");
+            auto pending=cardView(c);pending["uuid"]=uid(item);pending["exhaust"]=item.exhaustOnUse;
+            if(item.purgeOnUse)pending["purge"]=true;
+            Json result={{"schema","headless-fetch-grid-v1"},{"source",getCardStringId(source)},{"options",options},{"selected",selected},{"count",s.pickCount},{"pending_card",pending}};
+            if(omni && !b.cardQueue.isEmpty()) {
+                result["autoplay_queue"]=Json::array();
+                for(const auto &row:b.cardQueue.orderedItems()) {
+                    require(row.autoplay && row.randomTarget && !row.ignoreEnergyTotal && !row.isEndTurn &&
+                            (row.purgeOnUse || row.exhaustOnUse),"omniscience_queued_item");
+                    auto next=cardView(row.card);next["uuid"]=uid(row);next["exhaust"]=row.exhaustOnUse;
+                    next["purge"]=row.purgeOnUse;next["energy"]=row.energyOnUse;
+                    result["autoplay_queue"].push_back(next);
+                }
+            }
+            return result;
         }
         if(headbutt) {
             const auto &item=b.curCardQueueItem;const auto &c=item.card;
@@ -374,10 +393,21 @@ Json gamblerGuardKey(const Imported &imported) {
     if(isHeadlessFetchGrid(b.cardSelectInfo.cardSelectTask)) {
         const auto &c=b.curCardQueueItem.card;
         key.push_back(Json::array({"fetch-cleanup-v1",int(c.id),c.specialData,c.cost,c.costForTurn,c.upgraded,c.freeToPlayOnce,c.retain,c.forcedExhaust,b.curCardQueueItem.exhaustOnUse}));
+        if(b.cardSelectInfo.cardSelectTask==CardSelectTask::OMNISCIENCE &&
+                (b.curCardQueueItem.purgeOnUse || !b.cardQueue.isEmpty())) {
+            Json queue=Json::array();
+            for(const auto &row:b.cardQueue.orderedItems()) {
+                const auto &card=row.card;
+                queue.push_back(Json::array({int(card.id),card.specialData,card.cost,card.costForTurn,card.upgraded,
+                    card.freeToPlayOnce,card.retain,card.forcedExhaust,row.exhaustOnUse,row.purgeOnUse,row.energyOnUse}));
+            }
+            key.push_back(Json::array({"omniscience-queue-v1",b.curCardQueueItem.purgeOnUse,queue}));
+        }
     }
     const auto &s=b.cardSelectInfo;
     if(s.sourceDraw || s.hexDazed || s.inkDraw)
         key.push_back(Json::array({"selection-skill-followup-v1",s.sourceDraw,s.hexDazed,s.inkDraw}));
+    if(s.letterOpener)key.push_back(Json::array({"selection-letter-opener-v1",5}));
     if(s.juggernautDamage>0)key.push_back(Json::array({"selection-juggernaut-v1",s.juggernautDamage}));
     if(b.cardSelectInfo.ornithopterHeal)key.push_back(Json::array({"potion-heal-v1",-1,5}));
     if(b.cardSelectInfo.cardSelectTask==CardSelectTask::HEADBUTT_GRID) {
@@ -385,6 +415,7 @@ Json gamblerGuardKey(const Imported &imported) {
         key.push_back(Json::array({"headbutt-cleanup-v1",int(c.id),c.specialData,c.cost,c.costForTurn,c.upgraded,
             c.freeToPlayOnce,c.retain,c.forcedExhaust,b.curCardQueueItem.exhaustOnUse,b.curCardQueueItem.purgeOnUse}));
         if(s.sharpHide)key.push_back(Json::array({"headbutt-sharp-hide-v1",s.sharpHide}));
+        if(int rage=b.player.getStatus<PS::RAGE>();rage>0)key.push_back(Json::array({"headbutt-rage-block-v1",rage}));
         if(b.player.hasRelic<R::SHURIKEN>() && b.player.attacksPlayedThisTurn>0 && b.player.attacksPlayedThisTurn%3==0)
             key.push_back(Json::array({"headbutt-shuriken-v1",1}));
         if(b.player.hasRelic<R::KUNAI>() && b.player.attacksPlayedThisTurn>0 && b.player.attacksPlayedThisTurn%3==0)
@@ -824,13 +855,13 @@ Imported importSnapshot(const Json &s) {
     restoreCards(bc,p);
     if(headless && bc.masterDeckKnown)for(std::size_t j=0;j<bc.masterDeck.size();++j) {
         auto &master=bc.masterDeck[j];
-        if(master.id!=CardId::RITUAL_DAGGER)continue;
+        if(master.id!=CardId::RITUAL_DAGGER && master.id!=CardId::GENETIC_ALGORITHM)continue;
         const auto &uuid=p.at("master_deck").at(j).at("uuid");
-        require(uuid.is_string() && !uuid.get_ref<const std::string&>().empty(),"missing_ritual_dagger_uuid");
+        require(uuid.is_string() && !uuid.get_ref<const std::string&>().empty(),"missing_permanent_card_uuid");
         master.uniqueId=-1;
         auto bind=[&](const CardInstance &card,const Json &raw) {
-            if(card.id!=CardId::RITUAL_DAGGER || raw.at("uuid")!=uuid)return;
-            require(master.uniqueId==-1,"ambiguous_ritual_dagger_uuid");
+            if(card.id!=master.id || raw.at("uuid")!=uuid)return;
+            require(master.uniqueId==-1,"ambiguous_permanent_card_uuid");
             master.uniqueId=card.uniqueId;
         };
         for(int i=0;i<bc.cards.cardsInHand;++i)bind(bc.cards.hand[i],p.at("hand").at(i));

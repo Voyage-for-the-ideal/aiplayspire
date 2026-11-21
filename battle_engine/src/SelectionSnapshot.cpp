@@ -209,11 +209,14 @@ Imported importSelectionSnapshot(const Json &s) {
     need(current.is_object(),"selection_current_action");auto name=type(current);const auto &data=payload(current);
     CardSelectInfo info;info.canonicalOrder=false;
     if(name=="SingleHandActionState") {
-        need(s.value("_engine",std::string())=="headless" && screen=="HAND_SELECT" && data.at("owner_index")==-1 &&
-             view.at("num_cards_to_select")==1 && !view.at("any_number").get<bool>() && !view.at("can_pick_zero").get<bool>(),"single_hand_controls");
-        const std::string source=data.at("source");info.cardSelectTask=source=="Armaments"?CardSelectTask::ARMAMENTS_HAND:
+        const std::string source=data.at("source");
+        const bool any=source=="Forethought" && s.at("player_state").at("card_in_use").at("times_upgraded")==1;
+        need(headless && screen=="HAND_SELECT" && data.at("owner_index")==-1 &&
+             view.at("num_cards_to_select")== (any?99:1) && view.at("any_number")==any && view.at("can_pick_zero")==any &&
+             !view.at("up_to").get<bool>() && !view.at("were_cards_retrieved").get<bool>(),"single_hand_controls");
+        info.cardSelectTask=source=="Armaments"?CardSelectTask::ARMAMENTS_HAND:
             source=="True Grit"?CardSelectTask::TRUE_GRIT_HAND:source=="Dual Wield"?CardSelectTask::DUAL_WIELD_HAND:
-            source=="Burning Pact"?CardSelectTask::BURNING_PACT_HAND:CardSelectTask::INVALID;
+            source=="Burning Pact"?CardSelectTask::BURNING_PACT_HAND:source=="Forethought"?CardSelectTask::FORETHOUGHT_HAND:CardSelectTask::INVALID;
         need(isHeadlessSingleHand(info.cardSelectTask),"single_hand_source");
         info.data0=data.at("copies");
     } else if(name=="DiscardActionState")info.cardSelectTask=CardSelectTask::DISCARD;
@@ -351,12 +354,14 @@ Imported importSelectionSnapshot(const Json &s) {
     else options=view.at("reward_group");
     // These are the supported executable effects that survive the selector.
     // Their order around card cleanup is part of parity.
-    auto skillCleanupIndex=[&](const Json &queue,bool pact,bool upgraded,bool trueGrit=false) {
+    auto skillCleanupIndex=[&](const Json &queue,bool pact,bool upgraded,bool trueGrit=false,bool hologram=false) {
         info.sourceDraw=pact?(upgraded?3:2):0;
         info.hexDazed=b.player.getStatus<PS::HEX>();
         info.inkDraw=b.player.hasRelic<R::INK_BOTTLE>() && b.player.inkBottleCounter==0;
+        info.letterOpener=hologram && b.player.hasRelic<R::LETTER_OPENER>()
+            && b.player.skillsPlayedThisTurn>=3 && b.player.skillsPlayedThisTurn%3==0;
         if(trueGrit && b.calculateCardBlock(9)>0)info.juggernautDamage=b.player.getStatus<PS::JUGGERNAUT>();
-        need(queue.is_array() && queue.size()==std::size_t(1+(info.sourceDraw!=0)+(info.hexDazed!=0)+info.inkDraw+(info.juggernautDamage>0)),"selection_skill_queue_length");
+        need(queue.is_array() && queue.size()==std::size_t(1+(info.sourceDraw!=0)+(info.hexDazed!=0)+info.inkDraw+info.letterOpener+(info.juggernautDamage>0)),"selection_skill_queue_length");
         size_t i=0;
         auto check=[&](const char *kind,const Json &fields) {
             const auto &a=queue[i++];
@@ -365,6 +370,7 @@ Imported importSelectionSnapshot(const Json &s) {
         if(info.sourceDraw)check("SelectionDrawActionState",Json{{"kind","burning_pact"},{"amount",info.sourceDraw}});
         if(info.hexDazed)check("SelectionHexActionState",Json{{"amount",info.hexDazed}});
         if(info.inkDraw)check("SelectionDrawActionState",Json{{"kind","ink_bottle"},{"amount",1}});
+        if(info.letterOpener)check("SelectionLetterOpenerActionState",Json{{"amount",5}});
         need(type(queue[i])=="UseCardActionState","selection_skill_cleanup");
         if(info.juggernautDamage>0)
             need(type(queue[i+1])=="SelectionJuggernautActionState" &&
@@ -384,8 +390,11 @@ Imported importSelectionSnapshot(const Json &s) {
         need((task!=CardSelectTask::ARMAMENTS_HAND || !up) && (task!=CardSelectTask::TRUE_GRIT_HAND || up)
              && info.data0==(task==CardSelectTask::DUAL_WIELD_HAND && up?2:1),"single_hand_card_variant");
         options=source.at("hand");for(const auto &v:selected)options.push_back(v);
-        need(options.size()>=2 && selected.size()<=1,"single_hand_counts");std::set<std::string> ids{uuid(c)};
-        auto eligible=[&](const CardInstance &card){return task==CardSelectTask::TRUE_GRIT_HAND || task==CardSelectTask::BURNING_PACT_HAND ||
+        const bool forethought=task==CardSelectTask::FORETHOUGHT_HAND;
+        need(!forethought || (c.at("times_upgraded")<=1 && data.at("hidden").empty() && autoplay.empty()),"forethought_scope");
+        need(options.size()>=(forethought && up?1u:2u) && selected.size()<=(forethought && up?10u:1u),"single_hand_counts");
+        std::set<std::string> ids{uuid(c)};
+        auto eligible=[&](const CardInstance &card){return task==CardSelectTask::TRUE_GRIT_HAND || task==CardSelectTask::BURNING_PACT_HAND || forethought ||
             (task==CardSelectTask::ARMAMENTS_HAND?card.canUpgrade():card.getType()==CardType::ATTACK || card.getType()==CardType::POWER);};
         for(const auto &v:options)need(ids.insert(uuid(v)).second && eligible(reader.card(v)),"single_hand_option");
         for(const auto &v:data.at("hidden")){
@@ -460,16 +469,31 @@ Imported importSelectionSnapshot(const Json &s) {
         std::set<std::string> active,chosen;
         for(const auto &c:options)need(active.insert(uuid(c)).second && std::find(pile.begin(),pile.end(),c)!=pile.end(),"fetch_option_identity");
         for(const auto &c:selected)need(chosen.insert(uuid(c)).second && std::find(options.begin(),options.end(),c)!=options.end(),"fetch_selected_identity");
-        need(chosen.size()<std::size_t(view.at("num_cards").get<int>()) && s.at("player_state").at("limbo").empty() && view.at("card_queue_state").empty(),"fetch_grid_partial");
+        const auto &autoplay=view.at("card_queue_state");
+        need(chosen.size()<std::size_t(view.at("num_cards").get<int>()) && s.at("player_state").at("limbo").empty() &&
+             autoplay.is_array() && (omni?autoplay.size()<=12:autoplay.empty()),"fetch_grid_partial");
         const auto &queue=view.at("action_queue");
-        const auto &q=payload(queue.at(skillCleanupIndex(queue,false,false))),&c=q.at("card");
+        const auto &q=payload(queue.at(skillCleanupIndex(queue,false,false,false,info.cardSelectTask==CardSelectTask::HOLOGRAM_GRID))),&c=q.at("card");
         const auto id=data.at("source_card");
         need(c==s.at("player_state").at("card_in_use") && c.at("card_id")==id &&
              (c.at("times_upgraded")==0 || c.at("times_upgraded")==1) && (seek?1+c.at("times_upgraded").get<int>():1)==view.at("num_cards") &&
-             q.at("targetIndex")==-2 && q.at("returnToHand")==false && q.at("reboundCard")==false && !c.value("purge_on_use",false) &&
+             q.at("targetIndex")==-2 && q.at("returnToHand")==false && q.at("reboundCard")==false && (omni || !c.value("purge_on_use",false)) &&
              !c.value("dont_trigger_on_use_card",false) && c.value("_private",Json::object()).empty() && q.at("exhaustCard")==c.at("exhaust") && c.at("exhaust")==bool(seek || omni || c.at("times_upgraded")==0),"fetch_cleanup_card");
         for(auto name:{"hand","draw_pile","discard_pile","exhaust_pile"})for(const auto &row:p.at(name))need(uuid(c)!=uuid(row),"fetch_pending_duplicate");
-        CardQueueItem item(reader.card(c),-2,0);item.exhaustOnUse=q.at("exhaustCard");b.curCardQueueItem=item;
+        std::set<std::string> pending{uuid(c)};
+        for(const auto &row:autoplay) {
+            const auto &next=row.at("card");
+            need(row.at("monster_index").is_null() && row.at("energy_on_use").is_number_integer() &&
+                 row.at("energy_on_use")>=0 && row.at("ignore_energy_total")==false &&
+                 row.at("autoplay_card")==true && row.at("random_target")==true &&
+                 next.at("dont_trigger_on_use_card")==false &&
+                 (next.at("purge_on_use")==true || next.at("exhaust")==true) &&
+                 !reader.ids.count(uuid(next)) && pending.insert(uuid(next)).second,"omniscience_queued_item");
+        }
+        CardQueueItem item(reader.card(c),-2,0);
+        item.exhaustOnUse=q.at("exhaustCard");item.purgeOnUse=c.value("purge_on_use",false);
+        item.autoplay=item.purgeOnUse || !autoplay.empty();
+        b.curCardQueueItem=item;
     }
     if(!headless && info.cardSelectTask==CardSelectTask::EXHUME) {
         const auto &pile=p.at("exhaust_pile");
@@ -544,6 +568,11 @@ Imported importSelectionSnapshot(const Json &s) {
             if(info.sharpHide)need(!headbuttDouble && m.id==MonsterId::THE_GUARDIAN && queue.size()>1 &&
                 type(queue[0])=="HeadbuttSharpHideActionState" &&
                 payload(queue[0])==Json{{"owner_index",out.monsterMap[0]},{"target_index",-1},{"amount",info.sharpHide}},"headbutt_sharp_hide");
+            if(int rage=b.player.getStatus<PS::RAGE>();rage>0) {
+                need(!headbuttDouble && queue.size()>cleanupIndex && type(queue[cleanupIndex])=="HeadbuttRageBlockActionState" &&
+                     payload(queue[cleanupIndex])==Json{{"owner_index",-1},{"amount",rage}},"headbutt_rage_block");
+                ++cleanupIndex;
+            }
             if(b.player.attacksPlayedThisTurn>0 && b.player.attacksPlayedThisTurn%3==0) {
                 for(const auto &relic:p.at("relics")) {
                     const auto &id=relic.at("relic_id");
@@ -650,6 +679,11 @@ Imported importSelectionSnapshot(const Json &s) {
             }});
             continue;
         }
+        if(type(a)=="SelectionLetterOpenerActionState") {
+            need(info.cardSelectTask==CardSelectTask::HOLOGRAM_GRID && info.letterOpener,"selection_letter_opener_owner");
+            b.addToBot(Actions::DamageAllEnemy(5));
+            continue;
+        }
         if(type(a)=="SelectionJuggernautActionState") {
             need(info.cardSelectTask==CardSelectTask::TRUE_GRIT_HAND && info.juggernautDamage>0,"selection_juggernaut_owner");
             b.addToBot(Actions::DamageRandomEnemy(info.juggernautDamage));
@@ -665,6 +699,11 @@ Imported importSelectionSnapshot(const Json &s) {
         if(type(a)=="HeadbuttSharpHideActionState") {
             need(info.cardSelectTask==CardSelectTask::HEADBUTT_GRID && info.sharpHide>0,"headbutt_sharp_hide_owner");
             b.addToBot(Actions::DamagePlayer(info.sharpHide));
+            continue;
+        }
+        if(type(a)=="HeadbuttRageBlockActionState") {
+            need(info.cardSelectTask==CardSelectTask::HEADBUTT_GRID && headless,"headbutt_rage_owner");
+            b.addToBot(Actions::GainBlock(payload(a).at("amount")));
             continue;
         }
         if(type(a)=="HeadbuttShurikenActionState") {
@@ -712,6 +751,8 @@ Imported importSelectionSnapshot(const Json &s) {
             item.energyOnUse=q.at("energy_on_use");b.addToBotCard(item);
         } else {
             auto item=reader.queued(q);
+            if(info.cardSelectTask==CardSelectTask::OMNISCIENCE && !item.purgeOnUse)
+                b.cards.notifyAddCardToCombat(item.card);
             if(isHeadlessSingleHand(info.cardSelectTask)) {
                 item.freeToPlay=true;
                 // These cards were only removed from draw, not from combat.

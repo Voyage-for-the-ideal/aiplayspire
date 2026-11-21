@@ -11,6 +11,7 @@ using namespace sts;
 CardInstance::CardInstance(CardId id, bool upgraded) : id(id), upgraded(upgraded) {
     cost = getEnergyCost(id, upgraded);
     costForTurn = cost;
+    if (id == CardId::GENETIC_ALGORITHM) specialData = 1;
 }
 
 CardInstance::CardInstance(const Card &card) : CardInstance(card.getId(), card.isUpgraded()) {

@@ -656,4 +656,35 @@ class CombatContractTest(unittest.TestCase):
         self.assertEqual(verify_combat_effect(plan, after, fp), "UNVERIFIED")
 
 
+
+class OmniscienceRewardReceiptTests(unittest.TestCase):
+    def test_killing_attack_binds_the_chosen_uuid_and_stable_victory_facts(self):
+        import copy
+        from sts_ai_framework.headless.combat import _omniscience_victory
+        streams=combat_raw()['combat']['snapshot']['_headless_rng']['streams']
+        chosen=dict(id='SashWhip',uuid='selected-card',type='ATTACK')
+        other=dict(id='Strike_P',uuid='master-card',timesUpgraded=0,misc=0,cost=1,costForTurn=1)
+        player=dict(hp=33,maxHp=80,gold=10,masterDeck=[other],potions=[{'id':'Potion Slot'}])
+        before=dict(player=player,cardSelection={'options':[chosen]},
+                    interaction={'selection':{'purpose':'omniscience'}})
+        after=dict(phase='REWARD',player=copy.deepcopy(player),combat_receipt={'rng':{'streams':streams}},
+                   driver_receipt=dict(method='chooseGridCard',args=[0],sequence=42,card_uuid=chosen['uuid']))
+        predicted=dict(terminal_prediction='victory',expected_after=dict(hp=33,max_hp=80,potions=['Potion Slot']),
+                       expected_master_deck=[dict(id='Strike_P',upgrades=0,cost=1,turn_cost=1)],
+                       expected_exact_rng=copy.deepcopy(streams),unmodelled_rng=copy.deepcopy(streams))
+        command=dict(type='GRID_SELECT',card_index=0)
+        def check(out):return _omniscience_victory(before,out,command,predicted,42)
+        self.assertTrue(check(after))
+        for change in (
+            lambda x:x['driver_receipt'].update(card_uuid='different-card'),
+            lambda x:x['driver_receipt'].update(card_uuid=None),
+            lambda x:x['driver_receipt'].update(sequence=41),
+            lambda x:x['player'].update(hp=32),
+            lambda x:x['player']['masterDeck'][0].update(timesUpgraded=1),
+            lambda x:x['combat_receipt']['rng']['streams']['card_random'].update(counter=999),
+        ):
+            altered=copy.deepcopy(after);change(altered)
+            self.assertFalse(check(altered),change)
+
+
 if __name__ == "__main__": unittest.main()

@@ -67,6 +67,22 @@ class NativeHeadbuttQueueTest(unittest.TestCase):
                                   ('expected_selection_native_key','selection_native_key')):
             self.assertEqual(pred[expected],f[observed],expected)
 
+    def test_rage_block_waits_for_choice_and_binds_power_amount(self):
+        raw=normal_headbutt_raw();s=raw['combat']['snapshot'];p=s['player_state']
+        p['creature']['powers'].append({'power_id':'Rage','amount':5})
+        first=self.run_action(s,{'type':'CARD','card_index':0,'monster_index':0})
+        paused=opened_headbutt_raw(raw)['combat']['snapshot']
+        q=paused['grid_card_select_screen_state']['action_queue']
+        q.insert(0,{'state_class':'savestate.actions.HeadbuttRageBlockActionState',
+                    'state':{'owner_index':-1,'amount':5}})
+        _headbutt_evidence(paused)
+        self.compare(first,paused)
+        done=self.run_action(paused,{'type':'GRID_SELECT','card_index':0})
+        self.assertEqual(done['expected_after']['block'],first['expected_after']['block']+5)
+        q[0]['state']['amount']=4
+        with self.assertRaises(HeadlessContractError):_headbutt_evidence(paused)
+        self.assertFalse(self.request(paused,'fingerprint')['supported'])
+
     def test_plated_reduction_executes_after_choice_not_on_first_hit(self):
         raw=normal_headbutt_raw();s=raw['combat']['snapshot'];m=s['cur_map_node_state']['monster_data'][0]
         m['creature']['powers'].append({'power_id':'Plated Armor','amount':5})

@@ -180,14 +180,33 @@ def _fetch_evidence(s):
             or len(selected)>=n or len(set(selected))!=len(selected) or any(row not in group for row in chosen)):
         raise HeadlessContractError('Invalid fetch source pile or selected UUID')
     q=v['action_queue'];exhaust=seek or omni or c['times_upgraded']==0
-    if (v['card_queue_state'] or p['limbo'] or q!=_skill_selection_queue(p,c,exhaust)
-            or c.get('_private',{})!={} or c['exhaust'] is not exhaust or c.get('purge_on_use') or c.get('dont_trigger_on_use_card')
-            or any(x['uuid']==c['uuid'] for k in ('hand','draw_pile','discard_pile','exhaust_pile') for x in p[k])):
+    autoplay=v['card_queue_state'];purge=c.get('purge_on_use',False)
+    active={x['uuid'] for k in _BATTLE_PILES for x in p[k]}
+    if (not isinstance(autoplay,list) or len(autoplay)>12 or not omni and (autoplay or purge)
+            or p['limbo'] or q!=_skill_selection_queue(p,c,exhaust) or c.get('_private',{})!={}
+            or c['exhaust'] is not exhaust or c.get('dont_trigger_on_use_card') or c['uuid'] in active):
         raise HeadlessContractError('Invalid fetch cleanup or pending UUID')
-    return {'schema':'headless-fetch-grid-v1','source':source,'options':ids,'selected':selected,'count':n,
-            'pending_card':{'uuid':c['uuid'],'id':source,'upgrades':c['times_upgraded'],'cost':c['cost'],'turn_cost':c['cost_for_turn'],
-                            'free':c['free_to_play_once'],'retain':c['retain'],'exhaust':exhaust}}
-
+    def view(card):
+        return {'uuid':card['uuid'],'id':card['card_id'],'upgrades':card['times_upgraded'],'cost':card['cost'],
+                'turn_cost':card['cost_for_turn'],'free':card['free_to_play_once'],'retain':card['retain'],'exhaust':card['exhaust']}
+    pending=view(c)
+    if purge:pending['purge']=True
+    seen=active|{c['uuid']}
+    queued=[]
+    for row in autoplay:
+        next_card=row['card']
+        if (row.get('autoplay_card') is not True or row.get('ignore_energy_total') is not False
+                or row.get('random_target') is not True or row['monster_index'] is not None
+                or next_card['dont_trigger_on_use_card'] is not False or next_card['uuid'] in seen
+                or not (next_card['exhaust'] is True or next_card['purge_on_use'] is True)):
+            raise HeadlessContractError('Invalid nested Omniscience queue')
+        seen.add(next_card['uuid'])
+        queued.append(dict(view(next_card),purge=next_card['purge_on_use'],
+                           energy=_int(row['energy_on_use'],'Omniscience queue energy',0)))
+    evidence={'schema':'headless-fetch-grid-v1','source':source,'options':ids,'selected':selected,'count':n,
+              'pending_card':pending}
+    if queued:evidence['autoplay_queue']=queued
+    return evidence
 
 def _skill_selection_queue(player, card, exhaust=False):
     """Bind all known effects and their order around use-card cleanup."""
@@ -201,6 +220,8 @@ def _skill_selection_queue(player, card, exhaust=False):
         append('SelectionHexActionState',amount=_int(hex_power['amount'],'Hex Dazed count',1))
     if any(row['relic_id']=='InkBottle' and row['counter']==0 for row in player['relics']):
         append('SelectionDrawActionState',kind='ink_bottle',amount=1)
+    if card['card_id']=='Hologram' and any(row['relic_id']=='Letter Opener' and row['counter']==0 for row in player['relics']):
+        append('SelectionLetterOpenerActionState',amount=5)
     append('UseCardActionState',card=card,targetIndex=-2,exhaustCard=exhaust,returnToHand=False,reboundCard=False)
     powers={power['power_id']:power['amount'] for power in player['creature']['powers']}
     if card['card_id']=='True Grit' and card.get('block',0)>0 and 'NoBlockPower' not in powers and powers.get('Juggernaut',0)>0:
@@ -220,10 +241,13 @@ def _native_selection_evidence(snapshot):
 def _single_hand_evidence(s):
     h=s['hand_select_screen_state'];a=h['current_action_state']['state'];p=s['player_state']
     c=p['card_in_use'];source=a['source'];up=c['times_upgraded'];copies=a['copies']
-    if (set(a)!={'source','copies','owner_index','hidden'} or source not in ('Armaments','True Grit','Dual Wield','Burning Pact') or c['card_id']!=source or up not in (0,1)
+    forethought=source=='Forethought';any_number=forethought and up==1
+    count=99 if any_number else 1
+    if (set(a)!={'source','copies','owner_index','hidden'} or source not in ('Armaments','True Grit','Dual Wield','Burning Pact','Forethought') or c['card_id']!=source or up not in (0,1)
             or up and source=='Armaments' or not up and source=='True Grit' or a['owner_index']!=-1
-            or copies!=(1+up if source=='Dual Wield' else 1) or h['num_cards_to_select']!=1
-            or any(h.get(k) is not False for k in ('were_cards_retrieved','can_pick_zero','up_to','any_number'))
+            or copies!=(1+up if source=='Dual Wield' else 1) or h['num_cards_to_select']!=count
+            or any(h.get(k) is not False for k in ('were_cards_retrieved','up_to'))
+            or h.get('any_number') is not any_number or h.get('can_pick_zero') is not any_number
             or c['exhaust'] or c.get('purge_on_use') or c.get('dont_trigger_on_use_card') or c.get('_private') or p['limbo']
             or h['action_queue']!=_skill_selection_queue(p,c)):
         raise HeadlessContractError('Invalid single-hand source, controls or cleanup')
@@ -245,12 +269,15 @@ def _single_hand_evidence(s):
         queued.append({'uuid':card['uuid'],'id':card['card_id'],'upgrades':card['times_upgraded'],'cost':card['cost'],
                        'turn_cost':card['cost_for_turn'],'free':card['free_to_play_once'],'retain':card['retain'],
                        'target':target,'energy':_int(item['energy_on_use'],'single-hand autoplay energy',0)})
-    if len(set(ids))!=len(ids) or len(selected)>1 or len(selected)+len(remaining)<2 or source in ('True Grit','Burning Pact') and hidden:
+    if (len(set(ids))!=len(ids) or len(selected)>(10 if any_number else 1)
+            or len(selected)+len(remaining)<(1 if any_number else 2)
+            or source in ('True Grit','Burning Pact','Forethought') and hidden or forethought and autoplay):
         raise HeadlessContractError('Invalid single-hand UUID lineage')
     return {'schema':'headless-single-hand-v1','remaining':remaining,'hidden':hidden,'selected':selected,'copies':copies,
             'pending_card':{'uuid':c['uuid'],'id':source,'upgrades':up,'cost':c['cost'],'turn_cost':c['cost_for_turn'],
                             'free':c['free_to_play_once'],'retain':c['retain']},
-            **({'autoplay_queue':queued} if queued else {})}
+            **({'autoplay_queue':queued} if queued else {}),
+            **({'count':count,'any_number':any_number} if forethought else {})}
 
 
 def _headbutt_evidence(snapshot):
@@ -276,6 +303,13 @@ def _headbutt_evidence(snapshot):
         if (len(copies)!=1 or not isinstance(queue,list) or not queue or queue[0]!=expected or
                 not any(v['power_id']=='Double Tap' and v['amount']==0 for v in p['creature']['powers'])):
             raise HeadlessContractError('Invalid pending Headbutt replay order or Double Tap owner')
+        queue=queue[1:]
+    rage=next((pw['amount'] for pw in p['creature']['powers'] if pw['power_id']=='Rage'),0)
+    if rage:
+        expected={'state_class':'savestate.actions.HeadbuttRageBlockActionState',
+                  'state':{'owner_index':-1,'amount':_int(rage,'Rage block',1)}}
+        if copies or not isinstance(queue,list) or not queue or queue[0]!=expected:
+            raise HeadlessContractError('Invalid pending Headbutt Rage block')
         queue=queue[1:]
     attack_relics={'savestate.actions.HeadbuttShurikenActionState':'Shuriken',
                    'savestate.actions.HeadbuttKunaiActionState':'Kunai'}
@@ -597,7 +631,7 @@ def _champ_progress(before, after, command):
         x, y = a.get("_private", {}), b.get("_private", {})
         key = "Champ.firstTurn"
         if key not in x or key not in y: return False
-        took_turn = (command["type"] == "END" and after["turn"] == before["turn"]+1
+        took_turn = (_monster_turn_ran(before, after, command)
                      and y.get("Champ.numTurns") != x.get("Champ.numTurns"))
         if y[key] is not (False if took_turn else x[key]): return False
     return True
@@ -664,11 +698,14 @@ class HeadlessCombatBridge:
                 raise HeadlessContractError("Snapshot is not a normal combat decision")
             if single:
                 evidence=_single_hand_evidence(snapshot);choice=evidence['pending_card']['id']
-                purpose={'True Grit':'exhaust','Burning Pact':'exhaust','Armaments':'upgrade','Dual Wield':'duplicate_combat'}[choice]
+                purpose={'True Grit':'exhaust','Burning Pact':'exhaust','Armaments':'upgrade','Dual Wield':'duplicate_combat','Forethought':'forethought'}[choice]
                 controls=raw['interaction']['selection'];ui=raw['cardSelection']
+                any_number=evidence.get('any_number',False)
+                single_confirm=any_number or bool(evidence['selected'])
                 if (controls.get('purpose')!=purpose or ui.get('kind')!='hand' or controls.get('kind')!='hand'
-                        or controls.get('count')!=1 or any(controls.get(k) is not False for k in ('locked','any_number','can_pick_zero'))
-                        or controls.get('can_confirm') is not bool(evidence['selected'])
+                        or controls.get('count')!=evidence.get('count',1) or controls.get('locked') is not False
+                        or controls.get('any_number') is not any_number or controls.get('can_pick_zero') is not any_number
+                        or controls.get('can_confirm') is not single_confirm
                         or [c['uuid'] for c in ui['options']]!=evidence['remaining']
                         or [c['uuid'] for c in ui['selected']]!=evidence['selected']
                         or choice=='Dual Wield' and controls.get('copies')!=evidence['copies']):
@@ -729,7 +766,7 @@ class HeadlessCombatBridge:
                 elif c['type']=='HAND_SELECT':
                     i=c['card_index']
                     if not (single or gambler) or i>=len(p['hand']) or c.get('uuid')!=p['hand'][i]['uuid']: raise HeadlessContractError('Stale Gambler legal UUID')
-                elif c['type']=='HAND_SELECT_CONFIRM' and not (gambler or single and evidence['selected']): raise HeadlessContractError('Unexpected hand confirmation')
+                elif c['type']=='HAND_SELECT_CONFIRM' and not (gambler or single and single_confirm): raise HeadlessContractError('Unexpected hand confirmation')
                 elif c['type']=='GRID_SELECT':
                     i=c['card_index']
                     if not (liquid or headbutt or fetch) or i>=len(evidence['options']) or c.get('uuid')!=evidence['options'][i]:
@@ -744,7 +781,7 @@ class HeadlessCombatBridge:
                 legal.append(encoded)
             if single:
                 required={_json({'type':'choose','choice_index':i}) for i in range(len(p['hand']))}
-                if evidence['selected']:required.add(_json({'type':'proceed'}))
+                if single_confirm:required.add(_json({'type':'proceed'}))
                 if set(legal)!=required:raise HeadlessContractError('Incomplete single-hand legal actions')
             if gambler:
                 required={_json({'type':'choose','choice_index':i}) for i in range(len(p['hand']))}|{_json({'type':'proceed'})}
@@ -756,7 +793,7 @@ class HeadlessCombatBridge:
             for i, c in enumerate(data["hand"]): c["is_playable"] = any(a.get("type") == "play" and a["card_index"] == i for a in map(json.loads, legal))
             for i, potion in enumerate(data["potions"]): potion["can_use"] = any(a.get("type") == "potion" and a["potion_index"] == i for a in map(json.loads, legal))
             data["is_end_turn_button_enabled"] = _json({"type": "end_turn"}) in legal
-            if single:data.update(can_proceed=bool(evidence['selected']),grid_purpose=purpose,grid_num_cards=1,choice_list=[c.name for c in state.hand])
+            if single:data.update(can_proceed=single_confirm,grid_purpose=purpose,grid_num_cards=evidence.get('count',1),choice_list=[c.name for c in state.hand])
             if gambler:data.update(can_proceed=True,grid_purpose='exhaust' if elixir else 'gamble',grid_num_cards=99,choice_list=[c.name for c in state.hand])
             if liquid or fetch:data.update(can_proceed=False,grid_purpose=evidence['source'].lower() if fetch else 'liquid_memories',grid_num_cards=evidence['count'],choice_list=[c.name for c in state.grid_cards])
             state = GameState(**data)
@@ -822,15 +859,42 @@ def validate_selection_import(frame, fingerprint):
 _BATTLE_PILES = ('hand','draw_pile','discard_pile','exhaust_pile')
 
 
+def _known_combat_uuids(snapshot):
+    p=snapshot['player_state']
+    seen={c['uuid'] for pile in (*_BATTLE_PILES,'master_deck') for c in p[pile]}
+    pending=p.get('card_in_use')
+    if pending:seen.add(pending['uuid'])
+    for key in ('grid_card_select_screen_state','hand_select_screen_state'):
+        view=snapshot.get(key) or {}
+        for row in view.get('card_queue_state',[]):
+            if row.get('card'):seen.add(row['card']['uuid'])
+        seen.update(c['uuid'] for c in view.get('selected_cards',[]))
+        seen.update(c['uuid'] for c in view.get('current_action_state',{}).get('state',{}).get('hidden',[]))
+    return seen
+
+
+def _selection_lineage(before, after, expected, actual):
+    if actual==expected:return True
+    if not (isinstance(expected,dict) and isinstance(actual,dict)
+            and expected.get('source')==actual.get('source')=='Omniscience'):
+        return False
+    want=copy.deepcopy(expected)
+    seen=_known_combat_uuids(before)|{c['uuid'] for pile in _BATTLE_PILES for c in after['player_state'][pile]}
+    for predicted,observed in zip(
+            [want['pending_card'],*want.get('autoplay_queue',[])],
+            [actual['pending_card'],*actual.get('autoplay_queue',[])]):
+        uid=observed['uuid']
+        if predicted['uuid'] is None:
+            if not predicted.get('purge') or not isinstance(uid,str) or uid in seen:return False
+            predicted['uuid']=uid
+        seen.add(uid)
+    return want==actual
+
+
 def _normal_card_lineage(before, after, expected):
     """Existing cards keep their exact UUID; a generated slot must have a fresh identity."""
     if not isinstance(expected,dict) or set(expected)!=set(_BATTLE_PILES): return False
-    source={c['uuid'] for pile in (*_BATTLE_PILES,'master_deck') for c in before['player_state'][pile]}
-    hand=before.get('hand_select_screen_state') or {}
-    for c in hand.get('selected_cards',[]):source.add(c['uuid'])
-    for c in hand.get('current_action_state',{}).get('state',{}).get('hidden',[]):source.add(c['uuid'])
-    pending=before['player_state'].get('card_in_use')
-    if pending:source.add(pending['uuid'])
+    source=_known_combat_uuids(before)
     seen=set()
     for pile in _BATTLE_PILES:
         observed=[c['uuid'] for c in after['player_state'][pile]]
@@ -860,6 +924,40 @@ def _omniscience_scry_source(raw, command, predicted):
         if specs and type(target.get('count')) is int and target['count']==count and target.get('options')==specs:
             return card['uuid']
     return None
+
+
+def _omniscience_victory(before, after, command, predicted, sequence):
+    # Rewards clear combat history. Bind the grid request to the chosen card
+    # before cleanup and check the surviving deck, player and combat RNG.
+    if (before.get('interaction',{}).get('selection',{}).get('purpose')!='omniscience'
+            or command['type']!='GRID_SELECT' or predicted.get('terminal_prediction')!='victory'
+            or after.get('phase')!='REWARD'):return False
+    idx=command['card_index']
+    options=before['cardSelection']['options']
+    if not 0<=idx<len(options):return False
+    selected=options[idx]
+    if selected['type']!='ATTACK':return False
+    lesson=selected['id']=='LessonLearned'
+    previous=before['player'];player=after['player']
+    receipt=after.get('driver_receipt',{})
+    forecast=predicted['expected_after']
+    decks=(previous['masterDeck'],player['masterDeck'])
+    bound=receipt.get('card_uuid')==selected['uuid']
+    if (receipt.get('method')!='chooseGridCard' or receipt.get('args')!=[idx] or receipt.get('sequence')!=sequence
+            or not bound and not (lesson and receipt.get('card_uuid') is None)
+            or [c['uuid'] for c in decks[0]]!=[c['uuid'] for c in decks[1]]
+            or any(c['id']!=d['id'] or c['misc']!=d['misc'] for c,d in zip(*decks))
+            or sum(c['timesUpgraded']!=d['timesUpgraded'] for c,d in zip(*decks))!=int(lesson)
+            or not lesson and (decks[0]!=decks[1] or player['gold']!=previous['gold'])
+            or (player['hp'],player['maxHp'])!=(forecast['hp'],forecast['max_hp'])
+            or [p['id'] for p in player['potions']]!=forecast['potions']):return False
+    actual=after['combat_receipt']['rng']['streams']
+    exact=predicted['expected_exact_rng']
+    if any(actual[k]!=exact[k] for k in ('ai','card_random','headless','misc','monster_hp','shuffle')):return False
+    extras=predicted['unmodelled_rng']
+    if any(actual[k]!=extras[k] for k in ('monster','map','event','merchant')):return False
+    return [(c['id'],c['timesUpgraded'],c['cost'],c['costForTurn']) for c in decks[1]]==[
+        (c['id'],c['upgrades'],c['cost'],c['turn_cost']) for c in predicted['expected_master_deck']]
 
 
 def _menu_picker_match(plan, raw, predicted):
@@ -903,8 +1001,11 @@ def verify_combat_effect(plan, after, fingerprint):
         original=json.loads(plan.before.raw_json)
         command=json.loads(plan.command_json)
         source=_omniscience_scry_source(original,command,predicted)
-        if gambler and source is None: return 'UNVERIFIED'
         raw = json.loads(after.raw_json); before = plan.before.state; state = after.state
+        if gambler and source is None:
+            try:
+                if not _omniscience_victory(original,raw,command,predicted,after.sequence):return 'UNVERIFIED'
+            except (KeyError,TypeError,ValueError):return 'UNVERIFIED'
         receipt = raw.get("combat_receipt", {})
         if (before.floor, before.act, before.character) != (state.floor, state.act, state.character): return "REJECTED"
         outcome = predicted.get("terminal_prediction")
@@ -963,7 +1064,8 @@ def verify_combat_effect(plan, after, fingerprint):
         except (KeyError,TypeError,HeadlessContractError): return 'UNVERIFIED'
         actual_guard=fingerprint.get('selection_native_key')
         expected_guard=predicted.get('expected_selection_native_key')
-        if (actual_selection!=predicted.get('expected_selection') or fingerprint.get('selection')!=actual_selection
+        if (not _selection_lineage(plan.before.snapshot,s,predicted.get('expected_selection'),actual_selection)
+                or fingerprint.get('selection')!=actual_selection
                 or actual_selection is not None and (not isinstance(actual_guard,list) or not actual_guard
                     or not isinstance(expected_guard,list) or not expected_guard or actual_guard!=expected_guard)
                 or not _normal_card_lineage(plan.before.snapshot,s,predicted.get('expected_card_uuids'))):

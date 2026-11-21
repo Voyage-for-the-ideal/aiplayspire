@@ -73,6 +73,8 @@ _DIALOG={
     ('Fountain of Cleansing','FountainOfCurseRemoval','0',1):'1',
     ('The Mausoleum','TheMausoleum','INTRO',1):'RESULT',
     ('Colosseum','Colosseum','INTRO',0):'FIGHT',
+    ('Masked Bandits','MaskedBandits','PAID_1',0):'PAID_2',
+    ('Masked Bandits','MaskedBandits','PAID_2',0):'PAID_3',
     ('Falling','Falling','INTRO',0):'CHOICE',
     ('SensoryStone','SensoryStone','INTRO',0):'INTRO_2',
     ('Winding Halls','WindingHalls','0',0):'1',
@@ -271,7 +273,8 @@ def _bandits(before,after,a,b):
     # The ordinary EventRoom isn't marked elite and contains no bosses.
     energy=3+len(ids & {'Ectoplasm','Cursed Key','Coffee Dripper','Fusion Hammer','Sozu','Runic Dome',
                           'Velvet Choker',"Philosopher's Stone",'Busted Crown','Mark of Pain'})
-    reset={'Letter Opener':0}
+    if not toolbox and 'Lantern' in ids:energy+=1
+    reset={'Letter Opener':0,'Velvet Choker':0}
     if toolbox:reset.update({'Velvet Choker':0,'Pocketwatch':0,'HornCleat':1,'Ornamental Fan':0})
     if right.relics!=[r.model_copy(update={'counter':reset[r.id]}) if r.id in reset else r for r in left.relics]:
         return False
@@ -974,10 +977,24 @@ def library_selection_receipt(before,after,target):
     except (KeyError,IndexError,AttributeError,TypeError,ValueError,StopIteration):return False
 
 
+def _golden_idol_take(left,right,a,b):
+    # Taking the idol executes immediately; trap costs belong to later clicks.
+    event=right.event
+    return (_room_context(a,b,'GoldenIdolEvent') and a['phase']==b['phase']=='EVENT'
+            and a['roomPhase']==b['roomPhase']=='EVENT' and event is not None
+            and (event.id,event.class_name,event.phase)==('Golden Idol','GoldenIdolEvent','1')
+            and _controls(event)==[(0,True),(1,True),(2,True)]
+            and left.player==right.player and left.deck==right.deck and left.potions==right.potions
+            and left.keys==right.keys and not any(r.id=='Golden Idol' for r in left.relics)
+            and a['player']['masterDeck']==b['player']['masterDeck']
+            and b['player']['relics']==a['player']['relics']+[{'id':'Golden Idol','counter':-1,'name':b['player']['relics'][-1]['name']}]
+            and _streams(a)==_streams(b))
+
 def _verify(before,after,button):
     left,right=before.state,after.state;e=left.event
     key=(e.id,e.class_name,e.phase,button)
     end=right.event.phase if right.event else None
+    golden=key==('Golden Idol','GoldenIdolEvent','0',0)
     simple=key in _DIALOG
     designer=key==('Designer','Designer','INTRO',0)
     dead=key==('Dead Adventurer','DeadAdventurer','INTRO',0)
@@ -996,8 +1013,9 @@ def _verify(before,after,button):
     joust=key[:2]==('The Joust','TheJoust') and e.phase in ('EXPLANATION','PRE_JOUST','JOUST')
     mushrooms=key==('Mushrooms','Mushrooms','0',1)
     event_fight=key in {('Mysterious Sphere','MysteriousSphere','PRE_COMBAT',0),('MindBloom','MindBloom','INTRO',0)}
-    if not (simple or designer or dead or altar or coin or bandits or house or amp or colosseum or skull or library or falling or sensory or fountain or tomb or joust or mushrooms or event_fight):return None
+    if not (golden or simple or designer or dead or altar or coin or bandits or house or amp or colosseum or skull or library or falling or sensory or fountain or tomb or joust or mushrooms or event_fight):return None
     a,b=json.loads(before.raw_json),json.loads(after.raw_json)
+    if golden:return _golden_idol_take(left,right,a,b)
     if mushrooms:return _mushrooms_eat(left,right,a,b)
     if fountain:return _fountain(left,right,a,b)
     if joust:return _joust(left,right,a,b,button)

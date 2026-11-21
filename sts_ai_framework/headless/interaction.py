@@ -662,6 +662,107 @@ def _next_survivor_discard(before, after, selected):
                 ==omit(pb,{'block','discardCount','discardPileCount','discardPile','powers','relics'}))
 
 
+def _queued_cut_through_fate_scry(before, after, selected):
+    """Verify two consecutive Scry screens against the actual queued autoplay."""
+    from .event_receipts import _streams
+    a,b=json.loads(before.raw_json),json.loads(after.raw_json)
+    pa,pb=a['player'],b['player']
+    ra,rb=a['combat_receipt'],b['combat_receipt']
+    first=a['interaction'].get('scry_replay')
+    second=b['interaction'].get('scry_replay')
+    if first is None or second is None:return False
+    next_play=first['next']
+    if (first['remaining']!=1 or not next_play or second['remaining']!=0 or second['next'] is not None
+            or first['target']!=next_play['target'] or second['target']!=next_play['target']
+            or second['autoplay'] is not True or len(a['monsters'])!=1 or len(b['monsters'])!=1
+            or any(a[k]!=b[k] for k in ('seed','floor','act','room','roomPhase','phase','map','history','observedKeys'))
+            or a['phase']!='CARD_SELECT' or a['roomPhase']!='COMBAT'
+            or _streams(a)!=_streams(b)
+            or {k:v for k,v in ra.items() if k not in ('played_card_uuids','rng')}!=
+               {k:v for k,v in rb.items() if k not in ('played_card_uuids','rng')}):
+        return False
+    played=ra['played_card_uuids']
+    source,queued,current=first['source'],next_play['card'],second['source']
+    fields=('uuid','card_id','times_upgraded','base_damage','base_magic_number','cost','cost_for_turn','purge_on_use','exhaust')
+    if (any(queued[k]!=current[k] for k in fields)
+            or any(c['card_id']!='CutThroughFate' or c['exhaust'] or c['times_upgraded'] not in (0,1)
+                   or c['base_damage']!=7+2*c['times_upgraded'] or c['base_magic_number']!=2+c['times_upgraded']
+                   for c in (source,queued))
+            or source['purge_on_use'] or not played or played[-1]!=source['uuid']
+            or rb['played_card_uuids']!=played+[queued['uuid']]):
+        return False
+    driver=a['driver_receipt'];powers=pa['powers'];relics=pa['relics']
+    if next_play['ignore_energy_total'] is True:
+        if (driver['method']!='playCard' or driver['card_uuid']!=source['uuid'] or first['autoplay'] is not False
+                or queued['uuid']!=source['uuid'] or not queued['purge_on_use']
+                or [(p['id'],p['amount']) for p in powers if p['id']=='DuplicationPower']!=[('DuplicationPower',0)]):
+            return False
+        powers=[p for p in powers if p['id']!='DuplicationPower']
+    elif next_play['ignore_energy_total'] is False:
+        if (driver['method']!='usePotion' or first['autoplay'] is not True or queued['purge_on_use']
+                or queued['uuid'] in played
+                or [c['uuid'] for c in pa['masterDeck'] if c['id']=='CutThroughFate'].count(queued['uuid'])!=1):
+            return False
+    else:return False
+    amounts={p['id']:p['amount'] for p in powers}
+    if (pb['powers']!=powers or amounts.keys()-{'Strength','Dexterity','BattleHymn'}
+            or pa['stance'] not in (None,'None','Neutral','Wrath') or not 0<=len(pa['hand'])<10):
+        return False
+    target=a['monsters'][0];target_powers=target['powers']
+    if any(p['id'] not in ('Plated Armor','Artifact') for p in target_powers):return False
+    damage=max(0,queued['base_damage']+amounts.get('Strength',0))*(2 if pa['stance']=='Wrath' else 1)
+    hp=target['hp']-max(0,damage-target['block'])
+    if hp<=0 or current['damage']!=damage:return False
+    if hp<target['hp']:
+        if any(p['id']=='Plated Armor' and p['amount']<=1 for p in target_powers):return False
+        target_powers=[dict(p,amount=p['amount']-1) if p['id']=='Plated Armor' else p for p in target_powers]
+    if b['monsters']!=[dict(target,hp=hp,block=max(0,target['block']-damage),powers=target_powers)]:return False
+    expected_relics=[]
+    for r in relics:
+        if r['id']=='Pen Nib':
+            if not 0<=r['counter']<9:return False
+            r=dict(r,counter=r['counter']+1)
+        elif r['id']=='Kunai':
+            if not 0<=r['counter']<3:return False
+            r=dict(r,counter=(r['counter']+1)%3) # A proc queues its buff beyond the new Scry screen.
+        expected_relics.append(r)
+    if pb['relics']!=expected_relics:return False
+    screens=(a['interaction']['selection'],b['interaction']['selection'])
+    old,new=a['cardSelection'],b['cardSelection']
+    for controls,c in zip(screens,(source,queued)):
+        if controls!={'kind':'grid','purpose':'scry','count':c['base_magic_number'],'locked':False,
+                      'can_confirm':True,'any_number':True,'can_pick_zero':True,'auto_confirm':True}:return False
+    if len(selected)!=len(set(selected)) or [c['uuid'] for c in old['selected']]!=selected or new['selected']:
+        return False
+    def facts(cards):
+        return [(c['uuid'],c['id'],c['timesUpgraded'],c['cost'],c['costForTurn'],c['misc'],c['exhaust']) for c in cards]
+    def settled(card):return dict(card,costForTurn=card['cost'])
+    draw=pa['drawPile']
+    if (facts(old['options'])!=facts(draw[::-1][:source['base_magic_number']])
+            or not set(selected)<={c['uuid'] for c in old['options']}
+            or any(c['id']=='Weave' for k in ('drawPile','discardPile') for c in pa[k])):
+        return False
+    active={c['uuid'] for k in ('drawPile','discardPile','hand','exhaustPile') for c in pa[k]}
+    if source['uuid'] in active or queued['uuid'] in active:return False
+    draw=[c for c in draw if c['uuid'] not in selected]
+    if len(draw)<2:return False
+    drawn=draw.pop()
+    discard=pa['discardPile']+[settled(c) for c in old['selected']]
+    if not pb['discardPile']:return False
+    cleanup=pb['discardPile'][-1]
+    if (cleanup['uuid'],cleanup['id'],cleanup['timesUpgraded'],cleanup['cost'],cleanup['costForTurn'],cleanup['misc'],cleanup['exhaust'])!=(
+            source['uuid'],'CutThroughFate',source['times_upgraded'],source['cost'],source['cost'],source['misc'],False):
+        return False
+    changes={'drawPile','drawCount','drawPileCount','hand','handSize','discardPile','discardCount','discardPileCount','powers','relics'}
+    return (facts(new['options'])==facts(draw[::-1][:queued['base_magic_number']])
+            and facts(pb['drawPile'])==facts(draw) and facts(pb['hand'])==facts(pa['hand']+[drawn])
+            and facts(pb['discardPile'][:-1])==facts(discard)
+            and pb['drawCount']==pb['drawPileCount']==len(draw)
+            and pb['discardCount']==pb['discardPileCount']==len(discard)+1
+            and pb['handSize']==len(pa['hand'])+1
+            and {k:v for k,v in pa.items() if k not in changes}=={k:v for k,v in pb.items() if k not in changes})
+
+
 def _next_cut_through_fate_scry(before, after, selected):
     """Prove a pending Duplication Potion or Omniscience play into a second Scry."""
     from .event_receipts import Stream, _streams
@@ -1133,10 +1234,19 @@ def _wheel_effect(before, after, facts):
     try: observed = _wheel_facts(raw.get('interaction', {}))
     except HeadlessContractError: return False
     if left.event is None or left.event.class_name != 'GremlinWheelGame': return False
-    if any(observed[k] != facts[k] for k in ('gold_amount','hp_loss')): return False
     stage = facts['stage']
+    relics={r.id for r in left.relics}
+    darkstone_claim=(stage=='COMPLETE' and facts['result']==3 and 'Darkstone Periapt' in relics
+                     and 'Omamori' not in relics and 'Mark of the Bloom' not in relics)
+    if darkstone_claim:
+        # The wheel UI recomputes this preview from live max HP even after
+        # claiming a different result. Bind both values to the source formula.
+        percent=15 if left.ascension_level>=15 else 10
+        if (facts['hp_loss'],observed['hp_loss'])!=(left.player.max_hp*percent//100,right.player.max_hp*percent//100):return False
+    elif observed['hp_loss']!=facts['hp_loss']:return False
+    if observed['gold_amount']!=facts['gold_amount']:return False
     if stage not in ('INTRO','SPIN') and observed.get('result') != facts['result']: return False
-    if (left.player.max_hp,left.player.block,left.player.energy)!=(right.player.max_hp,right.player.block,right.player.energy): return False
+    if (left.player.max_hp+(6 if darkstone_claim else 0),left.player.block,left.player.energy)!=(right.player.max_hp,right.player.block,right.player.energy): return False
     same_inventory = left.deck == right.deck and left.relics == right.relics and left.potions == right.potions
     if stage == 'LEAVE':
         return (observed['stage']=='LEAVE' and right.screen_type=='MAP' and same_inventory
@@ -1161,7 +1271,9 @@ def _wheel_effect(before, after, facts):
     effects = []
     followup, transition = 'EVENT', {'phases':['LEAVE']}
     if result == 2: effects = [{'type':'full_heal'}]
-    elif result == 3: effects = [{'type':'add_card','card_id':'Decay','amount':1}]
+    elif result == 3:
+        effects = [{'type':'add_card','card_id':'Decay','amount':1}]
+        if darkstone_claim:effects.append({'type':'gain_max_hp','amount':6})
     elif result == 4 and facts['purge_available']:
         effects = [{'type':'select_cards','purpose':'PURGE','count':1}]
         followup, transition = 'GRID', {'screens':['GRID']}
@@ -1418,7 +1530,8 @@ def verify_effect(plan: ActionPlan, after: InteractionFrame) -> EffectCheck:
             applied = (right.screen_type != "GRID" and left.room_phase == right.room_phase == "COMBAT" and left.deck == right.deck
                        and set(e["uuids"]) <= {c.uuid for c in right.discard_pile + right.hand})
             if right.screen_type=='GRID':
-                try:applied=_next_cut_through_fate_scry(before,after,e['uuids'])
+                try:applied=(_queued_cut_through_fate_scry(before,after,e['uuids'])
+                             or _next_cut_through_fate_scry(before,after,e['uuids']))
                 except (KeyError,IndexError,TypeError,ValueError,StopIteration):applied=False
     elif kind == "event":
         if left.event is not None and left.event.id == e["event_id"]:

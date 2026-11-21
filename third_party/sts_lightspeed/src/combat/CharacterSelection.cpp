@@ -53,6 +53,8 @@ void sts::openCharacterSelection(BattleContext &b,CardSelectTask task,int count)
         if(task==CardSelectTask::BURNING_PACT_HAND)info.sourceDraw=b.curCardQueueItem.card.isUpgraded()?3:2;
         info.hexDazed=b.player.getStatus<PS::HEX>();
         info.inkDraw=b.player.hasRelic<R::INK_BOTTLE>() && b.player.inkBottleCounter==0;
+        info.letterOpener=task==CardSelectTask::HOLOGRAM_GRID && b.player.hasRelic<R::LETTER_OPENER>()
+            && b.player.skillsPlayedThisTurn>=3 && b.player.skillsPlayedThisTurn%3==0;
         if(task==CardSelectTask::TRUE_GRIT_HAND && b.calculateCardBlock(9)>0)
             info.juggernautDamage=b.player.getStatus<PS::JUGGERNAUT>();
     }
@@ -61,11 +63,12 @@ void sts::openCharacterSelection(BattleContext &b,CardSelectTask task,int count)
     if(isHeadlessSingleHand(task)) {
         for(int i=0;i<b.cards.cardsInHand;i++) {
             const auto &c=b.cards.hand[i];
-            bool eligible=task==CardSelectTask::TRUE_GRIT_HAND || task==CardSelectTask::BURNING_PACT_HAND || (task==CardSelectTask::ARMAMENTS_HAND?c.canUpgrade():
+            bool eligible=task==CardSelectTask::TRUE_GRIT_HAND || task==CardSelectTask::BURNING_PACT_HAND || task==CardSelectTask::FORETHOUGHT_HAND || (task==CardSelectTask::ARMAMENTS_HAND?c.canUpgrade():
                     c.getType()==CardType::ATTACK || c.getType()==CardType::POWER);
             (eligible?info.options:info.hiddenHand).push_back(c);
         }
-        info.explicitConfirm=true;info.data0=count;count=1;
+        info.explicitConfirm=true;info.data0=task==CardSelectTask::FORETHOUGHT_HAND?1:count;
+        if(task!=CardSelectTask::FORETHOUGHT_HAND)count=1;
     } else if(task==CardSelectTask::EXHUME) {
         auto &pile=b.cards.exhaustPile;
         for(auto it=pile.begin();it!=pile.end();) {
@@ -104,9 +107,9 @@ void sts::openCharacterSelection(BattleContext &b,CardSelectTask task,int count)
     info.pickCount=std::min(count,int(info.options.size()));
     if(task==CardSelectTask::WARCRY || task==CardSelectTask::FORETHOUGHT)info.explicitConfirm=true;
     if(task==CardSelectTask::NIGHTMARE || task==CardSelectTask::OMNISCIENCE){info.data0=count;info.pickCount=1;}
-    info.canPickAnyNumber=(task==CardSelectTask::FORETHOUGHT && count==99) || task==CardSelectTask::SCRY || task==CardSelectTask::RETAIN || isHeadlessMultiHand(task);
+    info.canPickAnyNumber=((task==CardSelectTask::FORETHOUGHT || task==CardSelectTask::FORETHOUGHT_HAND) && count==99) || task==CardSelectTask::SCRY || task==CardSelectTask::RETAIN || isHeadlessMultiHand(task);
     info.canPickZero=info.canPickAnyNumber;
-    if(isHeadlessMultiHand(task)){info.pickCount=99;info.explicitConfirm=true;}
+    if(isHeadlessMultiHand(task) || (task==CardSelectTask::FORETHOUGHT_HAND && info.canPickAnyNumber)){info.pickCount=99;info.explicitConfirm=true;}
     if(info.options.empty() || info.pickCount<=0){b.cardSelectInfo=CardSelectInfo{};return;}
     if(task==CardSelectTask::MEDITATE && info.pickCount==int(info.options.size())) {
         // With at most the requested count, Meditate moves cards in discard
@@ -146,11 +149,19 @@ bool sts::validCharacterSelection(const BattleContext &b,int option) {
 void sts::applyCharacterSelection(BattleContext &b,int option) {
     if(!isCharacterSelection(b.cardSelectInfo.cardSelectTask))throw std::runtime_error("invalid_character_selector");
     auto &s=b.cardSelectInfo;
-    if(isHeadlessSingleHand(s.cardSelectTask) && option!=CHARACTER_SELECT_CONFIRM && !s.selected.empty()){
+    if(isHeadlessSingleHand(s.cardSelectTask) && !s.canPickAnyNumber && option!=CHARACTER_SELECT_CONFIRM && !s.selected.empty()){
         auto old=s.options.at(s.selected.front());s.selected.clear();
         b.cards.removeFromHandById(old.uniqueId);b.cards.moveToHand(old);
     }
     if(isHeadlessSingleHand(s.cardSelectTask) && option==CHARACTER_SELECT_CONFIRM) {
+        if(s.cardSelectTask==CardSelectTask::FORETHOUGHT_HAND) {
+            for(int selected:s.selected)for(int n=0;n<b.cards.cardsInHand;++n)
+                if(b.cards.hand[n].uniqueId==s.options.at(selected).uniqueId) {
+                    b.chooseForethoughtCard(n);
+                    break;
+                }
+            b.cardSelectInfo=CardSelectInfo{};return;
+        }
         if(s.selected.size()!=1)throw std::runtime_error("single_hand_missing_choice");
         auto c=s.options.at(s.selected.front());std::vector<CardInstance> remaining;
         for(int j=0;j<b.cards.cardsInHand;j++) {
@@ -259,12 +270,13 @@ void sts::applyCharacterSelection(BattleContext &b,int option) {
             for(int n=0;n<int(b.cards.drawPile.size());++n)if(b.cards.drawPile[n].uniqueId==c.uniqueId){b.cards.removeFromDrawPileAtIdx(n);break;}
             for(int copy=0;copy<s.data0;++copy) {
                 CardQueueItem item(c,0,b.player.energy);
-                item.card.forcedExhaust=true;
-                // Vanilla queues with randomTarget=true even for an untargeted skill.
-                item.autoplay=true;item.randomTarget=true;item.exhaustOnUse=true;
+                // Only the original is forced to exhaust; a stat-equivalent
+                // purge copy gets the fresh card's intrinsic exhaust/retain flags.
+                item.card.forcedExhaust=copy==0 && !doesCardExhaust(c.id,c.upgraded);
+                item.autoplay=true;item.randomTarget=true;item.exhaustOnUse=item.card.doesExhaust();
                 item.purgeOnUse=copy>0;
-                if(copy>0)item.card.uniqueId=b.cards.nextUniqueCardId++;
-                b.addToBot({[item](BattleContext &next){next.addToBotCard(item);}});
+                if(copy>0){item.card.uniqueId=b.cards.nextUniqueCardId++;item.card.retain=false;}
+                b.addToBot({[item](BattleContext &next){auto queued=item;queued.energyOnUse=next.player.energy;next.addToBotCard(queued);}});
             }
         } else if(task==CardSelectTask::WISH) {
             if(c.id==CardId::BECOME_ALMIGHTY)b.addToBot(Actions::BuffPlayer<PS::STRENGTH>(c.upgraded?4:3));
@@ -314,7 +326,7 @@ std::vector<search::Action> sts::characterSelectionActions(const BattleContext &
     int start=!s.canonicalOrder || s.selected.empty()?0:s.selected.back()+1;
     // Selection replacement is checked for forced input. Search can reach
     // each target directly as a sibling, so never loop on replacements.
-    if(isHeadlessSingleHand(s.cardSelectTask) && !s.selected.empty())
+    if(isHeadlessSingleHand(s.cardSelectTask) && !s.canPickAnyNumber && !s.selected.empty())
         return {search::Action(search::ActionType::SINGLE_CARD_SELECT,CHARACTER_SELECT_CONFIRM)};
     for(int i=start;i<int(s.options.size());++i) {
         // The real grid can undo a partial pick, and forced replay must still
