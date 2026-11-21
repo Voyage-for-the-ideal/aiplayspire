@@ -26,4 +26,14 @@ python -m battle_engine.tools.oracle --game-dir 'D:\Program Files\Slay the Spire
 
 这是隔离的真实游戏进程：使用发布 JAR、游戏自带 JRE、复制的配置，以及只用于验收的输入/快照测试补丁。默认驱动 Start Steve 使用的同一开关；加 `--auto-start` 验证自动启动，加 `--test-takeover` 验证搜索过程中停止、迟到响应被丢弃并再次启动。完整战斗保留日志、动作轨迹、胜负、净失血、用药和 DLL 哈希。测试补丁不进入玩家的安装包。
 
+### 指定卡牌选择边界
+
+`--selector-case` 从已有的战斗快照恢复真实游戏，再布置固定手牌和牌堆。夹具写出 `selector-start.json`；每次点击仍走生产的 JNI 命令编码、前置校验与 LudicrousSpeed 执行。验收只在选择、卡牌 UUID、结算及原生预测全部匹配时通过，不以打赢战斗代替卡牌验收。
+
+```powershell
+python -m battle_engine.tools.oracle --game-dir 'D:\Program Files\Slay the Spire' --snapshot 'D:\Program Files\Slay the Spire\startstates\119TLMC49V0AB\01\start.txt' --selector-case meditate-plus
+```
+
+其他用例：`meditate`、`exhume`、`exhume-single`、`forethought`、`forethought-plus`、`forethought-zero`、`omniscience`、`omniscience-attack`、`omniscience-scry`。隔离目录中保留开始快照、逐步轨迹、构建哈希；失败时另存真实状态与预测差异。
+
 搜索档位、去重、批量采集及能力边界见[共享战斗核心](docs/BATTLE_ENGINE.md)。旧双实例说明仅供考古，见[历史设计记录](AUTOFIGHT_HISTORICAL.md)。

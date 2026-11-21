@@ -1047,59 +1047,24 @@ Action Actions::DualWieldAction(int copyCount) {
     }};
 }
 
-Action Actions::ExhumeAction() { // todo this is bugged because the selected card cannot be exhume
-    return {[=] (BattleContext &bc) {
-        if (bc.cards.exhaustPile.empty() || bc.cards.cardsInHand == 10) {
+Action Actions::ExhumeAction() {
+    return {[](BattleContext &b) {
+        auto &pile=b.cards.exhaustPile;
+        if(pile.empty() || b.cards.cardsInHand==10)return;
+        if(pile.size()==1) {
+            if(pile.front().id!=CardId::EXHUME)b.chooseExhumeCard(0);
             return;
         }
-
-        int nonExhumeCards = 0;
-        int lastNonExhumeIdx = -1;
-        for (std::size_t i = 0; i < bc.cards.exhaustPile.size(); ++i) {
-            if (bc.cards.exhaustPile[i].id != CardId::EXHUME) {
-                ++nonExhumeCards;
-                lastNonExhumeIdx = static_cast<int>(i);
-            }
-        }
-
-        if (nonExhumeCards == 0) {
-            return;
-
-        } else if (nonExhumeCards == 1) {
-            bc.chooseExhumeCard(lastNonExhumeIdx);
-
-        } else {
-            bc.cardSelectInfo.cardSelectTask = CardSelectTask::EXHUME;
-            bc.inputState = InputState::CARD_SELECT;
-        }
-
+        if(std::any_of(pile.begin(),pile.end(),[](const CardInstance &c){return c.id!=CardId::EXHUME;}))
+            openCharacterSelection(b,CardSelectTask::EXHUME,1);
     }};
 }
 
-Action Actions::ForethoughtAction(bool) {
-    return {[=] (BattleContext &bc) {
-        if (bc.cards.cardsInHand == 0) {
-            return;
-        }
-
-        // todo implement Upgraded version
-//        //
-//        if (upgraded) {
-//            bc.cardSelectInfo.cardSelectTask = CardSelectTask::FORETHOUGHT;
-//            bc.cardSelectInfo.canPickAnyNumber = true;
-//            bc.inputState = InputState::CARD_SELECT;
-//
-//        } else {
-        if (bc.cards.cardsInHand == 1) {
-            bc.chooseForethoughtCard(0);
-        } else {
-            bc.cardSelectInfo.cardSelectTask = CardSelectTask::FORETHOUGHT;
-            bc.cardSelectInfo.canPickAnyNumber = false;
-            bc.inputState = InputState::CARD_SELECT;
-        }
-//        }
-
-
+Action Actions::ForethoughtAction(bool upgraded) {
+    return {[upgraded](BattleContext &b) {
+        if(b.cards.cardsInHand==0)return;
+        if(!upgraded && b.cards.cardsInHand==1)b.chooseForethoughtCard(0);
+        else openCharacterSelection(b,CardSelectTask::FORETHOUGHT,upgraded?99:1);
     }};
 }
 

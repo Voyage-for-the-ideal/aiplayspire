@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import tempfile
 import subprocess
 import sys
 import time
@@ -77,14 +78,20 @@ def main(argv=None):
     parser.add_argument("--budget-ms",type=int)
     parser.add_argument("--max-expansions",type=int)
     parser.add_argument("--test-takeover",action="store_true")
-    parser.add_argument("--full-fight",action="store_true")
+    mode=parser.add_mutually_exclusive_group()
+    mode.add_argument("--full-fight",action="store_true")
+    mode.add_argument("--selector-case",choices=("meditate","meditate-plus","exhume","exhume-single","forethought","forethought-plus",
+                                               "forethought-zero","omniscience","omniscience-attack","omniscience-scry"))
     parser.add_argument("--auto-start",action="store_true")
     parser.add_argument("--keep-runtime",action="store_true",help="Keep copied game binaries in addition to traces and diagnostics")
     parser.add_argument("--timeout",type=int,default=120)
     args=parser.parse_args(argv)
+    if args.selector_case and (args.test_takeover or args.auto_start):
+        parser.error("Selector replay drives its own commands; omit takeover and autostart options")
     game=args.game_dir.resolve(strict=True)
-    runtime=ROOT/"out"/f"jni-smoke-{time.time_ns()}"
-    mods=runtime/"mods"; mods.mkdir(parents=True)
+    out=ROOT/"out"; out.mkdir(exist_ok=True)
+    runtime=Path(tempfile.mkdtemp(prefix="jni-smoke-",dir=out))
+    mods=runtime/"mods"; mods.mkdir()
     for name in ("ModTheSpire.jar","desktop-1.0.jar"): shutil.copy2(game/name,runtime/name)
     enabled=["BaseMod.jar","StSLib.jar","SaveStateMod.jar","LudicrousSpeed.jar","BattleAiMod.jar"]
     for name in enabled: shutil.copy2(args.battle_jar if name=="BattleAiMod.jar" else game/"mods"/name,mods/name)
@@ -93,9 +100,11 @@ def main(argv=None):
     guard=build_input_guard(game,runtime/"test-classes")
     source=Path(__file__).with_name("vanilla_support")/"NativeBattleSmoke.java"
     cp=os.pathsep.join(map(str,[runtime/"ModTheSpire.jar",runtime/"desktop-1.0.jar",mods/"*",runtime/"test-classes"]))
-    subprocess.run(["javac","--release","8","-classpath",cp,"-d",str(runtime/"test-classes"),str(source)],check=True)
-    klass="aiplayspire/offline/NativeBattleSmoke.class"
-    with ZipFile(guard,"a") as jar: jar.write(runtime/"test-classes"/klass,klass)
+    subprocess.run(["javac","--release","8","-classpath",cp,"-d",str(runtime/"test-classes"),str(source),str(source.with_name("SelectorSmoke.java"))],check=True)
+    with ZipFile(guard,"a") as jar:
+        for name in ("NativeBattleSmoke","SelectorSmoke"):
+            klass=f"aiplayspire/offline/{name}.class"
+            jar.write(runtime/"test-classes"/klass,klass)
     shutil.copy2(guard,mods/guard.name)
     config=runtime/"appdata"/"ModTheSpire"; config.mkdir(parents=True)
     (config/"mod_lists.json").write_text(json.dumps(dict(defaultList="NativeSmoke",lists={"NativeSmoke":[*enabled,guard.name]})))
@@ -107,6 +116,7 @@ def main(argv=None):
     env["JAVA_TOOL_OPTIONS"]+=f' -Dbattleai.segmentLength={args.segment_length} -Daiplayspire.smokeAuto={str(args.auto_start).lower()} -Duser.home="{runtime}"'
     env["JAVA_TOOL_OPTIONS"]+=f" -Dbattleai.searchPolicy={args.search_policy} -Dbattleai.dedupMode={args.dedup_mode}"
     env["JAVA_TOOL_OPTIONS"]+=f" -Dbattleai.tacticalOrdering={str(args.tactical_ordering).lower()}"
+    if args.selector_case: env["JAVA_TOOL_OPTIONS"]+=f" -Daiplayspire.selectorCase={args.selector_case}"
     if args.test_takeover: env["JAVA_TOOL_OPTIONS"]+=" -Daiplayspire.testTakeover=true"
     if args.max_expansions is not None: env["JAVA_TOOL_OPTIONS"]+=f" -Dbattleai.maxExpansions={args.max_expansions}"
     if args.budget_ms is not None: env["JAVA_TOOL_OPTIONS"]+=f" -Dbattleai.clientBudgetMs={args.budget_ms}"
@@ -121,8 +131,17 @@ def main(argv=None):
                 if trace.exists():
                     records=[json.loads(line) for line in trace.read_bytes().split(b"\n")[:-1]]
                     if any(row["kind"]=="error" for row in records): return 1
-                    expected="terminal" if args.full_fight else "applied"
+                    expected="selector_verified" if args.selector_case else "terminal" if args.full_fight else "applied"
                     if any(row["kind"]==expected for row in records) and (not args.test_takeover or (runtime/"takeover-verified").is_file()):
+                        if args.selector_case:
+                            import hashlib
+                            with ZipFile(args.battle_jar) as jar:
+                                dll=jar.read("native/windows-x86_64/battle_jni.dll")
+                            evidence=dict(case=args.selector_case, real_engine_checked=True,
+                                snapshot_sha256=hashlib.sha256((runtime/"selector-start.json").read_bytes()).hexdigest(),
+                                jar_sha256=hashlib.sha256(args.battle_jar.read_bytes()).hexdigest(),
+                                native_build=hashlib.sha256(dll).hexdigest(), trace=str(trace))
+                            (runtime/"selector-result.json").write_text(json.dumps(evidence,indent=2))
                         if args.full_fight:
                             import hashlib
                             from battle_engine.state import load

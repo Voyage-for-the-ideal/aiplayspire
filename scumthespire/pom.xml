@@ -5,7 +5,7 @@
 
     <groupId>autoplay</groupId>
     <artifactId>BattleAiMod</artifactId>
-    <version>2.0.2</version>
+    <version>2.0.3</version>
     <packaging>jar</packaging>
     <name>Battle Ai Mod</name>
     <description>In-process native combat search for Windows x64. Start Steve runs the shared C++ simulator through JNI and executes guarded commands in the live game. No search server or external gateway.</description>

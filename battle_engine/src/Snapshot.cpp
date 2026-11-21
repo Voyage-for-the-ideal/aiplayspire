@@ -962,15 +962,18 @@ Json Session::search(const Json &request) {
         cache.cap=cap;cache.budget=budget;
         if(request.value("operation",std::string())=="predict") {
             const auto &forced=request.at("command");const std::string type=forced.at("type");
-            const bool selection=type=="HAND_SELECT" || type=="HAND_SELECT_CONFIRM" || type=="GRID_SELECT";
+            const bool grid=type=="GRID_SELECT" || type=="GRID_SELECT_CONFIRM";
+            const bool selection=type=="HAND_SELECT" || type=="HAND_SELECT_CONFIRM" || grid;
             require(type=="CARD" || type=="POTION" || type=="END" || selection,"prediction_command_type");
             auto kind=selection?search::ActionType::SINGLE_CARD_SELECT:type=="CARD"?search::ActionType::CARD:type=="POTION"?search::ActionType::POTION:search::ActionType::END_TURN;
             int index=type=="CARD"?forced.at("card_index").get<int>():type=="POTION"?forced.at("potion_index").get<int>():0;
             if(selection) {
-                require((imported.desktopHeadbutt && type=="GRID_SELECT") || (headless && ((imported.selectionScreen=="HAND_SELECT" && (isHeadlessMultiHand(bc.cardSelectInfo.cardSelectTask) || isHeadlessSingleHand(bc.cardSelectInfo.cardSelectTask)) && type!="GRID_SELECT")
+                require((!headless && isCharacterSelection(bc.cardSelectInfo.cardSelectTask) &&
+                        ((imported.selectionScreen=="GRID" && grid) ||
+                         (imported.selectionScreen=="HAND_SELECT" && !grid))) || (headless && ((imported.selectionScreen=="HAND_SELECT" && (isHeadlessMultiHand(bc.cardSelectInfo.cardSelectTask) || isHeadlessSingleHand(bc.cardSelectInfo.cardSelectTask)) && !grid)
                      || (imported.selectionScreen=="GRID" && (bc.cardSelectInfo.cardSelectTask==CardSelectTask::LIQUID_MEMORIES_GRID
                           || bc.cardSelectInfo.cardSelectTask==CardSelectTask::HEADBUTT_GRID || isHeadlessFetchGrid(bc.cardSelectInfo.cardSelectTask)) && type=="GRID_SELECT"))),"prediction_selection_source");
-                if(type=="HAND_SELECT_CONFIRM")index=CHARACTER_SELECT_CONFIRM;
+                if(type=="HAND_SELECT_CONFIRM" || type=="GRID_SELECT_CONFIRM")index=CHARACTER_SELECT_CONFIRM;
                 else {int external=forced.at("card_index");auto it=std::find(imported.selectionIndices.begin(),imported.selectionIndices.end(),external);
                     require(it!=imported.selectionIndices.end(),"prediction_selection_index");index=int(it-imported.selectionIndices.begin());}
             }
@@ -1041,9 +1044,10 @@ Json Session::search(const Json &request) {
     }
     const auto desktopGrid=[](const BattleContext &b) {
         const auto task=b.cardSelectInfo.cardSelectTask;
-        return b.inputState==InputState::CARD_SELECT && (task==CardSelectTask::SCRY || task==CardSelectTask::MEDITATE || isHeadlessFetchGrid(task));
+        return b.inputState==InputState::CARD_SELECT && (task==CardSelectTask::SCRY || task==CardSelectTask::MEDITATE || task==CardSelectTask::EXHUME || isHeadlessFetchGrid(task));
     };
-    const bool verifiesDesktopGrid=!headless && desktopGrid(bc);
+    const bool verifiesDesktopGrid=!headless && (desktopGrid(bc) ||
+        (bc.inputState==InputState::CARD_SELECT && bc.cardSelectInfo.cardSelectTask==CardSelectTask::FORETHOUGHT));
     const bool omniscienceScry=cmd.at("type")=="GRID_SELECT" &&
         bc.cardSelectInfo.cardSelectTask==CardSelectTask::OMNISCIENCE &&
         bc.cardSelectInfo.options.at(action.getSelectIdx()).id==CardId::CUT_THROUGH_FATE;
@@ -1116,6 +1120,13 @@ Json Session::search(const Json &request) {
         for(int index:bc.cardSelectInfo.selected)
             picked.push_back(currentIds.at(bc.cardSelectInfo.options.at(index).uniqueId));
         response["expected_desktop_grid_selected_uuids"]=std::move(picked);
+    }
+    if(!headless && bc.inputState==InputState::CARD_SELECT &&
+            bc.cardSelectInfo.cardSelectTask==CardSelectTask::FORETHOUGHT) {
+        Json picked=Json::array();
+        for(int index:bc.cardSelectInfo.selected)
+            picked.push_back(currentIds.at(bc.cardSelectInfo.options.at(index).uniqueId));
+        response["expected_desktop_hand_selected_uuids"]=std::move(picked);
     }
     if(verifiesDesktopGrid && normal) {
         // Continuations such as Cut Through Fate can add cards mid-action. Bind UUIDs

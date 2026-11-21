@@ -104,6 +104,7 @@ namespace sts {
         // This also handles stacked Scry counts beyond the old 10-bit mask.
         std::vector<CardInstance> options;
         std::vector<CardInstance> hiddenHand;
+        std::vector<CardInstance> stashedExhumes;
         std::vector<int> selected;
         bool canonicalOrder = true;
         bool explicitConfirm = false;

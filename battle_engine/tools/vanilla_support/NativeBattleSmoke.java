@@ -14,6 +14,7 @@ public class NativeBattleSmoke {
     private static boolean restored, started;
     private static int stoppedFrames;
     private static boolean takeoverDone;
+    private static SelectorSmoke selector;
     @SpirePostfixPatch public static void after() throws Exception {
         if (started && Boolean.getBoolean("aiplayspire.testTakeover") && !takeoverDone) {
             if (stoppedFrames == 0 && battleaimod.networking.AiClient.active()
@@ -47,6 +48,12 @@ public class NativeBattleSmoke {
             AbstractDungeon.topLevelEffects.removeIf(e -> e instanceof com.megacrit.cardcrawl.vfx.scene.LevelTransitionTextOverlayEffect);
             AbstractDungeon.topLevelEffectsQueue.removeIf(e -> e instanceof com.megacrit.cardcrawl.vfx.scene.LevelTransitionTextOverlayEffect);
             CardCrawlGame.mode=CardCrawlGame.GameMode.GAMEPLAY;
+            return;
+        }
+        String selectorCase=System.getProperty("aiplayspire.selectorCase");
+        if (selectorCase!=null) {
+            if (selector==null) selector=new SelectorSmoke(selectorCase);
+            selector.tick();
             return;
         }
         if (BattleClientController.canSendState()) {

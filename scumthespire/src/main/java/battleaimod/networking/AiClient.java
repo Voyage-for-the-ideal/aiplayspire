@@ -231,6 +231,13 @@ public final class AiClient {
             if (!planned.get("expected_desktop_grid_selected_uuids").equals(selected))
                 throw new IOException("Grid selection selected card identity mismatch");
         }
+        if (planned.has("expected_desktop_hand_selected_uuids")) {
+            JsonArray selected=new JsonArray();
+            for (JsonElement card : snapshot.getAsJsonObject("hand_select_screen_state").getAsJsonArray("selected_cards"))
+                selected.add(card.getAsJsonObject().get("uuid"));
+            if (!selected.equals(planned.get("expected_desktop_hand_selected_uuids")))
+                throw new IOException("Hand selection card identity mismatch");
+        }
         if (planned.has("expected_desktop_grid_uuids")) {
             JsonObject actualIds=pileIds(player), expectedIds=planned.getAsJsonObject("expected_desktop_grid_uuids");
             for (java.util.Map.Entry<String,JsonElement> entry : expectedIds.entrySet()) {

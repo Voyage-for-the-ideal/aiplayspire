@@ -385,6 +385,34 @@ class RemainingCharactersTests(unittest.TestCase):
         r = self.sequence(s, self.select(0))
         self.assertEqual(r["projection"]["energy"], 6)
 
+    def test_forethought_plus_order_and_optional_confirm(self):
+        s = self.state(hand=[self.card("Forethought", up=True, cost=0),
+                             self.card("Defend_R", uuid="a"), self.card("Strike_R", uuid="b")])
+        empty = self.sequence(s, self.play(), self.select(65535))["projection"]
+        self.assertEqual([c["id"] for c in empty["hand"]], ["Defend_R", "Strike_R"])
+        self.assertEqual(empty["draw_pile"], [])
+        both = self.sequence(s, self.play(), self.select(1), self.select(0), self.select(65535))["projection"]
+        self.assertEqual([(c["id"], c["free"]) for c in both["draw_pile"]],
+                         [("Defend_R", True), ("Strike_R", True)])
+        self.assertEqual(both["hand"], [])
+
+    def test_exhume_even_one_eligible_card_can_open_grid(self):
+        s = self.state(hand=[self.card("Exhume", uuid="source", exhaust=True)])
+        s["player_state"]["exhaust_pile"] = [self.card("Exhume", uuid="hidden"), self.card("Defend_R", uuid="pick")]
+        opened = self.run_worker(s)
+        self.assertEqual(opened["selection"]["task"], "EXHUME")
+        self.assertEqual([c["id"] for c in opened["selection"]["options"]], ["Defend_R"])
+        settled = self.sequence(s, self.play(), self.select(0))["projection"]
+        self.assertEqual([c["id"] for c in settled["hand"]], ["Defend_R"])
+        self.assertEqual([c["id"] for c in settled["exhaust_pile"]], ["Exhume", "Exhume"])
+
+    def test_desktop_omniscience_untargeted_replay_rolls_twice(self):
+        s = self.state(hand=[self.card("Omniscience", exhaust=True)], draw=[self.card("Defend_R")])
+        r = self.sequence(s, self.play(), self.select(0))["projection"]
+        self.assertEqual(r["rng"]["card_random_rng_counter"], s["rng_state"]["card_random_rng_counter"] + 2)
+        self.assertEqual(r["block"], s["player_state"]["creature"]["current_block"] + 10)
+        self.assertEqual([c["id"] for c in r["exhaust_pile"]], ["Omniscience", "Defend_R"])
+
     def test_grid_scry_zero_selection_restores_remaining_draw(self):
         s = self.selection_state()
         p = s["player_state"]

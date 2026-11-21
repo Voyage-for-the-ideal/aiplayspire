@@ -193,7 +193,7 @@ std::string decisionScreen(const BattleContext &b) {
     if(!isCharacterSelection(b.cardSelectInfo.cardSelectTask))return "UNSUPPORTED";
     if(isHeadlessFetchGrid(b.cardSelectInfo.cardSelectTask))return "GRID";
     switch(b.cardSelectInfo.cardSelectTask) {
-        case CardSelectTask::SCRY:case CardSelectTask::MEDITATE:case CardSelectTask::OMNISCIENCE:case CardSelectTask::LIQUID_MEMORIES_GRID:case CardSelectTask::HEADBUTT_GRID:case CardSelectTask::HOLOGRAM_GRID:case CardSelectTask::SEEK_GRID:return "GRID";
+        case CardSelectTask::SCRY:case CardSelectTask::MEDITATE:case CardSelectTask::EXHUME:case CardSelectTask::OMNISCIENCE:case CardSelectTask::LIQUID_MEMORIES_GRID:case CardSelectTask::HEADBUTT_GRID:case CardSelectTask::HOLOGRAM_GRID:case CardSelectTask::SEEK_GRID:return "GRID";
         case CardSelectTask::WISH:case CardSelectTask::FOREIGN_INFLUENCE:return "CARD_REWARD";
         default:return "HAND_SELECT";
     }
@@ -278,6 +278,16 @@ Imported importSelectionSnapshot(const Json &s) {
              && view.at("num_cards_to_select")==1 && !view.value("any_number",false)
              && !view.value("can_pick_zero",false),"desktop_warcry_controls");
         info.cardSelectTask=CardSelectTask::WARCRY;
+    }
+    else if(!headless && name=="ExhumeActionState") {
+        need(screen=="GRID" && view.at("num_cards")==1 && !view.value("any_number",false) &&
+            data.at("upgrade")==false && data.at("exhumes").is_array(),"desktop_exhume_controls");
+        info.cardSelectTask=CardSelectTask::EXHUME;
+    } else if(!headless && name=="ForethoughtActionState") {
+        const bool any=data.at("chooseAny");
+        need(screen=="HAND_SELECT" && view.at("num_cards_to_select")== (any?99:1)
+             && view.at("any_number")==any && view.at("can_pick_zero")==any,"desktop_forethought_controls");
+        info.cardSelectTask=CardSelectTask::FORETHOUGHT;
     }
     else if(name=="ScryActionState")info.cardSelectTask=CardSelectTask::SCRY;
     else if(name=="RetainCardsActionState")info.cardSelectTask=CardSelectTask::RETAIN;
@@ -461,6 +471,28 @@ Imported importSelectionSnapshot(const Json &s) {
         for(auto name:{"hand","draw_pile","discard_pile","exhaust_pile"})for(const auto &row:p.at(name))need(uuid(c)!=uuid(row),"fetch_pending_duplicate");
         CardQueueItem item(reader.card(c),-2,0);item.exhaustOnUse=q.at("exhaustCard");b.curCardQueueItem=item;
     }
+    if(!headless && info.cardSelectTask==CardSelectTask::EXHUME) {
+        const auto &pile=p.at("exhaust_pile");
+        need(options==pile && !options.empty() && selected.empty(),"desktop_exhume_options");
+        std::set<std::string> seen;
+        for(const auto &c:options)need(c.at("card_id")!="Exhume" && seen.insert(uuid(c)).second,"desktop_exhume_option");
+        for(const auto &c:data.at("exhumes")) {
+            need(c.at("card_id")=="Exhume" && !reader.ids.count(uuid(c)),"desktop_exhume_stashed");
+            info.stashedExhumes.push_back(reader.card(c));
+        }
+    }
+    if(!headless && info.cardSelectTask==CardSelectTask::OMNISCIENCE) {
+        const auto &draw=p.at("draw_pile");
+        need(screen=="GRID" && view.at("num_cards")==1 && info.data0==2 && !view.value("any_number",false) &&
+             options.size()==draw.size() && !options.empty() && selected.empty(),"desktop_omniscience_options");
+        std::set<std::string> offered;
+        for(const auto &c:options)need(offered.insert(uuid(c)).second && std::find(draw.begin(),draw.end(),c)!=draw.end(),"desktop_omniscience_option");
+    }
+    if(!headless && info.cardSelectTask==CardSelectTask::FORETHOUGHT) {
+        std::set<std::string> ids;
+        for(const auto &c:options)need(ids.insert(uuid(c)).second,"desktop_forethought_identity");
+        need(selected.size()<=(data.at("chooseAny")==true?10u:1u),"desktop_forethought_choices");
+    }
     if(!headless && info.cardSelectTask==CardSelectTask::MEDITATE) {
         const int count=data.at("numberOfCards");
         const auto &discard=p.at("discard_pile");
@@ -569,7 +601,8 @@ Imported importSelectionSnapshot(const Json &s) {
     info.canPickZero=view.value("can_pick_zero",false) || view.value("skippable",false) || info.canPickAnyNumber;
     const bool fast=s.value("_combat_card_pools",Json::object()).value("fast_hand_confirm",false);
     info.explicitConfirm=screen=="HAND_SELECT" && !(fast && info.pickCount==1 && !info.canPickZero);
-    if(isHeadlessSingleHand(info.cardSelectTask) || info.cardSelectTask==CardSelectTask::WARCRY)info.explicitConfirm=true;
+    if(isHeadlessSingleHand(info.cardSelectTask) || info.cardSelectTask==CardSelectTask::WARCRY ||
+       info.cardSelectTask==CardSelectTask::FORETHOUGHT)info.explicitConfirm=true;
     if(info.cardSelectTask==CardSelectTask::WISH)for(const auto &c:info.options)
         need(c.id==CardId::BECOME_ALMIGHTY || c.id==CardId::FAME_AND_FORTUNE || c.id==CardId::LIVE_FOREVER,"selection_choose_one_option");
     // Parse the entire continuation before returning any command. Unknown

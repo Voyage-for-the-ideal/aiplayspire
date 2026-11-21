@@ -17,7 +17,7 @@ void fetchDrawCard(BattleContext &b, int id) {
 
 bool sts::isCharacterSelection(CardSelectTask task) {
     if(isHeadlessSingleHand(task))return true;
-    return task==CardSelectTask::DISCARD || task==CardSelectTask::WARCRY || task==CardSelectTask::SCRY || task==CardSelectTask::RETAIN
+    return task==CardSelectTask::DISCARD || task==CardSelectTask::EXHUME || task==CardSelectTask::FORETHOUGHT || task==CardSelectTask::WARCRY || task==CardSelectTask::SCRY || task==CardSelectTask::RETAIN
         || task==CardSelectTask::SETUP || task==CardSelectTask::MEDITATE || task==CardSelectTask::NIGHTMARE
         || task==CardSelectTask::OMNISCIENCE || task==CardSelectTask::FOREIGN_INFLUENCE || task==CardSelectTask::WISH
         || isHeadlessMultiHand(task) || isHeadlessFetchGrid(task) || task==CardSelectTask::LIQUID_MEMORIES_GRID || task==CardSelectTask::HEADBUTT_GRID;
@@ -66,6 +66,12 @@ void sts::openCharacterSelection(BattleContext &b,CardSelectTask task,int count)
             (eligible?info.options:info.hiddenHand).push_back(c);
         }
         info.explicitConfirm=true;info.data0=count;count=1;
+    } else if(task==CardSelectTask::EXHUME) {
+        auto &pile=b.cards.exhaustPile;
+        for(auto it=pile.begin();it!=pile.end();) {
+            if(it->id==CardId::EXHUME){info.stashedExhumes.push_back(*it);it=pile.erase(it);}
+            else {info.options.push_back(*it);++it;}
+        }
     } else if(task==CardSelectTask::SCRY) {
         if(b.player.hasStatus<PS::NIRVANA>())b.addToBot(Actions::GainBlock(b.player.getStatus<PS::NIRVANA>()));
         if(b.player.hasRelic<R::GOLDEN_EYE>())count+=2;
@@ -96,9 +102,9 @@ void sts::openCharacterSelection(BattleContext &b,CardSelectTask task,int count)
         for(int i=0;i<b.cards.cardsInHand;++i)info.options.push_back(b.cards.hand[i]);
     }
     info.pickCount=std::min(count,int(info.options.size()));
-    if(task==CardSelectTask::WARCRY)info.explicitConfirm=true;
+    if(task==CardSelectTask::WARCRY || task==CardSelectTask::FORETHOUGHT)info.explicitConfirm=true;
     if(task==CardSelectTask::NIGHTMARE || task==CardSelectTask::OMNISCIENCE){info.data0=count;info.pickCount=1;}
-    info.canPickAnyNumber=task==CardSelectTask::SCRY || task==CardSelectTask::RETAIN || isHeadlessMultiHand(task);
+    info.canPickAnyNumber=(task==CardSelectTask::FORETHOUGHT && count==99) || task==CardSelectTask::SCRY || task==CardSelectTask::RETAIN || isHeadlessMultiHand(task);
     info.canPickZero=info.canPickAnyNumber;
     if(isHeadlessMultiHand(task)){info.pickCount=99;info.explicitConfirm=true;}
     if(info.options.empty() || info.pickCount<=0){b.cardSelectInfo=CardSelectInfo{};return;}
@@ -127,7 +133,7 @@ void sts::openCharacterSelection(BattleContext &b,CardSelectTask task,int count)
 bool sts::validCharacterSelection(const BattleContext &b,int option) {
     const auto &s=b.cardSelectInfo;
     if(b.inputState!=InputState::CARD_SELECT || !isCharacterSelection(s.cardSelectTask))return false;
-    if(option==CHARACTER_SELECT_CONFIRM)return !isHeadlessFetchGrid(s.cardSelectTask) && s.cardSelectTask!=CardSelectTask::LIQUID_MEMORIES_GRID && s.cardSelectTask!=CardSelectTask::HEADBUTT_GRID
+    if(option==CHARACTER_SELECT_CONFIRM)return !isHeadlessFetchGrid(s.cardSelectTask) && s.cardSelectTask!=CardSelectTask::LIQUID_MEMORIES_GRID && s.cardSelectTask!=CardSelectTask::HEADBUTT_GRID && s.cardSelectTask!=CardSelectTask::EXHUME
         && (s.canPickAnyNumber || (s.canPickZero && s.selected.empty()) || int(s.selected.size())==s.pickCount);
     if(isHeadlessFetchGrid(s.cardSelectTask) || s.cardSelectTask==CardSelectTask::LIQUID_MEMORIES_GRID)
         return option>=0 && option<int(s.options.size()) && int(s.selected.size())<s.pickCount;
@@ -177,6 +183,17 @@ void sts::applyCharacterSelection(BattleContext &b,int option) {
     }
     auto selected=s.selected;
     const auto task=s.cardSelectTask;
+    if(task==CardSelectTask::EXHUME) {
+        const int id=s.options.at(selected.at(0)).uniqueId;
+        auto &pile=b.cards.exhaustPile;
+        auto match=std::find_if(pile.begin(),pile.end(),[id](const CardInstance &c){return c.uniqueId==id;});
+        if(match==pile.end())throw std::runtime_error("exhume_card_identity");
+        b.chooseExhumeCard(int(match-pile.begin()));
+        // The game hides Exhume copies while the picker is open and appends
+        // them back before the source card's cleanup.
+        pile.insert(pile.end(),s.stashedExhumes.begin(),s.stashedExhumes.end());
+        b.cardSelectInfo=CardSelectInfo{};return;
+    }
     if(task==CardSelectTask::HEADBUTT_GRID) {
         if(selected.size()!=1)throw std::runtime_error("headbutt_selection_count");
         const auto &chosen=s.options.at(selected.front());
@@ -243,7 +260,8 @@ void sts::applyCharacterSelection(BattleContext &b,int option) {
             for(int copy=0;copy<s.data0;++copy) {
                 CardQueueItem item(c,0,b.player.energy);
                 item.card.forcedExhaust=true;
-                item.autoplay=true;item.randomTarget=b.headlessRngKnown || c.requiresTarget();item.exhaustOnUse=true;
+                // Vanilla queues with randomTarget=true even for an untargeted skill.
+                item.autoplay=true;item.randomTarget=true;item.exhaustOnUse=true;
                 item.purgeOnUse=copy>0;
                 if(copy>0)item.card.uniqueId=b.cards.nextUniqueCardId++;
                 b.addToBot({[item](BattleContext &next){next.addToBotCard(item);}});
@@ -269,6 +287,7 @@ void sts::applyCharacterSelection(BattleContext &b,int option) {
                 if(task==CardSelectTask::RETAIN){auto retained=b.cards.hand[n];retained.retain=true;b.cards.removeFromHandAtIdx(n);b.cards.moveToHand(retained);}
                 else if(task==CardSelectTask::DISCARD)Actions::DiscardCardAtIdx(n).actFunc(b);
                 else if(task==CardSelectTask::WARCRY)b.chooseWarcryCard(n);
+                else if(task==CardSelectTask::FORETHOUGHT)b.chooseForethoughtCard(n);
                 else if(task==CardSelectTask::SETUP){b.cards.removeFromHandAtIdx(n);c.costForTurn=0;b.cards.moveToDrawPileTop(c);}
                 break;
             }
