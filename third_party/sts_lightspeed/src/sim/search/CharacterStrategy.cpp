@@ -240,13 +240,15 @@ int sts::search::characterFallbackRank(const BattleContext &bc,CardId id) {
 
 SelectionPurpose sts::search::selectionPurpose(CardSelectTask task) {
     switch(task) {
-        case CardSelectTask::GAMBLE:case CardSelectTask::DISCARD:return SelectionPurpose::DISCARD;
+        case CardSelectTask::GAMBLE:case CardSelectTask::GAMBLER_DISCARD:case CardSelectTask::DISCARD:return SelectionPurpose::DISCARD;
         case CardSelectTask::SCRY:return SelectionPurpose::SCRY;
         case CardSelectTask::RETAIN:return SelectionPurpose::RETAIN;
-        case CardSelectTask::EXHAUST_ONE:case CardSelectTask::EXHAUST_MANY:case CardSelectTask::RECYCLE:return SelectionPurpose::EXHAUST;
+        case CardSelectTask::EXHAUST_ONE:case CardSelectTask::EXHAUST_MANY:case CardSelectTask::ELIXIR_EXHAUST:
+        case CardSelectTask::TRUE_GRIT_HAND:case CardSelectTask::BURNING_PACT_HAND:case CardSelectTask::RECYCLE:return SelectionPurpose::EXHAUST;
         case CardSelectTask::MEDITATE:case CardSelectTask::OMNISCIENCE:case CardSelectTask::NIGHTMARE:
-        case CardSelectTask::FOREIGN_INFLUENCE:case CardSelectTask::HEADBUTT:case CardSelectTask::HOLOGRAM:
-        case CardSelectTask::SEEK:case CardSelectTask::LIQUID_MEMORIES_POTION:return SelectionPurpose::SEEK;
+        case CardSelectTask::FOREIGN_INFLUENCE:case CardSelectTask::HEADBUTT:case CardSelectTask::HEADBUTT_GRID:case CardSelectTask::HOLOGRAM:
+        case CardSelectTask::SEEK:case CardSelectTask::SEEK_GRID:case CardSelectTask::HOLOGRAM_GRID:
+        case CardSelectTask::LIQUID_MEMORIES_POTION:case CardSelectTask::LIQUID_MEMORIES_GRID:return SelectionPurpose::SEEK;
         default:return SelectionPurpose::NONE;
     }
 }

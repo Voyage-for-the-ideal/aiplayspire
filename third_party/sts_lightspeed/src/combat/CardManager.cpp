@@ -404,6 +404,9 @@ void CardManager::draw(BattleContext &bc, int amount) {
     for (int i = 0; i < amount; i++) {
         auto c = popFromDrawPile();
         bc.lastDrawnCardType=c.getType();
+        // Eviscerate.triggerWhenDrawn precedes the Confusion draw hook.
+        if (bc.headlessRngKnown && c.id==CardId::EVISCERATE)
+            c.setCostForTurn(std::max(0,int(c.cost)-bc.player.cardsDiscardedThisTurn));
 
         if (bc.player.hasStatus<PS::CONFUSED>()) {
             if (c.cost >= 0) {  // todo status and curses affected by this?
@@ -448,11 +451,19 @@ void CardManager::draw(BattleContext &bc, int amount) {
         if (cardsInHand < 10) {
             moveToHand(c);
             if(c.id==CardId::DEUS_EX_MACHINA) {
-                bc.addToBot(Actions::ExhaustSpecificCardInHand(cardsInHand-1,c.uniqueId));
-                bc.addToBot(Actions::MakeTempCardInHand(CardId::MIRACLE,false,c.upgraded?3:2));
+                if (bc.headlessRngKnown) {
+                    bc.addToTop(Actions::MakeTempCardInHand(CardId::MIRACLE,false,c.upgraded?3:2));
+                    bc.addToTop(Actions::ExhaustSpecificCardInHand(cardsInHand-1,c.uniqueId));
+                } else {
+                    bc.addToBot(Actions::ExhaustSpecificCardInHand(cardsInHand-1,c.uniqueId));
+                    bc.addToBot(Actions::MakeTempCardInHand(CardId::MIRACLE,false,c.upgraded?3:2));
+                }
             }
-            if(c.id==CardId::ENDLESS_AGONY)bc.addToBot(Actions::MakeTempCardInHand(c));
-            if(c.id==CardId::EVISCERATE)hand[cardsInHand-1].costForTurn=std::max(0,int(c.cost)-bc.player.cardsDiscardedThisTurn);
+            if(c.id==CardId::ENDLESS_AGONY) {
+                if(bc.headlessRngKnown)bc.addToTop(Actions::MakeTempCardInHand(c));
+                else bc.addToBot(Actions::MakeTempCardInHand(c));
+            }
+            if(!bc.headlessRngKnown && c.id==CardId::EVISCERATE)hand[cardsInHand-1].costForTurn=std::max(0,int(c.cost)-bc.player.cardsDiscardedThisTurn);
         } else {
             moveToDiscardPile(c);
         }

@@ -12,6 +12,7 @@ public class SearchMetricsTest {
         metrics.stateKeyNanos = 9_000_000L;
         metrics.stateKeyEncodeNanos = 4_000_000L;
         metrics.stateKeyCanonicalHashNanos = 5_000_000L;
+        metrics.stateKeyDirectNanos = 3_000_000L;
         metrics.loadStateNanos = 7_000_000L;
         metrics.loadStateCount = 3L;
         metrics.snapshotNanos = 6_000_000L;
@@ -22,6 +23,7 @@ public class SearchMetricsTest {
         assertEquals(9L, json.get("state_key_ms").getAsLong());
         assertEquals(4L, json.get("state_key_encode_ms").getAsLong());
         assertEquals(5L, json.get("state_key_canonical_hash_ms").getAsLong());
+        assertEquals(3L, json.get("state_key_direct_ms").getAsLong());
         assertEquals(7L, json.get("load_state_ms").getAsLong());
         assertEquals(3L, json.get("load_state_count").getAsLong());
         assertEquals(6L, json.get("snapshot_ms").getAsLong());

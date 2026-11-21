@@ -11,7 +11,6 @@ import battleaimod.battleai.CommandRunnerController;
 import battleaimod.battleai.playorder.*;
 import battleaimod.evaluation.TacticalEvaluator;
 import battleaimod.networking.AiClient;
-import battleaimod.networking.AiServer;
 import battleaimod.networking.BattleClientController;
 import battleaimod.networking.BattleReplayController;
 import battleaimod.networking.ReplaySnapshotStore;
@@ -94,29 +93,12 @@ public class BattleAiMod implements PostInitializeSubscriber, PostUpdateSubscrib
 
     public final static long MESSAGE_TIME_MILLIS = 1500L;
     public static String steveMessage = null;
-    public static AiServer aiServer = null;
-    public static AiClient aiClient = null;
-    public static boolean shouldStartAiFromServer = false;
-    public static BattleAiController battleAiController = null;
-    public static BattleReplayController replayController = null;
-    public static SaveState replayStartState;
-    public static List<ludicrousspeed.simulator.commands.Command> replayCommands;
-    public static volatile boolean shouldStartReplay = false;
-
-    public static CommandRunnerController rerunController = null;
-
-    public static SaveState saveState;
-    public static int requestedTurnNum;
-    public static long requestedTimeoutMillis = SearchProfile.BALANCED.timeoutMillis();
-    public static SearchProfile requestedSearchProfile = SearchProfile.BALANCED;
+    public static CommandRunnerController rerunController;
     public static SearchProfile searchProfile = SearchProfile.BALANCED;
     public static boolean goFast = false;
     public static boolean shouldStartClient = false;
     public static boolean autoStartAi = false;
 
-    public static boolean isServer;
-    public static boolean isClient;
-    public static volatile boolean shutdownRequested = false;
 
     public static BattleClientController clientController;
     public static BattleClientController.ControllerMode battleClientControllerMode;
@@ -140,28 +122,10 @@ public class BattleAiMod implements PostInitializeSubscriber, PostUpdateSubscrib
 
         // Shut off the MTS console window, It increasingly slows things down
         ModSelectWindow window = ReflectionHacks.getPrivateStatic(Loader.class, "ex");
-        window.removeAll();
+        if (window != null) window.removeAll();
 
         CardCrawlGame.screenShake = new ScreenShakeFast();
 
-        // Built-in class ranks now live in CharacterStrategies. This list is
-        // reserved for additional heuristics registered by extensions.
-
-        actionHeuristics.put(DiscardAction.class, DiscardOrder.COMPARATOR);
-        actionHeuristics.put(ExhaustAction.class, ExhaustOrder.COMPARATOR);
-
-        actionHeuristics.put(NightmareAction.class, new BadCardsLastHeuristic());
-        actionHeuristics.put(DualWieldAction.class, new BadCardsLastHeuristic());
-    }
-
-    public static void sendGameState() {
-        if (battleAiController != null) {
-            battleAiController.step();
-
-            if (battleAiController.isDone()) {
-                battleAiController = null;
-            }
-        }
     }
 
     public static void initialize() {
@@ -186,37 +150,6 @@ public class BattleAiMod implements PostInitializeSubscriber, PostUpdateSubscrib
                     actualPotions.remove();
                     continue;
                 }
-            }
-        }
-
-        String isServerFlag = System.getProperty("isServer");
-        String isPlaidModeFlag = System.getProperty("isPlaidMode");
-
-
-        if (isServerFlag != null) {
-            if (Boolean.parseBoolean(isServerFlag)) {
-                BattleAiMod.isServer = true;
-            }
-        }
-
-        if (isPlaidModeFlag != null) {
-            plaidMode = true;
-        }
-
-        String isClientFlag = System.getProperty("isClient");
-
-        if (isClientFlag != null) {
-            if (Boolean.parseBoolean(isClientFlag)) {
-                BattleAiMod.isClient = true;
-            }
-        }
-
-        if (BattleAiMod.isClient) {
-            try {
-                ReplaySnapshotStore.clearPreviousPlans(System.getProperty("user.dir"));
-            } catch (IOException e) {
-                System.err.println("Unable to clear replay snapshots from the previous session");
-                e.printStackTrace();
             }
         }
 
@@ -254,11 +187,6 @@ public class BattleAiMod implements PostInitializeSubscriber, PostUpdateSubscrib
             Settings.ACTION_DUR_LONG = .01F;
             Settings.ACTION_DUR_XLONG = .015F;
 
-            if (isServer) {
-                if (aiServer == null) {
-                    aiServer = new AiServer();
-                }
-            }
         }
 
         CardCrawlGame.sound.update();
@@ -275,14 +203,7 @@ public class BattleAiMod implements PostInitializeSubscriber, PostUpdateSubscrib
 
     @Override
     public void receivePostUpdate() {
-        if (shutdownRequested && isServer) {
-            Gdx.app.exit();
-            return;
-        }
-        if (!isServer) {
-            handleRunBoundary();
-        }
-        if (steveMessage != null) {
+        if (steveMessage != null && AbstractDungeon.player != null) {
             String messageToDisplay = String.format(" %s... NL %s", MESSAGE_WORDS
                     .getOrDefault(AbstractDungeon.player.chosenClass, "Processing"), steveMessage);
             steveMessage = null;
@@ -292,18 +213,8 @@ public class BattleAiMod implements PostInitializeSubscriber, PostUpdateSubscrib
 
         }
 
-        if (battleAiController == null && shouldStartAiFromServer) {
-            shouldStartAiFromServer = false;
-            controller = battleAiController = new BattleAiController(saveState, requestedSearchProfile,
-                    requestedTurnNum, requestedTimeoutMillis);
-        }
-
-        if (replayController == null && shouldStartReplay) {
-            shouldStartReplay = false;
-            controller = replayController = new BattleReplayController(replayStartState, replayCommands);
-        }
-
         clientController.update();
+        handleRunBoundary();
     }
 
     public class StartAiClientTopPanel extends TopPanelItem {
@@ -319,24 +230,7 @@ public class BattleAiMod implements PostInitializeSubscriber, PostUpdateSubscrib
                 return;
             }
 
-            if (!BattleClientController.canRequestState()) {
-                return;
-            }
-
-            BattleClientController.resetReplayRecovery();
-
-
-            if (aiClient == null) {
-                try {
-                    aiClient = new AiClient();
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-            }
-
-            if (aiClient != null) {
-                aiClient.sendState();
-            }
+            BattleClientController.toggle();
         }
 
         @Override
@@ -367,10 +261,8 @@ public class BattleAiMod implements PostInitializeSubscriber, PostUpdateSubscrib
             }
             rerunController = null;
         }
-        BattleClientController.resetReplayRecovery();
-        if (autoStartAi) {
-            shouldStartClient = true;
-        }
+        AiClient.stop();
+        shouldStartClient = autoStartAi;
     }
 
     private static boolean wasInRun = false;
@@ -380,8 +272,6 @@ public class BattleAiMod implements PostInitializeSubscriber, PostUpdateSubscrib
      * CardCrawlGame.isInARun() (death/victory -> menu), drop every per-run
      * controller and counter so the next run (possibly a different character
      * or ascension started by the framework) begins from a clean slate.
-     * The server instance lives in a permanent synthetic run (GameStartupPatch)
-     * and is excluded by the caller.
      */
     private void handleRunBoundary() {
         boolean inRun = CardCrawlGame.isInARun();
@@ -397,56 +287,17 @@ public class BattleAiMod implements PostInitializeSubscriber, PostUpdateSubscrib
             rerunController.cancel();
             rerunController = null;
         }
-        battleAiController = null;
-        replayController = null;
-        saveState = null;
-        replayStartState = null;
-        replayCommands = null;
-        shouldStartAiFromServer = false;
-        shouldStartReplay = false;
         shouldStartClient = false;
         controller = null;
-        AiClient.fileIndex = 0;
-        AiClient.waiting = false;
-        AiClient.autoReplanPending = false;
-        AiClient.preferredCommandFilename = null;
-        AiClient.preferredStartFilename = null;
-        BattleClientController.resetReplayRecovery();
-        TacticalEvaluator.evaluationCount = 0;
-        TacticalEvaluator.evaluationNanos = 0;
+        AiClient.stop();
         CardState.resetFreeCards();
     }
 
     @Override
     public void receivePreUpdate() {
-        if (battleAiController == null && shouldStartAiFromServer) {
-            shouldStartAiFromServer = false;
-            battleAiController = new BattleAiController(saveState, requestedSearchProfile,
-                    requestedTurnNum, requestedTimeoutMillis);
-            controller = battleAiController;
-        }
-
-        if (replayController == null && shouldStartReplay) {
-            shouldStartReplay = false;
-            controller = replayController = new BattleReplayController(replayStartState, replayCommands);
-        }
-
         if (shouldStartClient && BattleClientController.canSendState()) {
             shouldStartClient = false;
-            AbstractDungeon.effectList
-                    .add(new ThoughtBubble(AbstractDungeon.player.dialogX, AbstractDungeon.player.dialogY, 3.0F, "Here we go", true));
-
-            if (BattleAiMod.aiClient == null) {
-                try {
-                    BattleAiMod.aiClient = new AiClient();
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-            }
-
-            if (BattleAiMod.aiClient != null) {
-                BattleAiMod.aiClient.sendState();
-            }
+            AiClient.start();
         }
     }
 
@@ -557,30 +408,6 @@ public class BattleAiMod implements PostInitializeSubscriber, PostUpdateSubscrib
     }
 
 
-    @SpirePatch(clz = CardCrawlGame.class, method = "create")
-    public static class GameStartupPatch {
-        @SpirePostfixPatch
-        public static void afterStart(CardCrawlGame game) {
-            if (isServer) {
-                System.err.println("Skipping Splash Screen for Char Select");
-
-                // Sets the current dungeon
-                Settings.seed = 123L;
-                AbstractDungeon.generateSeeds();
-
-                // The server needs a temporary player before the first request.
-                // SaveState.initPlayerAndCardPool() replaces it with the actual
-                // character from the client's serialized battle state.
-                new Exordium(CardCrawlGame.characterManager
-                        .getCharacter(AbstractPlayer.PlayerClass.DEFECT), new ArrayList<>());
-
-                AbstractDungeon.currMapNode.room = new EmptyRoom();
-
-                CardCrawlGame.mode = CardCrawlGame.GameMode.GAMEPLAY;
-            }
-        }
-    }
-
     /** Optional seeded-run fixture. With no property the ordinary seed flow is unchanged. */
     @SpirePatch(clz = com.megacrit.cardcrawl.screens.charSelect.CharacterSelectScreen.class, method = "updateButtons")
     public static class SeededRunFixturePatch {
@@ -593,62 +420,5 @@ public class BattleAiMod implements PostInitializeSubscriber, PostUpdateSubscrib
         }
     }
 
-
-    @SpirePatch(
-            clz = DeathScreen.class,
-            paramtypez = {MonsterGroup.class},
-            method = SpirePatch.CONSTRUCTOR
-    )
-    public static class DisableDeathScreenpatch {
-        public static SpireReturn Prefix(DeathScreen _instance, MonsterGroup monsterGroup) {
-            if (isServer) {
-                return SpireReturn.Return(null);
-            }
-            return SpireReturn.Continue();
-        }
-    }
-
-    @SpirePatch(
-            clz = DeathScreen.class,
-            paramtypez = {},
-            method = "reopen"
-    )
-    public static class DisableDeathReopenScreenpatch {
-        public static SpireReturn Prefix(DeathScreen _instance) {
-            if (isServer) {
-                AbstractDungeon.previousScreen = AbstractDungeon.CurrentScreen.DEATH;
-                return SpireReturn.Return(null);
-            }
-            return SpireReturn.Continue();
-        }
-    }
-
-    @SpirePatch(
-            clz = SaveFile.class,
-            paramtypez = {SaveFile.SaveType.class},
-            method = SpirePatch.CONSTRUCTOR
-    )
-    public static class NoMakeSavePatch {
-        public static SpireReturn Prefix(SaveFile _instance, SaveFile.SaveType type) {
-            if (isServer) {
-                return SpireReturn.Return(null);
-            }
-            return SpireReturn.Continue();
-        }
-    }
-
-    @SpirePatch(
-            clz = SaveAndContinue.class,
-            paramtypez = {SaveFile.class},
-            method = "save"
-    )
-    public static class NoSavingPatch {
-        public static SpireReturn Prefix(SaveFile save) {
-            if (isServer) {
-                return SpireReturn.Return(null);
-            }
-            return SpireReturn.Continue();
-        }
-    }
 
 }

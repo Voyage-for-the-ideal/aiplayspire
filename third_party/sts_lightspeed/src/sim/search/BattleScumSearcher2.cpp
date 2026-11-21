@@ -742,6 +742,7 @@ std::uint64_t search::BattleScumSearcher2::buildStateKey(const BattleContext &bc
     hashRngState(seed, bc.monsterHpRng);
     hashRngState(seed, bc.potionRng);
     hashRngState(seed, bc.shuffleRng);
+    if(bc.headlessRngKnown)hashRngState(seed,bc.headlessRng);
 
     if (bc.cardQueue.size > 0) {
         for(const auto &item:bc.cardQueue.orderedItems())hashCardQueueItem(seed,item);

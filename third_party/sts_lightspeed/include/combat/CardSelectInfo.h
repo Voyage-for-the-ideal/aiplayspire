@@ -42,7 +42,26 @@ namespace sts {
         OMNISCIENCE,
         FOREIGN_INFLUENCE,
         WISH,
+        GAMBLER_DISCARD,
+        LIQUID_MEMORIES_GRID,
+        HEADBUTT_GRID,
+        ELIXIR_EXHAUST,
+        HOLOGRAM_GRID, SEEK_GRID,
+        ARMAMENTS_HAND, TRUE_GRIT_HAND, DUAL_WIELD_HAND, BURNING_PACT_HAND,
+        SECRET_WEAPON_GRID, SECRET_TECHNIQUE_GRID,
     };
+    inline bool isHeadlessSecretFetch(CardSelectTask t) {
+        return t==CardSelectTask::SECRET_WEAPON_GRID || t==CardSelectTask::SECRET_TECHNIQUE_GRID;
+    }
+    inline bool isHeadlessFetchGrid(CardSelectTask t) {
+        return t==CardSelectTask::HOLOGRAM_GRID || t==CardSelectTask::SEEK_GRID || t==CardSelectTask::OMNISCIENCE || isHeadlessSecretFetch(t);
+    }
+    inline bool isHeadlessSingleHand(CardSelectTask t) {
+        return t==CardSelectTask::ARMAMENTS_HAND || t==CardSelectTask::TRUE_GRIT_HAND || t==CardSelectTask::DUAL_WIELD_HAND || t==CardSelectTask::BURNING_PACT_HAND;
+    }
+    inline bool isHeadlessMultiHand(CardSelectTask t) {
+        return t==CardSelectTask::GAMBLER_DISCARD || t==CardSelectTask::ELIXIR_EXHAUST;
+    }
 
     static constexpr const char* cardSelectTaskStrings[] = {
             "INVALID",
@@ -68,7 +87,9 @@ namespace sts {
             "SETUP",
             "WARCRY",
             "DISCARD", "SCRY", "RETAIN",
-            "OMNISCIENCE", "FOREIGN_INFLUENCE", "WISH",
+            "OMNISCIENCE", "FOREIGN_INFLUENCE", "WISH", "GAMBLER_DISCARD", "LIQUID_MEMORIES_GRID", "HEADBUTT_GRID", "ELIXIR_EXHAUST", "HOLOGRAM_GRID", "SEEK_GRID",
+            "ARMAMENTS_HAND", "TRUE_GRIT_HAND", "DUAL_WIELD_HAND", "BURNING_PACT_HAND",
+            "SECRET_WEAPON_GRID", "SECRET_TECHNIQUE_GRID",
     };
 
     struct CardSelectInfo {
@@ -82,9 +103,19 @@ namespace sts {
         // Stable option identities; selections are applied only at completion.
         // This also handles stacked Scry counts beyond the old 10-bit mask.
         std::vector<CardInstance> options;
+        std::vector<CardInstance> hiddenHand;
         std::vector<int> selected;
         bool canonicalOrder = true;
         bool explicitConfirm = false;
+        bool ornithopterHeal = false; // Bound pending +5 heal at a potion selection.
+        int sourceDraw = 0; // Burning Pact draw, before skill on-use effects.
+        int hexDazed = 0;
+        bool inkDraw = false;
+        int juggernautDamage = 0; // True Grit's block queues retaliation after cleanup.
+        int sharpHide = 0;
+        bool headlessDiscovery = false;
+        bool headlessShuffleScry = false;
+        CardType discoverySourceType = CardType::INVALID; // INVALID=all colored, STATUS=colorless
 
         std::array<CardId, 3>& discovery_Cards() { return cards; }
         const std::array<CardId, 3>& discovery_Cards() const { return cards; }

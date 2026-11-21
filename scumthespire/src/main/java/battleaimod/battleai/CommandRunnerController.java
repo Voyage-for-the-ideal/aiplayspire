@@ -1,6 +1,5 @@
 package battleaimod.battleai;
 
-import battleaimod.BattleAiMod;
 import com.megacrit.cardcrawl.dungeons.AbstractDungeon;
 import ludicrousspeed.Controller;
 import ludicrousspeed.LudicrousSpeedMod;
@@ -75,9 +74,7 @@ public class CommandRunnerController implements Controller {
                 foundCommand = true;
             }
         }
-        if (!BattleAiMod.isServer) {
-            AbstractDungeon.player.hand.refreshHandLayout();
-        }
+        AbstractDungeon.player.hand.refreshHandLayout();
 
         if (!bestPathRunner.hasNext()) {
             if (isComplete) {

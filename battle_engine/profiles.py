@@ -1,4 +1,4 @@
-"""Native budgets; Java server expansion counts remain a separate benchmark."""
+"""Shared native simulation/search budgets for the worker and evaluation harness."""
 PROFILES = {"FAST": (5000, 250), "BALANCED": (15000, 2000), "DEEP": (50000, 10000)}
 TURN_POLICIES = ("legacy", "layered-v1")
 

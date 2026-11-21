@@ -10,6 +10,7 @@ public final class SearchMetrics {
     public long stateKeyNanos;
     public long stateKeyEncodeNanos;
     public long stateKeyCanonicalHashNanos;
+    public long stateKeyDirectNanos;
     public long loadStateNanos;
     public long loadStateCount;
     public long snapshotNanos;
@@ -28,6 +29,7 @@ public final class SearchMetrics {
         json.addProperty("state_key_ms", stateKeyNanos / 1_000_000L);
         json.addProperty("state_key_encode_ms", stateKeyEncodeNanos / 1_000_000L);
         json.addProperty("state_key_canonical_hash_ms", stateKeyCanonicalHashNanos / 1_000_000L);
+        json.addProperty("state_key_direct_ms", stateKeyDirectNanos / 1_000_000L);
         json.addProperty("load_state_ms", loadStateNanos / 1_000_000L);
         json.addProperty("load_state_count", loadStateCount);
         json.addProperty("snapshot_ms", snapshotNanos / 1_000_000L);

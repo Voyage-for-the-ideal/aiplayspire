@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 import unittest
 
-from battle_engine.server import execute_worker
+from battle_engine.native_api import execute_worker
 from battle_engine.tests import test_character_strategy as helpers
 
 EXE = Path(os.environ.get("BATTLE_ENGINE_WORKER", str(Path(__file__).resolve().parents[1] / "bin/battle-engine-worker.exe")))
@@ -18,6 +18,41 @@ class RemainingCharactersTests(unittest.TestCase):
     sequence = helpers.CharacterStrategyTests.sequence
     play = helpers.CharacterStrategyTests.play
     select = helpers.CharacterStrategyTests.select
+
+    def test_poison_start_of_turn_hp_loss_and_decrement(self):
+        for amount in (1, 8):
+            with self.subTest(amount=amount):
+                s = self.state()
+                monster = s["cur_map_node_state"]["monster_data"][0]["creature"]
+                monster["current_block"] = 20
+                monster["powers"] = [dict(power_id="Poison", amount=amount), dict(power_id="Barricade", amount=-1)]
+                result = self.run_worker(s, action_type="END")
+                self.assertEqual(result["projection"]["monsters"][0]["hp"], 500-amount)
+                self.assertEqual(result["enemy_poison"], amount-1)
+                self.assertEqual(result["projection"]["monsters"][0]["block"], 20)
+
+    def test_poison_lethal_resolves_before_monster_attack(self):
+        s = self.state()
+        monster = s["cur_map_node_state"]["monster_data"][0]["creature"]
+        monster.update(current_health=2, powers=[dict(power_id="Poison", amount=3)])
+        result = self.run_worker(s, action_type="END")
+        self.assertEqual(result["outcome"], 1)
+        self.assertEqual(result["projection"]["hp"], s["player_state"]["creature"]["current_health"])
+
+    def test_potion_triggers_ornithopter_after_its_own_effect(self):
+        s = self.state(); p = s["player_state"]; p["creature"].update(current_health=10, max_health=80)
+        p["relics"] = [dict(relic_id="Toy Ornithopter", counter=-1)]
+        p["potions"] = [dict(id="Regen Potion", slot=0)]
+        result = self.run_worker(s, action_type="POTION", potion_index=0)
+        self.assertEqual(result["projection"]["hp"], 15)
+
+    def test_blood_potion_twenty_percent_or_forty_with_bark(self):
+        for bark in (False, True):
+            s = self.state(); p = s["player_state"]; p["creature"].update(current_health=10, max_health=80)
+            p["relics"] = [dict(relic_id="SacredBark", counter=-1)] if bark else []
+            p["potions"] = [dict(id="BloodPotion", slot=0)]
+            result = self.run_worker(s, action_type="POTION", potion_index=0)
+            self.assertEqual(result["projection"]["hp"], 42 if bark else 26)
 
     def test_forge_upgrades_watcher_costs_and_skips_status_cards(self):
         cases = [("Vault", 3, 2), ("Eruption", 2, 1), ("Omniscience", 4, 3),
@@ -362,6 +397,27 @@ class RemainingCharactersTests(unittest.TestCase):
         r = self.sequence(s, self.select(65535))
         self.assertEqual(len(r["projection"]["draw_pile"]), 2)
         self.assertEqual(r["projection"]["energy"], 5)
+
+    def test_desktop_scry_binds_selected_instances_and_rejects_foreign_options(self):
+        s = self.selection_state()
+        p = s["player_state"]
+        p["draw_pile"] = [self.card("Strike_P", uuid="not_shown"),
+                           self.card("Defend_P", uuid="shown_a"), self.card("Defend_P", uuid="shown_b")]
+        view = s.pop("hand_select_screen_state")
+        s["screen_name"] = "GRID"
+        s["grid_card_select_screen_state"] = view
+        view.update(num_cards=2, any_number=True, group_cards=p["draw_pile"][-2:],
+                    selected_cards=[p["draw_pile"][-1]], current_action_state=self.typed("ScryActionState", amount=2))
+        reply = self.run_worker(s, "search")
+        self.assertTrue(reply["supported"], reply)
+        if reply["expected_screen"] == "GRID":
+            self.assertEqual(reply["expected_desktop_grid_selected_uuids"], ["shown_b", "shown_a"])
+        else:
+            self.assertEqual(reply["expected_desktop_grid_uuids"]["draw_pile"], ["not_shown", "shown_a"])
+        view["group_cards"] = [p["draw_pile"][0], p["draw_pile"][-1]]
+        r = execute_worker(EXE, s, 1, 50, "import")
+        self.assertFalse(r["supported"])
+        self.assertEqual(r["reason"], "desktop_scry_option")
 
     def test_wish_reward_snapshot_import_and_wire_index(self):
         import json

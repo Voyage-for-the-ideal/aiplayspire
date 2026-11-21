@@ -6,6 +6,7 @@
 #include "combat/BattleContext.h"
 #include "game/Game.h"
 #include "combat/MonsterSpawnObserver.h"
+#include "combat/CharacterSelection.h"
 
 using namespace sts;
 
@@ -123,7 +124,8 @@ Action Actions::HealPlayer(int amount) {
 
 Action Actions::MonsterGainBlock(int idx, int amount) {
     return {[=] (BattleContext &bc) {
-        bc.monsters.arr[idx].block += amount;
+        auto &monster=bc.monsters.arr[idx];
+        if(monster.isTargetable())monster.block += amount;
     }};
 }
 
@@ -162,7 +164,10 @@ Action Actions::ChangeStance(Stance stance) {
         if(p.hasStatus<PS::MENTAL_FORTRESS>())bc.addToBot(Actions::GainBlock(p.getStatus<PS::MENTAL_FORTRESS>()));
         if(stance==Stance::WRATH && p.hasStatus<PS::RUSHDOWN>())bc.addToBot(Actions::DrawCards(p.getStatus<PS::RUSHDOWN>()));
 
-        for(int i=int(bc.cards.discardPile.size())-1;i>=0;--i) {
+        const int discardSize=int(bc.cards.discardPile.size());
+        for(int k=0;k<discardSize;++k) {
+            // Vanilla queues each DiscardToHandAction in CardGroup order.
+            const int i=bc.headlessRngKnown?k:discardSize-1-k;
             if(bc.cards.discardPile[i].id==CardId::FLURRY_OF_BLOWS) {
                 bc.addToBot({[id=bc.cards.discardPile[i].uniqueId](BattleContext &b){
                     if(b.cards.cardsInHand>=10)return;
@@ -210,6 +215,8 @@ Action Actions::EmptyDeckShuffle() {
         );
 
         bc.cards.moveDiscardPileIntoToDrawPile();
+        if(bc.headlessRngKnown)
+            for(auto &card:bc.cards.drawPile)card.costForTurn=card.cost;
     }};
 }
 
@@ -313,8 +320,8 @@ Action Actions::DiscardCardAtIdx(int handIdx) {
         }
         const auto c = bc.cards.hand[handIdx];
         bc.cards.removeFromHandAtIdx(handIdx);
-        bc.onManualDiscard(c);
         bc.cards.moveToDiscardPile(c);
+        bc.onManualDiscard(c);
         ++bc.player.cardsDiscardedThisTurn;
     }};
 }
@@ -508,6 +515,18 @@ Action Actions::FissionAction(int drawPerOrb, bool upgraded) {
         if (count <= 0) {
             return;
         }
+        if (bc.headlessRngKnown) {
+            // Java Fission inserts a single grouped draw above on-use hooks.
+            bc.addToTop(Actions::DrawCards(count * drawPerOrb));
+            bc.addToTop(Actions::GainEnergy(count));
+            if (upgraded) {
+                for (int i = 0; i < count; ++i)
+                    bc.addToTop({[](BattleContext &b) { b.player.evokeOrb(b, 0); }});
+            } else {
+                for (int i = 0; i < count; ++i) bc.player.removeOrb(0);
+            }
+            return;
+        }
         if (upgraded) {
             // Evoke all orbs, leftmost first
             for (int i = 0; i < count; ++i) {
@@ -532,6 +551,13 @@ Action Actions::RebootAction(int drawCount) {
         // without discard triggers, fires onShuffle relics once, then Reboot's
         // ShuffleAction shuffles the combined draw pile.
         bc.onShuffle();
+        if (bc.headlessRngKnown) {
+            // ShuffleAll stays current until all discard Souls have been
+            // enqueued. PutOnDeckAction runs only after that action completes.
+            java::Collections::shuffle(bc.cards.discardPile.begin(),bc.cards.discardPile.end(),
+                                       java::Random(bc.shuffleRng.randomLong()));
+            bc.cards.moveDiscardPileIntoToDrawPile();
+        }
 
         while (bc.cards.cardsInHand > 0) {
             // ShuffleAllAction uses PutOnDeckAction(..., isRandom=true), so
@@ -544,7 +570,7 @@ Action Actions::RebootAction(int drawCount) {
             bc.cards.moveToDrawPileTop(c);
         }
 
-        java::Collections::shuffle(
+        if(!bc.headlessRngKnown)java::Collections::shuffle(
             bc.cards.discardPile.begin(),
             bc.cards.discardPile.end(),
             java::Random(bc.shuffleRng.randomLong())
@@ -584,13 +610,14 @@ Action Actions::DamageRandomEnemy(int damage) {
     }};
 }
 
-Action Actions::ExhaustRandomCardInHand(int count) {
+Action Actions::ExhaustRandomCardInHand(int count, bool rollWithOneCard) {
     return {[=] (BattleContext &bc) {
         for (int i = 0; i < count; ++i) {
             if (bc.cards.cardsInHand <= 0) {
                 return;
             }
-            const auto idx = bc.cards.getRandomCardIdxInHand(bc.cardRandomRng);
+            const auto idx = bc.headlessRngKnown && !rollWithOneCard && bc.cards.cardsInHand<=count-i ?
+                bc.cards.cardsInHand-1 : bc.cards.getRandomCardIdxInHand(bc.cardRandomRng);
             auto c = bc.cards.hand[idx];
             bc.cards.removeFromHandAtIdx(idx);
             bc.triggerAndMoveToExhaustPile(c);
@@ -714,13 +741,20 @@ Action Actions::SummonGremlins() {
         auto &gremlin1 = bc.monsters.arr[newGremlinIdxs[1]];
 
         constexpr double positions[]={-532,-366,-170};
-        notifyMonsterSpawn(bc,newGremlinIdxs[0],positions[newGremlinIdxs[0]]);
-        notifyMonsterSpawn(bc,newGremlinIdxs[1],positions[newGremlinIdxs[1]]);
+        const auto type0=MonsterGroup::getGremlin(bc.aiRng);
+        const auto type1=MonsterGroup::getGremlin(bc.aiRng);
+        const auto offset=[&bc](MonsterId id) {
+            // Vanilla GremlinWizard's constructor shifts drawX by -35; smart
+            // insertion compares that drawX with each historical roster entry.
+            return bc.headlessRngKnown && id==MonsterId::GREMLIN_WIZARD ? -35 : 0;
+        };
+        notifyMonsterSpawn(bc,newGremlinIdxs[0],positions[newGremlinIdxs[0]]+offset(type0));
+        notifyMonsterSpawn(bc,newGremlinIdxs[1],positions[newGremlinIdxs[1]]+offset(type1));
         gremlin0 = Monster();
         gremlin1 = Monster();
 
-        gremlin0.construct(bc, MonsterGroup::getGremlin(bc.aiRng), newGremlinIdxs[0]);
-        gremlin1.construct(bc, MonsterGroup::getGremlin(bc.aiRng), newGremlinIdxs[1]);
+        gremlin0.construct(bc, type0, newGremlinIdxs[0]);
+        gremlin1.construct(bc, type1, newGremlinIdxs[1]);
         bc.monsters.monstersAlive += 2;
 
         if (bc.player.hasRelic<R::PHILOSOPHERS_STONE>()) {
@@ -729,6 +763,10 @@ Action Actions::SummonGremlins() {
         }
         gremlin0.buff<MS::MINION>();
         gremlin1.buff<MS::MINION>();
+        // SummonGremlinAction calls usePreBattleAction on each new body.
+        for (auto *minion : {&gremlin0, &gremlin1}) {
+            if (minion->id == MonsterId::MAD_GREMLIN) minion->buff<MS::ANGRY>(bc.ascension>=17 ? 2 : 1);
+        }
 
         gremlin0.rollMove(bc);
         gremlin1.rollMove(bc);
@@ -792,8 +830,7 @@ Action Actions::PutRandomCardsInDrawPile(CardType type, int count) {
         for (int i = 0; i < count; ++i) {
             CardInstance card(ids[i], false);
             bc.configureCostsOnNewCard(card);
-            card.cost = 0;
-            card.costForTurn = 0;
+            if(!bc.headlessRngKnown || card.cost>0)card.cost=card.costForTurn=0;
 
             const int idx = bc.cards.drawPile.empty() ? 0 : bc.cardRandomRng.random(static_cast<int>(bc.cards.drawPile.size()-1));
             bc.cards.createTempCardInDrawPile(idx, card);
@@ -805,6 +842,8 @@ Action Actions::DiscoveryAction(CardType type, int amount) {
     return {[=] (BattleContext &bc) {
         bc.haveUsedDiscoveryAction = true;
         bc.openDiscoveryScreen(sts::generateDiscoveryCards(bc.cardRandomRng, bc.player.cc, type), amount);
+        bc.cardSelectInfo.headlessDiscovery=bc.headlessRngKnown;
+        bc.cardSelectInfo.discoverySourceType=type;
     }};
 }
 
@@ -902,6 +941,18 @@ Action Actions::ViolenceAction(int count) { // todo a faster algorithm for inser
 
 Action Actions::BetterDiscardPileToHandAction(int count, CardSelectTask task) {
     return {[=] (BattleContext &bc) {
+        if(task==CardSelectTask::HOLOGRAM || (bc.headlessRngKnown && task==CardSelectTask::LIQUID_MEMORIES_POTION)) {
+            if(count<=0 || bc.cards.discardPile.empty())return;
+            if(int(bc.cards.discardPile.size())<=count) {
+                while(!bc.cards.discardPile.empty() && bc.cards.cardsInHand<10) {
+                    auto c=bc.cards.discardPile.front();bc.cards.removeFromDiscard(0);if(task==CardSelectTask::LIQUID_MEMORIES_POTION)c.setCostForTurn(0);bc.cards.moveToHand(c);
+                }
+            } else {
+                openCharacterSelection(bc,task==CardSelectTask::HOLOGRAM?CardSelectTask::HOLOGRAM_GRID:CardSelectTask::LIQUID_MEMORIES_GRID,count);
+                bc.cardSelectInfo.ornithopterHeal=task==CardSelectTask::LIQUID_MEMORIES_POTION && bc.player.hasRelic<R::TOY_ORNITHOPTER>();
+            }
+            return;
+        }
         if (bc.cards.discardPile.empty()) {
             return;
         }
@@ -933,7 +984,8 @@ Action Actions::ArmamentsAction() {
             bc.cards.hand[lastUpgradeIdx].upgrade();
 
         } else {
-            bc.openSimpleCardSelectScreen(CardSelectTask::ARMAMENTS, 1);
+            if(bc.headlessRngKnown)openCharacterSelection(bc,CardSelectTask::ARMAMENTS_HAND,1);
+            else bc.openSimpleCardSelectScreen(CardSelectTask::ARMAMENTS, 1);
         }
     }};
 }
@@ -982,9 +1034,12 @@ Action Actions::DualWieldAction(int copyCount) {
             }
 
         } else {
-            bc.inputState = InputState::CARD_SELECT;
-            bc.cardSelectInfo.cardSelectTask = CardSelectTask::DUAL_WIELD;
-            bc.cardSelectInfo.dualWield_CopyCount() = copyCount;
+            if(bc.headlessRngKnown)openCharacterSelection(bc,CardSelectTask::DUAL_WIELD_HAND,copyCount);
+            else {
+                bc.inputState = InputState::CARD_SELECT;
+                bc.cardSelectInfo.cardSelectTask = CardSelectTask::DUAL_WIELD;
+                bc.cardSelectInfo.dualWield_CopyCount() = copyCount;
+            }
 
         }
 
@@ -1054,9 +1109,10 @@ Action Actions::HeadbuttAction() {
             return;
 
         } else if (bc.cards.discardPile.size() == 1) {
-            bc.chooseHeadbuttCard(0);
+            auto card=bc.cards.discardPile[0];bc.cards.removeFromDiscard(0);card.costForTurn=card.cost;
+            bc.cards.moveToDrawPileTop(card);
         } else {
-            bc.openSimpleCardSelectScreen(CardSelectTask::HEADBUTT, 1);
+            openCharacterSelection(bc,CardSelectTask::HEADBUTT_GRID,1);
         }
     }};
 }
@@ -1070,7 +1126,11 @@ Action Actions::ChooseExhaustOne() {
             bc.chooseExhaustOneCard(0);
 
         } else {
-            bc.openSimpleCardSelectScreen(CardSelectTask::EXHAUST_ONE, 1);
+            if(bc.headlessRngKnown && bc.curCardQueueItem.card.id==CardId::TRUE_GRIT && bc.curCardQueueItem.card.upgraded)
+                openCharacterSelection(bc,CardSelectTask::TRUE_GRIT_HAND,1);
+            else if(bc.headlessRngKnown && bc.curCardQueueItem.card.id==CardId::BURNING_PACT)
+                openCharacterSelection(bc,CardSelectTask::BURNING_PACT_HAND,1);
+            else bc.openSimpleCardSelectScreen(CardSelectTask::EXHAUST_ONE, 1);
 
         }
     }};
@@ -1078,6 +1138,10 @@ Action Actions::ChooseExhaustOne() {
 
 Action Actions::DrawToHandAction(CardSelectTask task, CardType cardType) {
     return {[=] (BattleContext &bc) {
+        if(task==CardSelectTask::SECRET_WEAPON || task==CardSelectTask::SECRET_TECHNIQUE) {
+            openCharacterSelection(bc,task==CardSelectTask::SECRET_WEAPON?CardSelectTask::SECRET_WEAPON_GRID:CardSelectTask::SECRET_TECHNIQUE_GRID,1);
+            return;
+        }
         int count = 0;
         int idx = 0;
 
@@ -1121,8 +1185,7 @@ Action Actions::WarcryAction() {
             bc.chooseWarcryCard(0);
 
         } else {
-            bc.inputState = InputState::CARD_SELECT;
-            bc.cardSelectInfo.cardSelectTask = CardSelectTask::WARCRY;
+            openCharacterSelection(bc,CardSelectTask::WARCRY,1);
         }
     }};
 }
@@ -1150,7 +1213,10 @@ Action Actions::EssenceOfDarkness(int darkOrbsPerSlot) {
     return {[=] (BattleContext &bc) {
         const int total = static_cast<int>(bc.player.orbSlots) * darkOrbsPerSlot;
         for (int i = 0; i < total; ++i) {
-            bc.player.channelOrb(bc, Orb::DARK);
+            // A full slot queues a separate EvokeOrbAction before its channel.
+            // Let each evoke resolve before the next one chooses its target.
+            if(bc.headlessRngKnown)bc.addToTop({[](BattleContext &b){b.player.channelOrb(b,Orb::DARK);}});
+            else bc.player.channelOrb(bc, Orb::DARK);
         }
     }};
 }
@@ -1173,13 +1239,19 @@ Action Actions::SunderAction(int targetIdx, int energy) {
 Action Actions::AllForOneAction() {
     return {[=] (BattleContext &bc) {
         // put all base-cost 0 cards from the discard pile into the hand
-        for (int i = static_cast<int>(bc.cards.discardPile.size()) - 1; i >= 0; --i) {
-            auto &c = bc.cards.discardPile[i];
-            if (c.cost == 0 || c.freeToPlayOnce) {
-                CardInstance card = c;
-                bc.cards.removeFromDiscard(i);
-                bc.moveToHandHelper(card);
-            }
+        // The Java action enqueues DiscardToHandAction for each eligible UUID in
+        // discard-list order. Check presence/capacity when each callback runs.
+        for (const auto &c : bc.cards.discardPile) {
+            if(c.cost!=0 && !c.freeToPlayOnce)continue;
+            int uid=c.uniqueId;
+            bc.addToBot({[uid](BattleContext &b){
+                if(b.cards.cardsInHand>=10)return;
+                for(int i=0;i<static_cast<int>(b.cards.discardPile.size());++i) {
+                    auto card=b.cards.discardPile[i];
+                    if(card.uniqueId!=uid)continue;
+                    b.cards.removeFromDiscard(i); b.moveToHandHelper(card); break;
+                }
+            }});
         }
     }};
 }
@@ -1188,22 +1260,23 @@ Action Actions::ScrapeAction(int drawCount) {
     return {[=] (BattleContext &bc) {
         // cards drawn by Scrape occupy the hand indices after the current hand
         const int oldHandSize = bc.cards.cardsInHand;
-        bc.addToBot(Actions::DrawCards(drawCount));
-        bc.addToBot({[=] (BattleContext &bc2) {
+        // DrawCardAction runs its follow-up before UseCardAction cleans up Scrape.
+        bc.addToTop({[=] (BattleContext &bc2) {
             int i = oldHandSize;
             while (i < bc2.cards.cardsInHand) {
                 const auto &c = bc2.cards.hand[i];
                 if (c.costForTurn != 0 && !c.freeToPlayOnce) {
                     const auto card = c;
                     bc2.cards.removeFromHandAtIdx(i);
-                    bc2.onManualDiscard(card);
                     bc2.cards.moveToDiscardPile(card);
+                    bc2.onManualDiscard(card);
                     ++bc2.player.cardsDiscardedThisTurn;
                 } else {
                     ++i;
                 }
             }
         }});
+        bc.addToTop(Actions::DrawCards(drawCount));
     }};
 }
 
@@ -1236,12 +1309,12 @@ Action Actions::SeekAction(int count) {
         if (bc.cards.drawPile.empty()) {
             return;
         }
-        const int toSelect = std::min(count, static_cast<int>(bc.cards.drawPile.size()));
-        if (toSelect == 1 && bc.cards.drawPile.size() == 1) {
-            const int idx = 0;
-            bc.chooseDrawToHandCards(&idx, 1);
-        } else {
-            bc.openSimpleCardSelectScreen(CardSelectTask::SEEK, toSelect);
+        openCharacterSelection(bc,CardSelectTask::SEEK_GRID,count);
+        if(int(bc.cardSelectInfo.options.size())<=count) {
+            auto &s=bc.cardSelectInfo;
+            int last=int(s.options.size())-1;
+            for(int i=0;i<last;++i)s.selected.push_back(i);
+            bc.inputState=InputState::EXECUTING_ACTIONS;applyCharacterSelection(bc,last);
         }
     }};
 }
@@ -1259,8 +1332,18 @@ Action Actions::SuicideAction(int monsterIdx, bool triggerRelics) {
     }};
 }
 
-Action Actions::PoisonLoseHpAction() {
-    return sts::Action();
+Action Actions::PoisonLoseHpAction(int target, int amount) {
+    return {[=](BattleContext &bc) {
+        auto &monster=bc.monsters.arr[target];
+        if(monster.curHp>0 && !monster.isEscapingB) {
+            int loss=std::max(0,amount);
+            if(monster.hasStatus<MS::INTANGIBLE>() && loss>0)loss=1;
+            // HP_LOSS bypasses block and normal attack triggers.
+            if(loss>0)monster.damageUnblockedHelper(bc,loss);
+        }
+        if(monster.hasStatus<MS::POISON>())monster.decrementStatus<MS::POISON>();
+        bc.checkCombat();
+    }};
 }
 
 Action Actions::RemovePlayerDebuffs() {
@@ -1298,20 +1381,28 @@ Action Actions::CodexAction() {
         bc.inputState = InputState::CARD_SELECT;
         bc.cardSelectInfo.cardSelectTask = CardSelectTask::CODEX;
         bc.cardSelectInfo.codexCards() =
-                generateDiscoveryCards(bc.cardRandomRng, CharacterClass::IRONCLAD, CardType::INVALID);
+                generateDiscoveryCards(bc.cardRandomRng, bc.player.cc, CardType::INVALID);
     }};
 }
 
 Action Actions::ExhaustMany(int limit) {
     return {[=] (BattleContext &bc) {
+        if(bc.headlessRngKnown && !bc.cards.cardsInHand)return;
         bc.inputState = InputState::CARD_SELECT;
         bc.cardSelectInfo.cardSelectTask = CardSelectTask::EXHAUST_MANY;
         bc.cardSelectInfo.pickCount = limit;
+        if(bc.headlessRngKnown)
+            for(int i=0;i<bc.cards.cardsInHand;++i)bc.cardSelectInfo.options.push_back(bc.cards.hand[i]);
     }};
 }
 
-Action Actions::GambleAction() {
-    return {[] (BattleContext &bc) {
+Action Actions::GambleAction(bool potion) {
+    return {[potion] (BattleContext &bc) {
+        if(bc.headlessRngKnown){
+            openCharacterSelection(bc,CardSelectTask::GAMBLER_DISCARD,99);
+            bc.cardSelectInfo.ornithopterHeal=potion && bc.player.hasRelic<R::TOY_ORNITHOPTER>();
+            return;
+        }
         bc.inputState = InputState::CARD_SELECT;
         bc.cardSelectInfo.cardSelectTask = CardSelectTask::GAMBLE;
     }};
@@ -1429,7 +1520,8 @@ Action Actions::FiendFireAction(int targetIdx, int calculatedDamage) {
         }
 
         for (int i = 0; i < bc.cards.cardsInHand; ++i) {
-            bc.addToTop( Actions::ExhaustRandomCardInHand(1) );
+            // Java sets anyNumber=true, so Fiend Fire rolls even for the last card.
+            bc.addToTop( Actions::ExhaustRandomCardInHand(1, true) );
         }
     }};
 }
@@ -1440,7 +1532,9 @@ Action Actions::HandOfGreedAction(int idx, int damage, bool upgraded) {
         if (m.isDeadOrEscaped()) {
             return;
         }
-        bc.monsters.arr[idx].damage(bc, damage);
+        // GreedAction passes the card's NORMAL DamageInfo to the monster.
+        if(bc.headlessRngKnown)m.attacked(bc, damage);
+        else m.damage(bc, damage);
 
         const bool effectTriggered = !m.hasStatus<MS::MINION>()
                 && !m.isAlive()
@@ -1495,7 +1589,8 @@ Action Actions::RitualDaggerAction(int idx, int damage) {
 
         const bool shouldUpgrade = !m.hasStatus<MS::MINION>()
                                    && !m.isAlive()
-                                   && !(m.hasStatus<MS::REGROW>() && bc.monsters.monstersAlive > 0);
+                                   && (bc.headlessRngKnown ? !m.isHalfDead() :
+                                       !(m.hasStatus<MS::REGROW>() && bc.monsters.monstersAlive > 0));
         if (shouldUpgrade) {
             auto &c = bc.curCardQueueItem.card;
             const auto upgradeAmt = c.isUpgraded() ? 5 : 3;
@@ -1503,6 +1598,10 @@ Action Actions::RitualDaggerAction(int idx, int damage) {
             if (bc.curCardQueueItem.purgeOnUse) {
                 bc.cards.findAndUpgradeSpecialData(c.uniqueId, upgradeAmt);
             }
+            if(bc.headlessRngKnown && bc.masterDeckKnown)
+                for(auto &permanent:bc.masterDeck)
+                    if(permanent.id==CardId::RITUAL_DAGGER && permanent.uniqueId==c.uniqueId)
+                        permanent.specialData+=upgradeAmt;
             c.specialData += upgradeAmt;
         }
 

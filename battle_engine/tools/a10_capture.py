@@ -57,33 +57,8 @@ def launch(stack, install, runtime, flags, input_guard, *, client=False):
     return process
 
 
-def wait_for_java(process, port):
-    deadline=time.monotonic()+120
-    while process.poll() is None and time.monotonic()<deadline:
-        try:
-            with socket.create_connection(("127.0.0.1",port),timeout=.5) as sock:
-                protocol.send(sock,'{"type":"PING"}')
-                if json.loads(protocol.receive(sock)).get("test_mode"):
-                    return
-        except (OSError,EOFError):
-            pass
-        time.sleep(.5)
-    raise RuntimeError("A10 capture search engine did not become ready")
-
-
 def offline_call(**kwargs):
     raise RuntimeError("A10 corpus capture uses only the frozen local value model and rules")
-
-
-def request_battle():
-    # The source mod owns the readiness/overlap gate. This avoids depending on
-    # AutoStart's one-time room-entry hook, which can run before the socket is ready.
-    try:
-        with socket.create_connection(("127.0.0.1",5200),timeout=.5) as sock:
-            protocol.send(sock,'{"command":"startAi"}')
-            protocol.receive(sock)
-    except (OSError,EOFError):
-        pass
 
 
 def drive(client, role, deadline, processes, goal_floor, runs):
@@ -137,7 +112,6 @@ def drive(client, role, deadline, processes, goal_floor, runs):
         if is_lifecycle_state(state):
             action=get_lifecycle_action(state,character=role,ascension=10,auto_restart=True)
         elif state.room_phase=="COMBAT":
-            request_battle()
             time.sleep(.5)
             continue
         elif state.screen_type=="COMBAT_REWARD" and not state.choice_list and not state.can_proceed and state.can_cancel:
@@ -168,18 +142,12 @@ def main(argv=None):
     parser.add_argument("--timeout-seconds",type=int,default=1200)
     parser.add_argument("--stop-floor",type=int,default=0)
     parser.add_argument("--runs",type=int,default=1)
-    parser.add_argument("--java-port",type=int,default=15157)
     parser.add_argument("--http-port",type=int,default=15057)
-    parser.add_argument("--oracle-http-port",type=int,default=15058)
     args=parser.parse_args(argv)
     if args.timeout_seconds<=0 or args.stop_floor<0 or args.runs<=0 or (args.stop_floor and args.runs!=1):
         parser.error("Invalid capture bounds")
-    ports={args.java_port,args.http_port,args.oracle_http_port,5124,5200}
-    if len(ports)!=5:
-        parser.error("Capture ports must be distinct")
-    for port in ports:
-        with socket.socket() as sock:
-            sock.bind(("127.0.0.1",port))
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1",args.http_port))
     source=args.game_dir.resolve(strict=True)
     root=args.output.resolve()
     root.mkdir(parents=True)
@@ -193,16 +161,11 @@ def main(argv=None):
         guard=build_input_guard(source,root/"input-guard")
         result["input_guard_sha256"]=digest(guard)
         with ExitStack() as stack:
-            oracle=launch(stack,source,root/"oracle",
-                          ["-DisServer=true","-DisPlaidMode=true","-Dbattleai.testMode=true",
-                           f"-Dbattleai.port={args.java_port}",f"-Dcommunicationmod.port={args.oracle_http_port}"],guard)
-            wait_for_java(oracle,args.java_port)
-            client=launch(stack,source,root/"client",
-                          ["-Dbattleai.backend=java",f"-Dbattleai.clientPort={args.java_port}",
-                           f"-Dcommunicationmod.port={args.http_port}"],guard,client=True)
+            client=launch(stack,source,root/"client",["-Dbattleai.capture=true",
+                          f"-Dcommunicationmod.port={args.http_port}"],guard,client=True)
             endpoint=GameClient(f"http://127.0.0.1:{args.http_port}")
             result["stop"],result["completed_runs"]=drive(
-                endpoint,args.role,time.monotonic()+args.timeout_seconds,(oracle,client),args.stop_floor,args.runs)
+                endpoint,args.role,time.monotonic()+args.timeout_seconds,(client,),args.stop_floor,args.runs)
     except (RuntimeError,ValueError,OSError,TimeoutError,subprocess.SubprocessError) as error:
         result["error"]=str(error)
     result["counts"]=coverage(inventory([root/"client"/"startstates"]))

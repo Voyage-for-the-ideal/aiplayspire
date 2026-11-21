@@ -92,7 +92,7 @@ bool isValidPotionAction(const BattleContext &bc, const search::Action &a) {
         // card is in the discard pile.  Treating it as usable here consumes
         // the potion for no effect and can make that no-op look attractive to
         // the root search.
-        if (p == sts::Potion::LIQUID_MEMORIES && bc.cards.discardPile.empty()) {
+        if (p == sts::Potion::LIQUID_MEMORIES && bc.cards.discardPile.empty() && !bc.headlessRngKnown) {
             return false;
         }
 
@@ -505,6 +505,17 @@ void search::Action::execute(BattleContext &bc) const {
     }
 
     bc.executeActions();
+    // Newly exhausted cards may retain temporary costs at the first Java
+    // decision. A subsequent card animation can settle the previous card's
+    // ExhaustCardEffect; never rewrite the imported before-state or a potion.
+    if ((getActionType()==ActionType::CARD || getActionType()==ActionType::SINGLE_CARD_SELECT)
+            && bc.inputState==InputState::PLAYER_NORMAL && !bc.headlessExhaustEffects.empty()) {
+        for (auto &c : bc.cards.exhaustPile)
+            if (std::find(bc.headlessExhaustEffects.begin(),bc.headlessExhaustEffects.end(),c.uniqueId)!=bc.headlessExhaustEffects.end())
+                c.costForTurn=c.cost;
+        bc.headlessExhaustEffects.clear();
+    }
+
 }
 
 template <typename ForwardIt>

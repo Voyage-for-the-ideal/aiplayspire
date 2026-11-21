@@ -147,6 +147,12 @@ namespace {
             if (p == Potion::EMPTY_POTION_SLOT) {
                 continue;
             }
+            // The headless wire contract has no stance-choice boundary.
+            // Do not search a speculative action that cannot be executed on
+            // that driver. The potion still exists in the exact inventory.
+            if (bc.headlessRngKnown && p == Potion::STANCE_POTION) {
+                continue;
+            }
 
             // Flex Potion's Strength is lost at end of turn.  If no attack can be
             // played in the current state, drinking it before a draw/setup action
@@ -175,7 +181,7 @@ namespace {
                 continue;
             }
 
-            if (p == Potion::LIQUID_MEMORIES && bc.cards.discardPile.empty()) {
+            if (p == Potion::LIQUID_MEMORIES && bc.cards.discardPile.empty() && !bc.headlessRngKnown) {
                 continue;
             }
 

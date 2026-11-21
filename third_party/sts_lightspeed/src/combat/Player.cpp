@@ -125,10 +125,14 @@ int Player::getStatusRuntime(PlayerStatus s) const {
 }
 
 void Player::setJustApplied(PlayerStatus s, bool value) {
+    // Ritual's source skipFirst latch is exported on players too. Its enum
+    // exceeds 63, so shifting by that ordinal is undefined. Reserve the bit-9
+    // slot observed by the existing Headless importer explicitly instead.
+    const int bit=s==PS::RITUAL?9:static_cast<int>(s);
     if (value) {
-        justAppliedBits |= (1ULL << static_cast<int>(s));
+        justAppliedBits |= (1ULL << bit);
     } else {
-        justAppliedBits &= ~(1ULL << static_cast<int>(s));
+        justAppliedBits &= ~(1ULL << bit);
     }
 }
 
@@ -238,28 +242,32 @@ void Player::triggerOrbEvoke(BattleContext &bc, int slot) {
     const Orb orb = orbTypes[slot];
     const int data = orbData[slot];
 
+    // Java orb onEvoke inserts its effect above queued attacks and block gains.
+    auto enqueue = [&](Action action) {
+        if (bc.headlessRngKnown) bc.addToTop(action); else bc.addToBot(action);
+    };
     switch (orb) {
         case Orb::LIGHTNING: {
             const int dmg = std::max(0, 8 + focus);
             if (hasStatus<PS::ELECTRO>()) {
-                bc.addToBot(Actions::OrbLightningAttackAllEnemy(dmg));
+                enqueue(Actions::OrbLightningAttackAllEnemy(dmg));
             } else {
-                bc.addToBot(Actions::OrbLightningDamageRandom(dmg));
+                enqueue(Actions::OrbLightningDamageRandom(dmg));
             }
             break;
         }
 
         case Orb::FROST:
-            bc.addToBot(Actions::GainBlock(std::max(0, 5 + focus)));
+            enqueue(Actions::GainBlock(std::max(0, 5 + focus)));
             break;
 
         case Orb::DARK:
             // Dark deals its stored damage to the living enemy with the lowest HP
-            bc.addToBot(Actions::OrbDarkDamageLowestHp(std::max(0, data)));
+            enqueue(Actions::OrbDarkDamageLowestHp(std::max(0, data)));
             break;
 
         case Orb::PLASMA:
-            bc.addToBot(Actions::GainEnergy(2));
+            enqueue(Actions::GainEnergy(2));
             break;
 
         default:
@@ -743,7 +751,7 @@ void Player::applyAtEndOfRoundPowers() {
     }
 
     if (hasStatus<PS::WAVE_OF_THE_HAND>()) {
-        decrementStatus<PS::WAVE_OF_THE_HAND>();
+        removeStatus<PS::WAVE_OF_THE_HAND>(); // Debuff magnitude, not a duration.
     }
 }
 
@@ -838,6 +846,13 @@ void Player::applyStartOfTurnPowers(BattleContext &bc) {
         }
 
         switch (pair.first) {
+            case PS::COLLECT:
+                if (bc.headlessRngKnown) bc.addToBot({[](BattleContext &b) {
+                    b.player.decrementStatus<PS::COLLECT>();
+                    b.addToTop(Actions::MakeTempCardInHand(CardId::MIRACLE,true));
+                }});
+                break;
+
             case PS::BATTLE_HYMN:
                 bc.addToBot(Actions::MakeTempCardInHand(CardId::SMITE, hasStatus<PS::MASTER_REALITY>(), pair.second) );
                 break;
@@ -879,8 +894,12 @@ void Player::applyStartOfTurnPowers(BattleContext &bc) {
 
             case PS::HELLO_WORLD: {
                 // Each stack independently creates a random Common card.
+                if (bc.headlessRngKnown && bc.monsters.areMonstersBasicallyDead()) break;
                 for (int i = 0; i < pair.second; ++i) {
-                    const auto cardId = getRandomClassCardOfRarity(
+                    const auto &live=runtimeCombatPools.liveCommon;
+                    const auto cardId = bc.headlessRngKnown && !live.empty()
+                        ? live[bc.cardRandomRng.random(static_cast<int>(live.size())-1)]
+                        : getRandomClassCardOfRarity(
                         bc.cardRandomRng,
                         bc.player.cc,
                         CardRarity::COMMON
@@ -905,7 +924,9 @@ void Player::applyStartOfTurnPowers(BattleContext &bc) {
             }
 
             case PS::MAGNETISM:
-//                bc.addToBot( Actions::SetState(InputState::CREATE_RANDOM_CARD_IN_HAND_COLORLESS, pair.second) );
+                if(bc.headlessRngKnown && !bc.monsters.areMonstersBasicallyDead())
+                    for(int i=0;i<pair.second;++i)
+                        bc.addToBot(Actions::MakeTempCardInHand(sts::getTrulyRandomColorlessCardInCombat(bc.cardRandomRng)));
                 break;
 
             case PS::MAYHEM:
@@ -932,7 +953,12 @@ void Player::applyStartOfTurnPowers(BattleContext &bc) {
 
             case PS::PHANTASMAL:
                 decrementStatus<PS::PHANTASMAL>();
-                bc.addToBot( Actions::BuffPlayer<PS::DOUBLE_DAMAGE>() );
+                if (bc.headlessRngKnown)bc.addToBot({[](BattleContext &b) {
+                    bool wasJustApplied=b.player.hasStatus<PS::DOUBLE_DAMAGE>() && b.player.wasJustApplied<PS::DOUBLE_DAMAGE>();
+                    b.player.buff<PS::DOUBLE_DAMAGE>();
+                    b.player.setJustApplied<PS::DOUBLE_DAMAGE>(wasJustApplied);
+                }});
+                else bc.addToBot(Actions::BuffPlayer<PS::DOUBLE_DAMAGE>());
                 break;
 
                 // time maze not used in standard modes
@@ -992,8 +1018,12 @@ void Player::applyStartOfTurnPostDrawPowers(BattleContext &bc) {
                 bc.addToBot( Actions::DebuffAllEnemy<MS::POISON>(pair.second) );
                 break;
 
+            case PS::BERSERK:
+                bc.addToBot(Actions::GainEnergy(pair.second));
+                break;
+
             case PS::MACHINE_LEARNING:
-                bc.addToBot( Actions::DrawCards(pair.second) );
+                if(!bc.headlessRngKnown)bc.addToBot( Actions::DrawCards(pair.second) );
                 break;
 
             case PS::TOOLS_OF_THE_TRADE:
@@ -1015,7 +1045,7 @@ void Player::rechargeEnergy(BattleContext &bc) {
     }
 
     // ****** Player powers onEnergyRecharge ******
-    if (hasStatus<PS::COLLECT>()) {
+    if (!bc.headlessRngKnown && hasStatus<PS::COLLECT>()) {
         decrementStatus<PS::COLLECT>();
         bc.addToBot(Actions::MakeTempCardInHand(CardId::MIRACLE,true) );
     }

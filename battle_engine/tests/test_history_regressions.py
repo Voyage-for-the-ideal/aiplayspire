@@ -10,7 +10,7 @@ import unittest
 import os
 
 from battle_engine import protocol
-from battle_engine.server import execute_worker, Gateway
+from battle_engine.native_api import execute_worker
 from battle_engine.state import load, projection
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -215,7 +215,7 @@ class HistoryRegressionTests(unittest.TestCase):
             for m, x in zip(ms, xs)]
         self.assertEqual(self.run_native(next_state)["projection"], projection(next_state))
 
-    def test_gateway_continues_on_next_snapshot_after_summoning(self):
+    def test_native_continues_on_next_snapshot_after_summoning(self):
         s = self.state()
         s["player_state"]["energy_panel_total_energy"] = 0
         s["cur_map_node_state"]["monster_data"] = [monster("GremlinWarrior", move=1, x=-366),
@@ -237,24 +237,10 @@ class HistoryRegressionTests(unittest.TestCase):
                     move=3 if m["id"] == "GremlinLeader" else 1, x=x)
             for m, x in zip(after["monsters"], (-532, -366, -170, -170, 35))]
         self.assertEqual(projection(next_state), after)
-        options = types.SimpleNamespace(worker=EXE, no_fallback=True, fallback_port=1, max_time_ms=100)
-        with tempfile.TemporaryDirectory() as tmp, Gateway(("127.0.0.1", 0), options) as gateway:
-            thread = threading.Thread(target=gateway.serve_forever, daemon=True)
-            thread.start()
-            try:
-                path = Path(tmp) / "state.json"
-                with socket.create_connection(gateway.server_address, timeout=5) as sock:
-                    sock.settimeout(5)
-                    for state in (s, next_state):
-                        path.write_text(json.dumps(state), encoding="utf-8")
-                        protocol.send(sock, json.dumps(dict(fileName=str(path), timeout_ms=100, max_expansions=1000)))
-                        response = json.loads(protocol.receive(sock))
-                        self.assertEqual(protocol.receive(sock), "DONE")
-                        self.assertEqual(response["type"], "COMMAND_LIST", response)
-                        self.assertEqual(response["metrics"]["backend"], "cpp")
-            finally:
-                gateway.shutdown()
-                thread.join()
+        for state in (s,next_state):
+            result=execute_worker(EXE,state,1000,100)
+            self.assertTrue(result["supported"],result)
+            self.assertEqual(result["type"],"COMMAND_LIST")
 
 
 if __name__ == "__main__":

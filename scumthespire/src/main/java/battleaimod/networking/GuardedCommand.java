@@ -14,7 +14,7 @@ final class GuardedCommand implements Command {
     private JsonObject expectedContext;
 
     GuardedCommand(Command delegate, JsonObject expected) {
-        this(delegate, expected, () -> BattleStateProjection.fromSnapshot(new SaveState().jsonEncode()));
+        this(delegate, expected, (Supplier<JsonObject>) null);
     }
 
     GuardedCommand(Command delegate, JsonObject expected, JsonObject context) {
@@ -31,8 +31,10 @@ final class GuardedCommand implements Command {
 
     @Override public void execute() {
         try {
-            if (!expected.equals(current.get()) || (expectedContext != null &&
-                    !expectedContext.equals(BattleStateProjection.context(new SaveState().jsonEncode())))) {
+            JsonObject live = current == null ? new SaveState().jsonEncode() : null;
+            JsonObject observed = current == null ? BattleStateProjection.fromSnapshot(live) : current.get();
+            if (!expected.equals(observed) || (expectedContext != null &&
+                    !expectedContext.equals(BattleStateProjection.context(live)))) {
                 System.err.println("BATTLE_ENGINE_PRECONDITION_MISMATCH command=" + delegate.encode());
                 LudicrousSpeedMod.mustRestart = true;
                 return;

@@ -54,7 +54,7 @@ class Worker:
             p.stdout.close()
             p.stderr.close()
 
-    def execute(self, request, timeout_ms):
+    def execute(self, request, timeout_ms, *, check_cancel=None):
         with self.lock:
             if self.process is None or self.process.poll() is not None:
                 self.close()
@@ -64,10 +64,21 @@ class Worker:
             try:
                 self.process.stdin.write((json.dumps(request, ensure_ascii=True, separators=(",", ":")) + "\n").encode())
                 self.process.stdin.flush()
-                try:
-                    line = self.replies.get(timeout=timeout_ms / 1000 + 2)
-                except queue.Empty:
-                    raise subprocess.TimeoutExpired(self.executable, timeout_ms / 1000 + 2)
+                if timeout_ms == 0:
+                    # No per-search wall clock, but a closed collection gate or
+                    # a supervisor stop can still cancel a pending request.
+                    while True:
+                        if check_cancel is not None: check_cancel()
+                        try:
+                            line = self.replies.get(timeout=.25 if check_cancel is not None else None)
+                            break
+                        except queue.Empty:
+                            continue
+                else:
+                    try:
+                        line = self.replies.get(timeout=timeout_ms / 1000 + 2)
+                    except queue.Empty:
+                        raise subprocess.TimeoutExpired(self.executable, timeout_ms / 1000 + 2)
                 if line is None:
                     raise RuntimeError(f"worker_exit:{self.process.poll()} stderr={''.join(self.stderr)[-2000:]}")
                 result = json.loads(line)

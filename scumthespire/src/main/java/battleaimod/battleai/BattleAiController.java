@@ -8,11 +8,11 @@ import basemod.BaseMod;
 import battleaimod.ValueFunctions;
 import battleaimod.evaluation.TacticalEvaluator;
 import battleaimod.search.SearchBudget;
+import battleaimod.search.SearchCompletion;
 import battleaimod.search.SearchMetrics;
 import battleaimod.search.SearchProfile;
 import battleaimod.search.SearchStateKey;
 import com.badlogic.gdx.math.MathUtils;
-import com.google.gson.JsonElement;
 import com.megacrit.cardcrawl.cards.AbstractCard;
 import com.megacrit.cardcrawl.dungeons.AbstractDungeon;
 import com.megacrit.cardcrawl.helpers.CardLibrary;
@@ -36,6 +36,8 @@ public class BattleAiController implements Controller {
     private SearchBudget searchBudget;
     private final Set<SearchStateKey> seenTurnStates = new HashSet<>();
     private final SearchMetrics searchMetrics = new SearchMetrics();
+    private final SearchCompletion responseCompletion = new SearchCompletion();
+    private volatile long completedAtNanos;
     private String stopReason = "RUNNING";
     private boolean battleComplete = false;
     private boolean shouldReplan = false;
@@ -56,14 +58,14 @@ public class BattleAiController implements Controller {
     public StateNode deathNode = null;
 
     // The state the AI is currently processing from
-    public TurnNode committedTurn = null;
+    public volatile TurnNode committedTurn = null;
 
     // The target turn that will be loaded if/when the max turn loads is hit
     public TurnNode bestTurn = null;
     public TurnNode backupTurn = null;
 
     public int startingHealth;
-    public boolean isDone = false;
+    public volatile boolean isDone = false;
     public final SaveState startingState;
     private boolean initialized;
 
@@ -183,6 +185,15 @@ public class BattleAiController implements Controller {
     }
 
     public void step() {
+        try {
+            stepSearch();
+        } catch (RuntimeException | Error error) {
+            responseCompletion.fail(error);
+            throw error;
+        }
+    }
+
+    private void stepSearch() {
         if (isDone) {
             return;
         }
@@ -214,11 +225,9 @@ public class BattleAiController implements Controller {
             if (turns.isEmpty() || shouldCommitStreamingStage()) {
                 if (bestEnd != null) {
                     System.err.println("Found end at turn threshold, going into rerun");
-                    printRuntimeStats();
-
-                    isDone = true;
                     battleComplete = true;
                     stopReason = "VICTORY";
+                    completeSearch();
                     return;
                 } else if (bestTurn != null || backupTurn != null) {
                     if (bestTurn == null) {
@@ -255,13 +264,12 @@ public class BattleAiController implements Controller {
                     } else {
                         System.err.println("No safe path found, using start state as fallback");
                     }
-                    isDone = true;
                     battleComplete = false;
                     // A death line has ancestors, so hasProgress() would wrongly ask for a
                     // replan; when playing it out the run must simply end.
                     shouldReplan = !playingOutDeath && hasProgress(bestEnd);
                     stopReason = playingOutDeath ? "ALL_LOSE" : "SEARCH_EXHAUSTED";
-                    printRuntimeStats();
+                    completeSearch();
                     return;
                 }
             }
@@ -340,6 +348,27 @@ public class BattleAiController implements Controller {
         return isDone;
     }
 
+    /** All result fields and final metrics are ready before release/publication. */
+    private void completeSearch() {
+        printRuntimeStats();
+        completedAtNanos = System.nanoTime();
+        isDone = true;
+        responseCompletion.complete();
+    }
+
+    public boolean awaitResponse(long intervalMillis) throws InterruptedException {
+        return responseCompletion.await(intervalMillis);
+    }
+
+    public boolean responseReady() { return responseCompletion.isReady(); }
+    public Throwable responseFailure() { return responseCompletion.failure(); }
+    public boolean responseCancelled() { return responseCompletion.isCancelled(); }
+    public void cancelResponseWait() { responseCompletion.cancel(); }
+
+    public long completionWakeupMillis() {
+        return completedAtNanos == 0L ? 0L : Math.max(0L, System.nanoTime() - completedAtNanos) / 1_000_000L;
+    }
+
     public TurnNode committedTurn() {
         return committedTurn;
     }
@@ -363,15 +392,11 @@ public class BattleAiController implements Controller {
     public boolean registerTurnState(SaveState state) {
         searchMetrics.generatedTurnStates++;
         searchMetrics.deepestTurn = Math.max(searchMetrics.deepestTurn, state.turn);
-        long encodeStartedAt = System.nanoTime();
-        JsonElement encodedState = state.jsonEncode();
-        long encodeNanos = System.nanoTime() - encodeStartedAt;
-        long canonicalHashStartedAt = System.nanoTime();
-        SearchStateKey key = SearchStateKey.fromJson(encodedState);
-        long canonicalHashNanos = System.nanoTime() - canonicalHashStartedAt;
-        searchMetrics.stateKeyEncodeNanos += encodeNanos;
-        searchMetrics.stateKeyCanonicalHashNanos += canonicalHashNanos;
-        searchMetrics.stateKeyNanos += encodeNanos + canonicalHashNanos;
+        long startedAt = System.nanoTime();
+        SearchStateKey key = SearchStateKey.fromSaveState(state);
+        long elapsed = System.nanoTime() - startedAt;
+        searchMetrics.stateKeyDirectNanos += elapsed;
+        searchMetrics.stateKeyNanos += elapsed;
         if (!seenTurnStates.add(key)) {
             searchMetrics.duplicateTurnStates++;
             return false;
@@ -457,8 +482,7 @@ public class BattleAiController implements Controller {
             stopReason = playingOutDeath ? "ALL_LOSE" : (timedOut ? "TIMEOUT" : "EXPANSION_LIMIT");
         }
 
-        isDone = true;
-        printRuntimeStats();
+        completeSearch();
         return true;
     }
 

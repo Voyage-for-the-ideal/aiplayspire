@@ -73,7 +73,7 @@ DamageInfo Monster::getMoveBaseDamage(const BattleContext &bc) const {
 
         case MonsterMoveId::GIANT_HEAD_COUNT:               return {13};
         case MonsterMoveId::GIANT_HEAD_IT_IS_TIME: {
-            const auto t = std::min(bc.getMonsterTurnNumber()-4, 6) * 5;
+            const auto t = (bc.headlessRngKnown ? -miscInfo : std::min(bc.getMonsterTurnNumber()-4, 6)) * 5;
             const auto damage = (asc3 ? 40 : 30) + t;
             return {damage};
         }
@@ -182,7 +182,7 @@ DamageInfo Monster::getMoveBaseDamage(const BattleContext &bc) const {
 
         case MonsterMoveId::THE_MAW_SLAM:                   return {asc2 ? 30 : 25};
         case MonsterMoveId::THE_MAW_NOM: {
-            const auto t = (bc.getMonsterTurnNumber() + 1) / 2;
+            const auto t = bc.headlessRngKnown ? (miscInfo>>1)/2 : (bc.getMonsterTurnNumber() + 1) / 2;
             return {5, t};
         }
 
@@ -190,7 +190,7 @@ DamageInfo Monster::getMoveBaseDamage(const BattleContext &bc) const {
         case MonsterMoveId::TIME_EATER_HEAD_SLAM:           return {asc4 ? 32 : 26};
 
         case MonsterMoveId::TRANSIENT_ATTACK: {
-            const auto damage = (asc2 ? 40 : 30) + 10*(bc.getMonsterTurnNumber()-1);
+            const auto damage = (asc2 ? 40 : 30) + 10*(bc.headlessRngKnown?miscInfo:bc.getMonsterTurnNumber()-1);
             return {damage};
         }
 

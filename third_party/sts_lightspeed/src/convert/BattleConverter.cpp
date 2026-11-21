@@ -561,7 +561,7 @@ int getEnergyPerTurnFromJsonState(const GameContext &gc, const nlohmann::json &j
     return energyPerTurn;
 }
 
-BattleContext BattleConverter::convertFromJson(const nlohmann::json &json, int *monsterIdxMap) {
+BattleContext BattleConverter::convertFromJson(const nlohmann::json &json, int *monsterIdxMap, bool alreadyAtBoundary) {
     GameContext gc;
     gc.initFromJson(json);
     BattleContext bc;
@@ -770,6 +770,9 @@ BattleContext BattleConverter::convertFromJson(const nlohmann::json &json, int *
             if (monsterStatus == MonsterStatus::INVINCIBLE) {
                 monster->setHasStatus<MonsterStatus::INVINCIBLE>(true);
             }
+            // Slow remains installed at zero between turns. Removing the
+            // presence bit prevents later card plays from incrementing it.
+            if (monsterStatus == MonsterStatus::SLOW) monster->setHasStatus<MonsterStatus::SLOW>(true);
             if (p.contains("just_applied")) {
                 monster->setJustApplied(monsterStatus, p["just_applied"]);
             }
@@ -1073,7 +1076,11 @@ BattleContext BattleConverter::convertFromJson(const nlohmann::json &json, int *
     // reconstructed from the cards played list after the relic has triggered
     // and reset itself.
 
-    bc.executeActions();
+    // A headless snapshot is already at a decision boundary. In particular
+    // a suspended grid can have an empty hand and Unceasing Top: drawing
+    // here would advance its continuation before it has been restored.
+    if(alreadyAtBoundary)bc.inputState=InputState::PLAYER_NORMAL;
+    else bc.executeActions();
     importExternalCardSelect(json, bc);
     return bc;
 }

@@ -4,6 +4,7 @@
 #include "MonsterRoster.h"
 #include <array>
 #include <string>
+#include <memory>
 
 namespace sts::search {struct Action;}
 
@@ -16,6 +17,7 @@ struct Imported {
     Json before;
     MonsterRoster roster;
     std::map<int,Json> selectionIdentities;
+    bool desktopHeadbutt=false;
     std::string selectionScreen;
     std::vector<int> selectionIndices;
 };
@@ -28,5 +30,13 @@ Json projection(const sts::BattleContext &bc, const std::array<int,5> &monsterMa
 Json projection(const Imported &imported);
 void executeImported(Imported &imported,const sts::search::Action &action);
 Imported importSnapshot(const Json &snapshot);
-Json search(const Json &request);
+// An owner (a worker or a JVM battle session) is serialized by its adapter.
+class Session {
+    struct Cache;
+    std::unique_ptr<Cache> state;
+public:
+    Session();
+    ~Session();
+    Json search(const Json &request);
+};
 }

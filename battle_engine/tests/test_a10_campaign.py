@@ -44,7 +44,7 @@ class CampaignTests(unittest.TestCase):
             self.assertEqual([call.args[3] for call in child.call_args_list],
                              ["battle_engine.tools.a10_capture"]*4)
 
-    def test_pilot_invalid_java_stops_before_holdout(self):
+    def test_freeze_does_not_launch_java_search_or_promote(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)
             args=self.fixture(root)
@@ -55,9 +55,8 @@ class CampaignTests(unittest.TestCase):
                  patch.object(c,"run_child",return_value=0) as child, patch.object(c,"MIN_FREE_BYTES",0), \
                  patch.object(c,"freeze",return_value={"cases":[]}), patch.object(c,"manifest_cases"), \
                  patch.object(c,"read_report",return_value=report):
-                self.assertEqual(c.campaign(args),1)
-            child.assert_called_once()
-            self.assertEqual(child.call_args.args[2],"pilot")
+                self.assertEqual(c.campaign(args),0)
+            child.assert_not_called()
             status=json.loads((args.output/"status.json").read_text())
-            self.assertEqual(status["stage"],"needs_review")
+            self.assertEqual(status["stage"],"corpus_frozen")
             self.assertNotIn("formal_report",status)

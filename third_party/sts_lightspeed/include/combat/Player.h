@@ -80,6 +80,7 @@ namespace sts {
         int8_t  inserterCounter = 0;
         int8_t  nunchakuCounter = 0;
         int8_t  penNibCounter = 0;
+        int8_t  omamoriCounter = 0;
         int8_t  sundialCounter = 0;
         bool haveUsedNecronomiconThisTurn = false;
 
@@ -199,7 +200,7 @@ namespace sts {
 
     template <PlayerStatus s>
     bool Player::wasJustApplied() const {
-        return justAppliedBits & (1ULL << static_cast<int>(s));
+        return justAppliedBits & (1ULL << (s==PS::RITUAL?9:static_cast<int>(s)));
     }
 
     template<PlayerStatus s>
@@ -339,6 +340,12 @@ namespace sts {
             return;
         }
 
+        if (s == PS::MASTER_REALITY && amount == -1) {
+            setHasStatus<s>(true);
+            statusMap[s] = -1; // Base Java power is present but never stacks.
+            return;
+        }
+
         if (s == PS::BARRICADE ||
             s == PS::CORRUPTION ||
             s == PS::CONFUSED ||
@@ -349,13 +356,16 @@ namespace sts {
             return;
         }
 
-        if (s == PS::DOUBLE_DAMAGE || s == PS::INTANGIBLE) { // todo this is definitely wrong
+        // IntangiblePlayerPower decrements directly atEndOfRound and has no
+        // justApplied field. DoubleDamagePower does have that explicit latch.
+        if (s == PS::DOUBLE_DAMAGE) {
             setJustApplied<s>(true);
         }
 
         if (s == PS::COMBUST) {
             ++combustHpLoss;
         }
+        if(s==PS::PANACHE && !hasStatus<PS::PANACHE>())panacheCounter=5;
 
         if (hasStatus<s>()) {
             statusMap[s] += amount;
@@ -410,7 +420,7 @@ namespace sts {
             return;
         }
 
-        if (s == PS::CONFUSED || s == PS::HEX) {
+        if (s == PS::CONFUSED) {
             setHasStatus<s>(true);
             return;
         }

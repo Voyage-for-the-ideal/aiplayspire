@@ -65,6 +65,17 @@ namespace sts {
         std::vector<CardInstance> masterDeck;
         bool cardRngKnown = false;
         Random cardRng;
+        // Opt-in pinned Headless policy; legacy SaveState callers keep the old path.
+        bool headlessRngKnown = false;
+        std::array<RelicId,3> headlessShuffleRelics{RelicId::INVALID,RelicId::INVALID,RelicId::INVALID};
+        std::vector<int> headlessExhaustEffects; // card instance IDs for pending ExhaustCardEffect.resetAttributes
+        bool headlessSettledExhaust = false; // driver waits for cost-changing exhaust effects
+
+        // Source action waiting *after* Headbutt cleanup when its discard grid opens.
+        enum class HeadbuttTail { NONE, PLATED, GUARDIAN, FLIGHT, MALLEABLE };
+        HeadbuttTail headbuttTail=HeadbuttTail::NONE;
+        void enqueueHeadbuttTail(int target,HeadbuttTail kind);
+        Random headlessRng;
         // end for debugging purposes
 
         Random aiRng;

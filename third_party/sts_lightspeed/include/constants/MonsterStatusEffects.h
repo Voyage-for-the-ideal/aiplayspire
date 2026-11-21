@@ -62,6 +62,7 @@ namespace sts {
         REGROW,
         SHIFTING,
         STASIS,
+        EXPLOSIVE, // amount uses uniquePower1; Exploder's turns use miscInfo
     };
 
     static constexpr const char* const enemyStatusIds[] = {
@@ -112,6 +113,7 @@ namespace sts {
         "Life Link",
         "Shifting",
         "Stasis",
+        "Explosive",
     };
 
     static inline MonsterStatus getMonsterStatusFromId(std::string id) {
@@ -171,6 +173,7 @@ namespace sts {
         "Regrow",
         "Shifting",
         "Stasis",
+        "Explosive",
     };
 
     static constexpr const char* const monsterStatusEnumStrings[]{

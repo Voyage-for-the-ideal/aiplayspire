@@ -27,4 +27,20 @@ public class SearchBudgetTest {
         clock.incrementAndGet();
         assertTrue(budget.isTimedOut());
     }
+
+    @Test
+    public void balancedContinuesPastThirtySecondsButStillStopsAtItsLimits() {
+        AtomicLong clock = new AtomicLong();
+        SearchProfile profile = SearchProfile.BALANCED;
+        SearchBudget budget = new SearchBudget(profile.maxExpansions(), profile.timeoutMillis(), clock::get);
+
+        clock.set(30_000_000_000L);
+        assertFalse(budget.isTimedOut());
+        assertFalse(budget.isExpansionLimitReached(14_999));
+        assertTrue(budget.isExpansionLimitReached(15_000));
+        clock.set(89_999_999_999L);
+        assertFalse(budget.isTimedOut());
+        clock.incrementAndGet();
+        assertTrue(budget.isTimedOut());
+    }
 }

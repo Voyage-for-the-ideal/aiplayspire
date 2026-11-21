@@ -2,7 +2,7 @@ package battleaimod.search;
 
 public enum SearchProfile {
     FAST(5_000, 10_000L, true),
-    BALANCED(15_000, 30_000L, true),
+    BALANCED(15_000, 90_000L, true),
     DEEP(50_000, 90_000L, false);
 
     private final int maxExpansions;
@@ -23,7 +23,7 @@ public enum SearchProfile {
         return timeoutMillis;
     }
 
-    /** Native turn search budget; legacy Java baseline budgets stay unchanged. */
+    /** Independent native turn-search time budget, separate from Java deadlines. */
     public long nativeTimeoutMillis() {
         switch (this) {
             case FAST: return 250L;

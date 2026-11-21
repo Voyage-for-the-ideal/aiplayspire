@@ -9,7 +9,7 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from battle_engine.profiles import PROFILES
-from battle_engine.server import execute_worker, ROOT
+from battle_engine.native_api import execute_worker, ROOT
 from battle_engine.state import load
 from battle_engine.worker import Worker
 

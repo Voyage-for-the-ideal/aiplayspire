@@ -120,29 +120,9 @@ def campaign(args):
         write(manifest,freeze(groups))
         manifest_cases(manifest,"formal")
         status["manifest"]={"path":str(manifest),"sha256":digest(manifest)}
-        for phase in ("pilot","formal"):
-            check_inputs()
-            gate_dir=root/phase
-            status["stage"]=phase
-            code=run_child(root,status,phase,"battle_engine.tools.oracle",[
-                "--game-dir",str(args.game_dir),"--worker",str(args.worker),"--manifest",str(manifest),
-                "--port","15129","--runtime-dir",str(gate_dir),"--balanced-ab",phase,
-            ])
-            report_path=gate_dir/"balanced-ab"/"report.json"
-            report=read_report(report_path)
-            status[f"{phase}_report"]=str(report_path)
-            if not report:
-                raise RuntimeError(f"{phase} did not produce a report")
-            if phase=="pilot" and (code!=0 or any(
-                gate["cpp_invalid"] or gate.get("java_invalid",0) for gate in report["gates"].values()
-            )):
-                raise RuntimeError("Pilot found an invalid real-engine replay. Holdout remains unused.")
-            if phase=="formal":
-                status["gates"]=report["gates"]
-                if code!=0 or not report["passed"]:
-                    status["stage"]="formal_not_passed"
-                    return 1
-        status["stage"]="formal_passed"
+        # Freezing a corpus is separate from evidence that a candidate beats the
+        # deployed server build. Never start the retired Java search for this gate.
+        status["stage"]="corpus_frozen"
         return 0
     except Exception as error:
         status["stage"]="needs_review"

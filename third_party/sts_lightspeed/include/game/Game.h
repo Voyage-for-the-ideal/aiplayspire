@@ -24,6 +24,7 @@ namespace sts {
     struct RuntimeCombatPools {
         bool strict = false;
         std::vector<CardId> any, attacks, skills, powers, colorless, common, uncommon, rare;
+        std::vector<CardId> liveCommon; // mutable AbstractDungeon.commonCardPool (Hello World)
         // CardLibrary.getAnyColorCard(ATTACK, rarity), sorted by Java card ID.
         std::array<std::vector<CardId>,3> libraryAttacks;
     };

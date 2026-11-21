@@ -10,7 +10,7 @@ import queue
 from unittest.mock import patch
 
 from battle_engine.profiles import budgets
-from battle_engine.server import execute_worker
+from battle_engine.native_api import execute_worker
 from battle_engine.state import load, projection
 from battle_engine.worker import Worker
 
@@ -143,6 +143,40 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(second["supported"], second)
         self.assertTrue(second["metrics"]["cache_hit"], second)
         self.assertEqual(second["metrics"]["expanded_nodes"], 0)
+
+    def test_segments_carry_bound_live_state_and_never_cross_lethal(self):
+        p = self.state["player_state"]
+        p["potions"] = [dict(id="Potion Slot", slot=-1)] * 3
+        p["hand"] = [dict(card_id="Strike_R", cost=1, cost_for_turn=1, times_upgraded=0, uuid=str(i)) for i in range(3)]
+        p["draw_pile"] = []
+        monster = self.state["cur_map_node_state"]["monster_data"][0]["creature"]
+        monster["current_health"] = monster["max_health"] = 18
+        for length in (1, 2, 4):
+            first = self.request(segment_length=length, session_id=str(length), timeout_ms=500)
+            self.assertTrue(first["supported"], first)
+            self.assertEqual(len(first.get("continuations", [])), min(length-1, 1))
+        second = first["continuations"][0]
+        self.assertEqual(second["metrics"]["expanded_nodes"], 0)
+        played = p["hand"].pop(json.loads(first["commands"][0]["command"])["card_index"])
+        p["discard_pile"].append(played)
+        self.state["cards_played_this_turn_backup"].append(played)
+        p["energy_panel_total_energy"] -= 1
+        monster["current_health"] -= 6
+        proof = self.request(operation="fingerprint")
+        self.assertEqual(proof["native_key"], second["required_native_key"])
+        self.assertEqual(proof["projection"], second["commands"][0]["expected_before"])
+        from battle_engine.state import context
+        self.assertEqual(context(self.state), second["commands"][0]["expected_context"])
+        p["hand"][0]["uuid"] = "replacement"
+        self.assertNotEqual(context(self.state), second["commands"][0]["expected_context"])
+
+    def test_boundary_dedup_is_opt_in(self):
+        reference = self.request()
+        candidate = self.request(dedup_mode="new_turn")
+        self.assertEqual(reference["metrics"]["dedup_mode"], "default")
+        self.assertEqual(candidate["metrics"]["dedup_mode"], "new_turn")
+        self.assertGreater(reference["metrics"]["dedup_checks"], candidate["metrics"]["dedup_checks"])
+        self.assertFalse(self.request(segment_length=3)["supported"])
 
     def test_search_targets_live_monster_with_inactive_slots(self):
         for inactive in ("dead", "escaped", "is_escaping"):

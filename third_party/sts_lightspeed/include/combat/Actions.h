@@ -134,14 +134,14 @@ namespace sts {
         static Action SpawnTorchHeads();
         static Action SpireShieldDebuff(); // only called if player has orb slots
 
-        static Action ExhaustRandomCardInHand(int count);
+        static Action ExhaustRandomCardInHand(int count, bool rollWithOneCard = false);
         static Action MadnessAction();
         static Action RandomizeHandCost();
         static Action UpgradeRandomCardAction(); // Warped Tongs Relic
 
         static Action CodexAction(); // Nilrys Codex onPlayerEndTurn
         static Action ExhaustMany(int limit);
-        static Action GambleAction();
+        static Action GambleAction(bool potion=false);
         static Action ToolboxAction();
         static Action FiendFireAction(int targetIdx, int calculatedDamage); // Fiend Fire Card
         static Action SwordBoomerangAction(int baseDamage); // Sword Boomerang
@@ -181,7 +181,7 @@ namespace sts {
 
         static Action SuicideAction(int monsterIdx, bool triggerRelics);
 
-        static Action PoisonLoseHpAction();
+        static Action PoisonLoseHpAction(int target, int amount);
         static Action RemovePlayerDebuffs(); // Orange Pellets Relic
 
         static Action DualityAction(); // Duality Relic

@@ -10,10 +10,11 @@ int main(int argc,char **argv) {
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
 #endif
     bool serve=argc==2 && std::string(argv[1])=="--serve";
-    auto process=[](const bridge::Json &request) {
+    bridge::Session session;
+    auto process=[&](const bridge::Json &request) {
         bridge::Json response;
         auto *output=std::cout.rdbuf();std::cout.rdbuf(std::cerr.rdbuf());
-        try {response=bridge::search(request);}
+        try {response=session.search(request);}
         catch(const std::exception &e) {response={{"supported",false},{"reason",e.what()}};}
         std::cout.rdbuf(output);
         if(request.contains("request_id"))response["request_id"]=request["request_id"];

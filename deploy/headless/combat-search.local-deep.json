@@ -1,0 +1,6 @@
+{
+  "search_policy": "legacy",
+  "search_profile": "DEEP",
+  "max_expansions": 15000,
+  "timeout_ms": 0
+}

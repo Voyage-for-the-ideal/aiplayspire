@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 import unittest
 
-from battle_engine.server import execute_worker
+from battle_engine.native_api import execute_worker
 from battle_engine.state import load
 
 ROOT = Path(__file__).resolve().parents[1]

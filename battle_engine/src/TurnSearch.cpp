@@ -175,12 +175,13 @@ int priority(const BattleContext &b,const SA &a) {
     // Mechanism priority dominates the stable legacy fallback order.
     return p*1000-sts::search::Expert::getPlayOrdering(c.id);
 }
-Json stateKey(const BattleContext &b) {
+Json stateKey(const BattleContext &b,const std::array<int,5> *sourceOrder) {
     if(b.inputState!=InputState::PLAYER_NORMAL || b.actionQueue.size || b.cardQueue.size)return nullptr;
     const auto &p=b.player;
+    const bool logical=b.headlessRngKnown && sourceOrder;
     Json out=Json::array();
     out.push_back(Json::array({b.seed,b.floorNum,int(b.encounter),b.ascension,int(b.outcome),b.turn,
-        b.isBattleOver,b.endTurnQueued,b.turnHasEnded,b.skipMonsterTurn,b.monsterTurnIdx,b.potionCount,b.potionCapacity,b.powersPlayedThisCombat,b.mantraGained,int(b.lastCardType),b.miscBits.to_ullong()}));
+        b.isBattleOver,b.endTurnQueued,b.turnHasEnded,b.skipMonsterTurn,6,b.potionCount,b.potionCapacity,b.powersPlayedThisCombat,b.mantraGained,int(b.lastCardType),b.miscBits.to_ullong()}));
     out.push_back(Json::array({b.masterDeckKnown,b.cardRngKnown,b.cardRng.counter,b.cardRng.seed0,b.cardRng.seed1}));
     out.push_back(cardKey(b.nightmareCard));
     Json master=Json::array();for(const auto &card:b.masterDeck)master.push_back(cardKey(card));out.push_back(master);
@@ -188,20 +189,60 @@ Json stateKey(const BattleContext &b) {
         p.block,p.artifact,p.dexterity,p.focus,p.strength,p.justAppliedBits,p.statusBits0,p.statusBits1,
         p.relicBits0,p.relicBits1,p.relicBits2,p.happyFlowerCounter,p.incenseBurnerCounter,p.inkBottleCounter,p.inserterCounter,p.nunchakuCounter,p.penNibCounter,p.sundialCounter,
         p.haveUsedNecronomiconThisTurn,p.combustHpLoss,p.devaFormEnergyPerTurn,p.echoFormCardsDoubled,p.panacheCounter,p.bomb1,p.bomb2,p.bomb3,
-        p.cardsPlayedThisTurn,p.attacksPlayedThisTurn,p.skillsPlayedThisTurn,p.orangePelletsCardTypesPlayed.to_ulong(),p.cardsDiscardedThisTurn,p.lastAttackUnblockedDamage,p.timesDamagedThisCombat,p.lastDamageTaken,p.lightningChanneled,p.frostChanneled,p.hasStatus<PS::SURROUNDED>()?p.lastTargetedMonster:0}));
-    for(const auto &[k,v]:p.statusMap)out.push_back(Json::array({int(k),v}));
+        p.cardsPlayedThisTurn,p.attacksPlayedThisTurn,p.skillsPlayedThisTurn,p.orangePelletsCardTypesPlayed.to_ulong(),p.cardsDiscardedThisTurn,b.headlessRngKnown?p.omamoriCounter:0,p.timesDamagedThisCombat,p.lastDamageTaken,p.lightningChanneled,p.frostChanneled,p.hasStatus<PS::SURROUNDED>()?p.lastTargetedMonster:0}));
+    if(logical && p.hasStatus<PS::SURROUNDED>() && p.lastTargetedMonster>=0 && p.lastTargetedMonster<5)out.back().back()=sourceOrder->at(p.lastTargetedMonster);
+    // These powers are represented solely by status bits in Player::buff().
+    // The Java importer also writes their sentinel -1 amount into statusMap.
+    for(const auto &[k,v]:p.statusMap) {
+        if(b.headlessRngKnown && !p.hasStatusRuntime(k))continue;
+        if(b.headlessRngKnown && (k==PS::BARRICADE || k==PS::CORRUPTION || k==PS::CONFUSED || k==PS::HEX || k==PS::PEN_NIB || k==PS::SURROUNDED || k==PS::ELECTRO || k==PS::NO_DRAW || k==PS::WRATH_NEXT_TURN))continue;
+        out.push_back(Json::array({int(k),v}));
+    }
     for(int i=0;i<p.orbSlots;++i)out.push_back(Json::array({int(p.orbTypes[i]),p.orbData[i]}));
     for(const auto &r:{b.aiRng,b.cardRandomRng,b.miscRng,b.monsterHpRng,b.potionRng,b.shuffleRng})out.push_back(Json::array({r.counter,r.seed0,r.seed1}));
+    if(b.headlessRngKnown)out.push_back(Json::array({"headless",b.headlessRng.counter,b.headlessRng.seed0,b.headlessRng.seed1}));
     for(int i=0;i<b.potionCapacity;++i)out.push_back(int(b.potions[i]));
+    const auto rosterOffset=out.size();
     out.push_back(Json::array({b.monsters.monsterCount,b.monsters.monstersAlive,b.monsters.extraRollMoveOnTurn.to_ulong(),b.monsters.skipTurn.to_ulong()}));
-    for(int i=0;i<b.monsters.monsterCount;++i) {const auto &m=b.monsters.arr[i];out.push_back(Json::array({int(m.id),m.idx,m.curHp,m.maxHp,m.block,m.isEscapingB,m.halfDead,m.escapeNext,int(m.moveHistory[0]),int(m.moveHistory[1]),m.statusBits,m.artifact,m.blockReturn,m.choked,m.corpseExplosion,m.lockOn,m.mark,m.metallicize,m.platedArmor,m.poison,m.regen,m.shackled,m.strength,m.vulnerable,m.weak,m.uniquePower0,m.uniquePower1,m.miscInfo}));}
+    std::vector<std::pair<int,Json>> ordered;
+    for(int i=0;i<b.monsters.monsterCount;++i) {
+        const auto &m=b.monsters.arr[i];
+        if(logical && (m.id==MonsterId::INVALID || (m.curHp<=0 && !m.halfDead) || m.isEscapingB))continue;
+        const int unique0=(m.id==MonsterId::GREEN_LOUSE || m.id==MonsterId::RED_LOUSE) && !m.hasStatus<MS::CURL_UP>()?0:m.uniquePower0;
+        Json monster=Json::array({int(m.id),m.idx,m.curHp,m.maxHp,m.block,m.isEscapingB,m.halfDead,m.escapeNext,int(m.moveHistory[0]),int(m.moveHistory[1]),m.statusBits,m.artifact,m.blockReturn,m.choked,m.corpseExplosion,m.lockOn,m.mark,m.metallicize,m.platedArmor,m.poison,m.regen,m.shackled,m.strength,m.vulnerable,m.weak,unique0,m.uniquePower1,m.miscInfo});
+        // These two bosses branch only on the current move; original queued
+        // SetMove/ChangeState can duplicate it in history without a new turn.
+        if(b.headlessRngKnown && (m.id==MonsterId::SLIME_BOSS || m.id==MonsterId::THE_GUARDIAN))monster[9]=0;
+        if(b.headlessRngKnown && (m.moveHistory[0]==MMID::ACID_SLIME_L_SPLIT || m.moveHistory[0]==MMID::SPIKE_SLIME_L_SPLIT))monster[9]=0;
+        if(b.headlessRngKnown && m.id==MonsterId::HEXAGHOST && m.moveHistory[0]!=MMID::HEXAGHOST_DIVIDER)monster[27]=0;
+        if(b.headlessRngKnown && m.id==MonsterId::HEXAGHOST)monster[9]=0; // Its cycle is stored in active_orbs, not history.
+        // Java's death animation clears powers asynchronously. Dead, non-reviving
+        // slots are unselectable; all on-death actions have already drained here.
+        // Half-dead Darklings/Awakened One retain their complete power state.
+        if(b.headlessRngKnown && m.curHp<=0 && !m.halfDead) for(int field=10;field<=26;++field)monster[field]=0;
+        if(logical) {
+            const int external=sourceOrder->at(i);
+            if(external<0)throw Unsupported("unmapped_live_monster_in_parity_key");
+            monster[1]=external;
+            monster.push_back(b.monsters.extraRollMoveOnTurn.test(i));monster.push_back(b.monsters.skipTurn.test(i));
+            ordered.emplace_back(external,std::move(monster));
+        } else out.push_back(std::move(monster));
+    }
+    if(logical) {
+        // Compare full live actors by real source target slot. Dead summoning
+        // parents live in MonsterRoster's checked public ledger, not recyclable
+        // C++ combat storage. Internal search dedup still uses physical slots.
+        out[rosterOffset]=Json::array({"logical-source-targets-v1",ordered.size(),b.monsters.monstersAlive});
+        std::sort(ordered.begin(),ordered.end(),[](const auto &a,const auto &b){return a.first<b.first;});
+        for(auto &entry:ordered)out.push_back(std::move(entry.second));
+    }
     Json hand=Json::array();for(int i=0;i<b.cards.cardsInHand;++i)hand.push_back(cardKey(b.cards.hand[i]));out.push_back(hand);
     for(const auto *pile:{&b.cards.drawPile,&b.cards.discardPile,&b.cards.exhaustPile}) {Json a=Json::array();for(const auto &c:*pile)a.push_back(cardKey(c));out.push_back(a);}
     for(const auto &c:b.cards.stasisCards)out.push_back(cardKey(c));
     out.push_back(Json::array({b.cards.handNormalityCount,b.cards.handPainCount,b.cards.strikeCount,b.cards.handBloodCardCount,b.cards.drawPileBloodCardCount,b.cards.discardPileBloodCardCount}));
     return out;
 }
-TurnSearchResult turnSearch(const BattleContext &root,int cap,long timeout,const std::string &profile) {
+TurnSearchResult turnSearch(const BattleContext &root,int cap,long timeout,const std::string &profile,bool newTurnDedup) {
     sts::search::ActionEnumerationOptions options;options.allowPotions=true;options.allowRootPotions=true;
     std::vector<SA> rootActions;sts::search::enumerateActions(root,options,true,rootActions);
     if(rootActions.size()==1) {
@@ -215,7 +256,8 @@ TurnSearchResult turnSearch(const BattleContext &root,int cap,long timeout,const
     Ptr best=nullptr,win=nullptr,death=nullptr,progress=nullptr;
     std::unordered_set<std::string> seen;TurnSearchResult result;
     auto rootKey=stateKey(root);if(!rootKey.is_null())seen.insert(rootKey.dump());
-    auto deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(timeout);
+    auto deadline=timeout==0?std::chrono::steady_clock::time_point::max():
+        std::chrono::steady_clock::now()+std::chrono::milliseconds(timeout);
     while(!turns.empty() && result.expansions<cap && std::chrono::steady_clock::now()<deadline) {
         auto turn=turns.top();turns.pop();
         std::vector<Ptr> stack{turn};
@@ -241,8 +283,14 @@ TurnSearchResult turnSearch(const BattleContext &root,int cap,long timeout,const
                 catch(const ExecutionTimeout &) {break;}
                 ++result.expansions;
                 if(child->state.undefinedBehaviorEvoked)throw Unsupported("engine_undefined_behavior");
-                auto key=stateKey(child->state);
-                if(!key.is_null() && !seen.insert(key.dump()).second){++result.duplicates;continue;}
+                if(!newTurnDedup || child->state.turn>n->state.turn) {
+                    const auto begin=std::chrono::steady_clock::now();
+                    auto key=stateKey(child->state);
+                    const bool duplicate=!key.is_null() && !seen.insert(key.dump()).second;
+                    ++result.dedupChecks;
+                    result.dedupNanos+=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-begin).count();
+                    if(duplicate){++result.duplicates;continue;}
+                }
                 child->depth=child->state.turn>n->state.turn?0:n->depth+1;child->order=++order;
                 child->score=evaluate(root,child->state).total();stack.push_back(child);
                 if(child->state.outcome==Outcome::PLAYER_VICTORY && child->state.player.curHp>0) {if(!win || child->score>win->score)win=child;}

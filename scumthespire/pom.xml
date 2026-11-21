@@ -5,10 +5,10 @@
 
     <groupId>autoplay</groupId>
     <artifactId>BattleAiMod</artifactId>
-    <version>1.10.0</version>
+    <version>2.0.2</version>
     <packaging>jar</packaging>
     <name>Battle Ai Mod</name>
-    <description>Server/client integration for AI-controlled combat with a tactical battle evaluator: threat-aware target selection, non-linear survival risk, lethal/kill breakpoints, and interpretable per-component turn scoring, alongside immutable per-path replay snapshots, restart-safe replay cancellation, automatic battle startup, per-run state reset on run end for automatic consecutive runs, an all-lose death-path fallback that plays out the longest-surviving death line when no winning path exists, explicit empty-screen command diagnostics, a Defect (robot) synthetic server bootstrap, and a server-output log tee so server-side search crashes are diagnosable, a connection-accept loop so a dropped or failing request cannot silently kill the only networking thread, per-request crash isolation that logs the stack trace and answers the client with an explicit ERROR instead of stalling mid-battle, and a capped delayed auto-resend that replans from the live battle state after the client loses the search server or receives that ERROR. Adds four-character mechanism-aware evaluation and deterministic contextual ordering for plays, discard, exhaust, Scry, retrieval, and retention; shares stance, debuff, Intangible and Buffer-aware incoming damage between threat and survival. Adds an optional local native-search gateway with direct endpoint health checks, client port configuration, pre-execution public-state guards, single-action replanning, and opt-in real-engine replay projections. Persists external-backend selection in mod options and adds opt-in seeded-run fixtures and client wall-clock budgets for paired full-run comparisons. Uses native FAST/BALANCED/DEEP budgets (250/2000/10000 ms), preserving legacy Java baseline budgets and including stance in execution guards. Adds exact unlocked CardLibrary attack pools for native Foreign Influence and independent cardRng replay. Guards typed hand/grid/card-reward continuations before executing native selection commands, admits real Discovery card-reward selections (Skill/Attack/Power/Colorless Potion and the Discovery card) into native search, and keeps requesting native decisions while a combat selection screen is open instead of waiting for a manual click.</description>
+    <description>In-process native combat search for Windows x64. Start Steve runs the shared C++ simulator through JNI and executes guarded commands in the live game. No search server or external gateway.</description>
 
     <!-- 1.6 adds optional loopback native-backend readiness, guarded commands, and replay projections. -->
     <properties>
@@ -54,13 +54,6 @@
             <version>30.1.1-jre</version>
         </dependency>
         <dependency>
-            <groupId>autoplay</groupId>
-            <artifactId>CommunicationMod</artifactId>
-            <version>1.1.0</version>
-            <scope>system</scope>
-            <systemPath>${basedir}/../_ModTheSpire/mods/CommunicationMod.jar</systemPath>
-        </dependency>
-        <dependency>
             <groupId>basemod</groupId>
             <artifactId>BaseMod-root</artifactId>
             <version>${BaseMod.version}</version>
@@ -100,6 +93,16 @@
                             <filters>
                                 <filter>
                                     <artifact>autoplay:BattleAiMod</artifact>
+                                    <excludes>
+                                        <exclude>battleaimod/battleai/BattleAiController*</exclude>
+                                        <exclude>battleaimod/battleai/TurnNode*</exclude>
+                                        <exclude>battleaimod/battleai/StateNode*</exclude>
+                                        <exclude>battleaimod/battleai/playorder/**</exclude>
+                                        <exclude>battleaimod/evaluation/**</exclude>
+                                        <exclude>battleaimod/strategy/**</exclude>
+                                        <exclude>battleaimod/ValueFunctions*</exclude>
+                                        <exclude>battleaimod/patches/FightPredictorCompatibility*</exclude>
+                                    </excludes>
                                 </filter>
                             </filters>
                         </configuration>
@@ -112,6 +115,14 @@
                 <artifactId>maven-antrun-plugin</artifactId>
                 <version>1.8</version>
                 <executions>
+                    <execution>
+                        <id>require-native-library</id><phase>prepare-package</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration><target>
+                            <available file="${project.build.outputDirectory}/native/windows-x86_64/battle_jni.dll" property="native.present"/>
+                            <fail unless="native.present" message="Build battle_engine/build.ps1 before packaging BattleAiMod."/>
+                        </target></configuration>
+                    </execution>
                     <execution>
                         <phase>package</phase>
                         <configuration>
@@ -128,6 +139,12 @@
         </plugins>
 
         <resources>
+            <resource>
+                <directory>${project.basedir}/../battle_engine/bin</directory>
+                <targetPath>native/windows-x86_64</targetPath>
+                <includes><include>battle_jni.dll</include></includes>
+                <filtering>false</filtering>
+            </resource>
             <resource>
                 <directory>src/main/resources</directory>
             </resource>

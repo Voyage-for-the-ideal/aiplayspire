@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import socket
 import sys
@@ -11,7 +12,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from battle_engine import protocol
-from battle_engine.server import Gateway, ROOT, execute_worker, validate_response
+from battle_engine.native_api import ROOT, execute_worker, validate_response
 from battle_engine.state import load, projection
 
 
@@ -51,61 +52,19 @@ def transition_matches(result, actual, state_file):
     return True  # Keep old workers' v1 replay contract readable.
 
 
-def boundary_fallback(args, source, result, destination):
-    """Verify a deliberate native -> live selection -> Java -> real replay handoff.
-
-    This is a hybrid route check, explicitly distinct from native transition equivalence.
-    """
-    replay(args.oracle_port, source, result["commands"], destination)
-    selected = load(destination)
-    if selected["screen_name"] not in ("HAND_SELECT", "GRID", "CARD_REWARD"):
-        raise ValueError("unvalidated boundary was not an observable selection screen")
-    pools = card_pools(args.oracle_port, destination)
-    options = types.SimpleNamespace(worker=args.worker.resolve(), fallback_port=args.oracle_port,
-                                    no_fallback=False, max_time_ms=args.timeout_ms)
-    final = None
-    with Gateway(("127.0.0.1", 0), options) as gateway:
-        thread = threading.Thread(target=gateway.serve_forever, daemon=True); thread.start()
-        try:
-            with socket.create_connection(gateway.server_address, timeout=5) as sock:
-                sock.settimeout(30)
-                protocol.send(sock, json.dumps(dict(fileName=str(destination.resolve()),
-                    client_cwd=str(destination.parent.resolve()), combat_card_pools=pools,
-                    command_file=str(destination.with_name("boundary_commands.json").resolve()),
-                    max_expansions=64, num_turns=64, timeout_ms=1000, search_profile="FAST")))
-                while True:
-                    text = protocol.receive(sock)
-                    if text == "DONE": break
-                    message = json.loads(text)
-                    if message.get("type") == "ERROR": raise RuntimeError(str(message))
-                    if message.get("type") == "COMMAND_LIST": final = message
-        finally:
-            gateway.shutdown(); thread.join()
-    if final is None:
-        raise ValueError("selection fallback did not produce COMMAND_LIST")
-    if "commands" not in final:
-        final = json.loads(Path(final["command_path"]).read_text(encoding="utf-8"))
-    kinds = [json.loads(c["command"])["type"] for c in final["commands"] if c is not None]
-    if not any(k in ("HAND_SELECT", "GRID_SELECT", "CARD_REWARD_SELECT") for k in kinds):
-        raise ValueError("selection fallback produced no selection command")
-    replay(args.oracle_port, destination, final["commands"], destination.with_name("after_java.json"))
-    return dict(screen=selected["screen_name"], commands=kinds, java_replay_valid=True)
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path)
-    parser.add_argument("--worker", type=Path, default=ROOT / "bin/battle-engine-worker.exe")
+    parser.add_argument("--worker", type=Path, default=Path(os.environ.get("BATTLE_ENGINE_WORKER",
+                        str(ROOT / "bin" / ("battle-engine-worker.exe" if os.name == "nt" else "battle-engine-worker")))))
     parser.add_argument("--output", type=Path, default=ROOT / "out/acceptance-report.json")
     parser.add_argument("--protocol-only", action="store_true")
     parser.add_argument("--oracle-port", type=int)
     parser.add_argument("--simulations", type=int, default=1000)
     parser.add_argument("--timeout-ms", type=int, default=200)
     parser.add_argument("--steps", type=int, default=1, help="Real-engine actions to compare per supported snapshot")
-    parser.add_argument("--allow-boundary-fallback", action="store_true",
-                        help="Verify actual Java selection handoff instead of requiring native-only continuation")
     args = parser.parse_args()
-    if args.steps < 1 or ((args.steps > 1 or args.allow_boundary_fallback) and not args.oracle_port):
+    if args.steps < 1 or (args.steps > 1 and not args.oracle_port):
         parser.error("steps must be positive; multiple steps require --oracle-port")
     if args.protocol_only:
         suite = unittest.defaultTestLoader.loadTestsFromName("battle_engine.tests.test_backend.ProtocolTests")
@@ -153,14 +112,8 @@ def main():
                     row["reason"] = "unvalidated_boundary"
                 if args.oracle_port:
                     if "expected_after" not in result:
-                        if args.allow_boundary_fallback:
-                            boundary_file = args.output.resolve().parent / "replay_states" / str(case_index) / "boundary_1.json"
-                            row["boundary_fallback"] = boundary_fallback(args, source, result, boundary_file)
-                            row["oracle"] = "BOUNDARY_FALLBACK_PASS"
-                            row["passed"] = False
-                        else:
-                            row["oracle"] = "SKIP: terminal/selection boundary"
-                            row["passed"] = False
+                        row["oracle"] = "SKIP: unverified boundary"
+                        row["passed"] = False
                     else:
                         next_file = args.output.resolve().parent / "replay_states" / str(case_index) / "1.json" if args.steps > 1 or "expected_screen" in result else None
                         actual = replay(args.oracle_port, source, result["commands"], next_file)
@@ -181,12 +134,6 @@ def main():
                                 raise ValueError(f"step {step + 1} needs Java fallback: {result['reason']}")
                             validate_response(result)
                             if "expected_after" not in result:
-                                if args.allow_boundary_fallback:
-                                    boundary_file = args.output.resolve().parent / "replay_states" / str(case_index) / f"boundary_{step + 1}.json"
-                                    row["boundary_fallback"] = boundary_fallback(args, source, result, boundary_file)
-                                    row["oracle"] = "BOUNDARY_FALLBACK_PASS"
-                                    row["passed"] = False
-                                    break
                                 raise ValueError(f"step {step + 1} reached unvalidated terminal/selection boundary")
                             next_file = args.output.resolve().parent / "replay_states" / str(case_index) / f"{step + 1}.json"
                             actual = replay(args.oracle_port, source, result["commands"], next_file)

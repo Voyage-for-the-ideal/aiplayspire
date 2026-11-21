@@ -10,11 +10,11 @@ from uuid import UUID
 
 from battle_engine.profiles import benchmark_budget, deployment_budget
 from battle_engine.tools.balanced_ab import (
-    ROLES, ROOMS, execute_case, replay_snapshot_key, replay_snapshots_match, summarize, terminal,
+    ROLES, ROOMS, replay_snapshot_key, replay_snapshots_match, summarize, terminal,
 )
 from battle_engine.tools.a10_corpus import freeze
 from battle_engine.tools.oracle import freeze_oracle_preferences
-from battle_engine.server import execute_worker
+from battle_engine.native_api import execute_worker
 from battle_engine.tests import test_character_strategy as fixtures
 from battle_engine.worker import Worker
 
@@ -50,31 +50,6 @@ class CandidatePolicyTests(unittest.TestCase):
             self.assertEqual(isolated["SHUFFLE_TIP"],"true")
             self.assertEqual(isolated["NO_FTUE"],"true")
             self.assertEqual(isolated["NEOW_SKIP"],"true")
-
-    def test_java_replay_uses_same_directory_as_relative_guard_paths(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            base=Path(tmp)
-            source=base/"fixture.json"
-            state=dict(player_state=dict(creature=dict(current_health=10,max_health=10)),
-                       cur_map_node_state=dict(is_battle_over=False, phase_name="COMBAT",monster_data=[]))
-            source.write_text(json.dumps(state))
-            reply=dict(commands=[{"command":'{"type":"END"}',"state":"savestates/plan/1.txt"}],
-                       metrics=dict(expanded_nodes=1,elapsed_ms=3),final_state_key="end")
-            def fake_search(port,initial,directory,cap,timeout):
-                self.assertEqual(initial,source)
-                (directory/"start.json").write_bytes(initial.read_bytes())
-                return reply
-            def fake_replay(port,initial,commands,after):
-                self.assertEqual(initial,after.with_name("start.json"))
-                self.assertEqual(commands,reply["commands"])
-                state["cur_map_node_state"]["is_battle_over"]=True
-                after.write_text(json.dumps(state))
-                return {"final_state_key":"end"}
-            with patch("battle_engine.tools.balanced_ab.request_java",side_effect=fake_search), \
-                 patch("battle_engine.tools.balanced_ab.replay",side_effect=fake_replay):
-                result=execute_case(15129,Mock(),dict(path=source,room="MONSTER"),
-                                    "deployment","java",base/"run")
-            self.assertEqual(result["outcome"],"win")
 
     def test_manifest_keeps_seed_groups_disjoint(self):
         groups=defaultdict(dict)

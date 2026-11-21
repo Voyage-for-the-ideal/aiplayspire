@@ -14,7 +14,7 @@ namespace sts {
         BattleConverter();
         ~BattleConverter();
 
-        BattleContext convertFromJson(const nlohmann::json &json, int *monsterIdxMap);
+        BattleContext convertFromJson(const nlohmann::json &json, int *monsterIdxMap, bool alreadyAtBoundary = false);
     };
 
 }

@@ -195,7 +195,7 @@ bool sts::useCharacterCard(BattleContext &bc) {
     case CardId::MENTAL_FORTRESS:bc.addToBot(Actions::BuffPlayer<PS::MENTAL_FORTRESS>(up?6:4));break;
     case CardId::RUSHDOWN:bc.addToBot(Actions::BuffPlayer<PS::RUSHDOWN>(2));break;
     case CardId::DEVOTION:bc.addToBot(Actions::BuffPlayer<PS::DEVOTION>(up?3:2));break;
-    case CardId::MASTER_REALITY:bc.addToBot(Actions::BuffPlayer<PS::MASTER_REALITY>());break;
+    case CardId::MASTER_REALITY:bc.addToBot(Actions::BuffPlayer<PS::MASTER_REALITY>(bc.headlessRngKnown?-1:1));break;
     case CardId::ESTABLISHMENT:bc.addToBot(Actions::BuffPlayer<PS::ESTABLISHMENT>(up?2:1));break;
     case CardId::STUDY:bc.addToBot(Actions::BuffPlayer<PS::STUDY>(1));break;
     case CardId::WREATH_OF_FLAME:bc.addToBot(Actions::BuffPlayer<PS::VIGOR>(up?8:5));break;
@@ -211,7 +211,7 @@ bool sts::useCharacterCard(BattleContext &bc) {
             b.addToTop(Actions::DrawCards(n));}});break;
     case CardId::ALL_OUT_ATTACK:
         allHit(up?14:10);
-        bc.addToBot({[](BattleContext &b){if(b.cards.cardsInHand>0)Actions::DiscardCardAtIdx(b.cards.getRandomCardIdxInHand(b.cardRandomRng)).actFunc(b);}});break;
+        bc.addToBot({[](BattleContext &b){if(b.cards.cardsInHand>0)Actions::DiscardCardAtIdx(b.cards.cardsInHand==1?0:b.cards.getRandomCardIdxInHand(b.cardRandomRng)).actFunc(b);}});break;
     case CardId::UNLOAD:
         hit(up?18:14);bc.addToBot({[](BattleContext &b){for(int i=b.cards.cardsInHand-1;i>=0;--i)
             if(b.cards.hand[i].getType()!=CardType::ATTACK)Actions::DiscardCardAtIdx(i).actFunc(b);}});break;
@@ -283,7 +283,12 @@ bool sts::useCharacterCard(BattleContext &bc) {
         if(!bc.curCardQueueItem.ignoreEnergyTotal && !bc.curCardQueueItem.freeToPlay && !c.freeToPlayOnce)bc.player.energy=0;
         break;
     }
-    case CardId::CONCLUDE:allHit(up?16:12);bc.addToBot({[](BattleContext &b){if(!b.endTurnQueued)b.endTurn();}});break;
+    case CardId::CONCLUDE:allHit(up?16:12);bc.addToBot({[](BattleContext &b){
+        if(!b.endTurnQueued) {
+            if(b.headlessRngKnown)b.callEndTurnEarlySequence();
+            else b.endTurn();
+        }
+    }});break;
     case CardId::CRUSH_JOINTS:hit(up?10:8);if(bc.lastCardType==CardType::SKILL)bc.addToBot(Actions::DebuffEnemy<MS::VULNERABLE>(t,up?2:1,false));break;
     case CardId::FASTING:
         bc.addToBot(Actions::BuffPlayer<PS::STRENGTH>(up?4:3));bc.addToBot(Actions::BuffPlayer<PS::DEXTERITY>(up?4:3));

@@ -18,6 +18,17 @@ import static org.junit.Assume.assumeTrue;
 public class NativeBackendContractTest {
     private static final Path ROOT = Paths.get("..").toAbsolutePath().normalize();
 
+    @Test public void unknownSelectorStopsBeforeDispatch() throws Exception {
+        JsonObject reply = new JsonObject();
+        try { AiClient.requireVerifiableOutcome(reply); fail("dispatched without a postcondition"); }
+        catch (IOException expected) { assertTrue(expected.getMessage().contains("not executed")); }
+        reply.add("expected_after", new JsonObject());
+        reply.addProperty("expected_screen","GRID");
+        AiClient.requireVerifiableOutcome(reply);
+        reply = new JsonObject(); reply.addProperty("terminal_prediction","victory");
+        AiClient.requireVerifiableOutcome(reply);
+    }
+
     private JsonObject fixture() throws IOException {
         byte[] bytes = Files.readAllBytes(ROOT.resolve("battle_engine/tests/fixtures/ironclad.json"));
         return new JsonParser().parse(new String(bytes, StandardCharsets.UTF_8)).getAsJsonObject();
@@ -139,25 +150,32 @@ public class NativeBackendContractTest {
         } finally { LudicrousSpeedMod.mustRestart = false; }
     }
 
-    @Test public void endpointDefaultsRemainCompatible() {
-        String oldBackend = System.getProperty("battleai.backend"), oldPort = System.getProperty("battleai.clientPort");
-        try {
-            System.clearProperty("battleai.backend"); System.clearProperty("battleai.clientPort");
-            assertFalse(BackendEndpoint.external()); assertEquals(5125, BackendEndpoint.port());
-            System.setProperty("battleai.backend", "external"); System.setProperty("battleai.clientPort", "15125");
-            assertTrue(BackendEndpoint.external()); assertEquals(15125, BackendEndpoint.port());
-        } finally {
-            if (oldBackend == null) System.clearProperty("battleai.backend"); else System.setProperty("battleai.backend", oldBackend);
-            if (oldPort == null) System.clearProperty("battleai.clientPort"); else System.setProperty("battleai.clientPort", oldPort);
+    @Test public void embeddedJniAndProcessAgreeAndSessionsCloseIndependently() throws Exception {
+        assumeTrue(System.getProperty("os.name").startsWith("Windows"));
+        JsonObject state = fixture(), request = new JsonObject();
+        request.add("snapshot", state);
+        request.addProperty("operation", "fingerprint");
+        try (NativeEngine first = new NativeEngine(); NativeEngine second = new NativeEngine()) {
+            assertEquals(worker(state, "fingerprint"), first.search(request));
+            assertEquals(first.search(request), second.search(request));
+            first.close();
+            assertThrows(IllegalStateException.class, () -> first.search(request));
+            assertThrows(RuntimeException.class, () -> second.search(new JsonObject()));
+            request.addProperty("operation", "search");
+            request.addProperty("max_expansions", 1);
+            request.addProperty("timeout_ms", 2000);
+            JsonObject result = second.search(request);
+            assertTrue(result.get("supported").getAsBoolean());
+            assertTrue(result.getAsJsonArray("commands").get(0).getAsJsonObject().has("expected_context"));
         }
     }
 
-    @Test public void nativeProfilesPreserveJavaBenchmarkBudgets() {
+    @Test public void nativeProfilesHaveIndependentJavaBudgets() {
         assertEquals(250L, battleaimod.search.SearchProfile.FAST.nativeTimeoutMillis());
         assertEquals(2000L, battleaimod.search.SearchProfile.BALANCED.nativeTimeoutMillis());
         assertEquals(10000L, battleaimod.search.SearchProfile.DEEP.nativeTimeoutMillis());
         assertEquals(10000L, battleaimod.search.SearchProfile.FAST.timeoutMillis());
-        assertEquals(30000L, battleaimod.search.SearchProfile.BALANCED.timeoutMillis());
+        assertEquals(90000L, battleaimod.search.SearchProfile.BALANCED.timeoutMillis());
         assertEquals(90000L, battleaimod.search.SearchProfile.DEEP.timeoutMillis());
     }
 
