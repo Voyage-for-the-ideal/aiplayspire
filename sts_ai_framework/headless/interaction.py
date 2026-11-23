@@ -521,7 +521,6 @@ class IroncladInteractionBridge:
                 data["can_proceed"] = True
                 if not project_proceed(raw, menu, actions, _spec):
                     actions.append(_spec("proceed", {"type": "proceed"}, "proceed", kind="proceed"))
-        # Combat, new-run, potion use, and unsupported screens have no action binding.
         if data["can_proceed"] and not any(a.api_json == _json({"type": "proceed"}) for a in actions):
             data["can_proceed"] = False
         data["choice_list"] = choices
