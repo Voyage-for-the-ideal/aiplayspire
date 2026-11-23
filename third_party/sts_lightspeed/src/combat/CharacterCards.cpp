@@ -91,7 +91,20 @@ bool sts::useCharacterCard(BattleContext &bc) {
     case CardId::CLOAK_AND_DAGGER:block(6);bc.addToBot(Actions::MakeTempCardInHand(CardId::SHIV,false,up?2:1));break;
     case CardId::BLADE_DANCE:bc.addToBot(Actions::MakeTempCardInHand(CardId::SHIV,false,up?4:3));break;
     case CardId::BLUR:block(up?8:5);bc.addToBot(Actions::BuffPlayer<PS::BLUR>(1));break;
-    case CardId::DODGE_AND_ROLL:block(up?6:4);bc.addToBot(Actions::BuffPlayer<PS::NEXT_TURN_BLOCK>(bc.calculateCardBlock(up?6:4)));break;
+    case CardId::DODGE_AND_ROLL: {
+        block(up?6:4);
+        const int amount=bc.calculateCardBlock(up?6:4);
+        if(bc.headlessRngKnown && amount==0)bc.addToBot({[](BattleContext &b){
+            // ApplyPowerAction creates a new power even at zero block. An
+            // existing Next Turn Block power keeps its current amount.
+            if(!b.player.hasStatus<PS::NEXT_TURN_BLOCK>()) {
+                b.player.setHasStatus<PS::NEXT_TURN_BLOCK>(true);
+                b.player.setStatusValueNoChecks<PS::NEXT_TURN_BLOCK>(0);
+            }
+        }});
+        else bc.addToBot(Actions::BuffPlayer<PS::NEXT_TURN_BLOCK>(amount));
+        break;
+    }
     case CardId::ADRENALINE:bc.addToBot(Actions::GainEnergy(up?2:1));bc.addToBot(Actions::DrawCards(2));break;
     case CardId::BURST:bc.addToBot(Actions::BuffPlayer<PS::BURST>(up?2:1));break;
     case CardId::NOXIOUS_FUMES:bc.addToBot(Actions::BuffPlayer<PS::NOXIOUS_FUMES>(up?3:2));break;
@@ -264,7 +277,8 @@ bool sts::useCharacterCard(BattleContext &bc) {
     case CardId::CHOKE:hit(12);bc.addToBot(Actions::DebuffEnemy<MS::CHOKED>(t,up?5:3,false));break;
     case CardId::DISTRACTION: {
         CardInstance generated(getTrulyRandomCardInCombat(bc.cardRandomRng,bc.player.cc,CardType::SKILL));
-        generated.costForTurn=0;bc.addToBot(Actions::MakeTempCardInHand(generated));break;
+        generated.setCostForTurn(0); // Unplayable and X-cost cards retain their sentinels.
+        bc.addToBot(Actions::MakeTempCardInHand(generated));break;
     }
     case CardId::GLASS_KNIFE:
         hit(std::max(0,(up?12:8)+c.specialData));hit(std::max(0,(up?12:8)+c.specialData));

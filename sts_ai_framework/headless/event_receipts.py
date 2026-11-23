@@ -866,6 +866,37 @@ def colosseum_slavers_return(a,b,predicted,played=None):
     return expected==actual
 
 
+def _skull_blocked_potion(left,right,a,b):
+    if not (_room_context(a,b,'KnowingSkull') and a['phase']==b['phase']=='EVENT'
+            and a['roomPhase']==b['roomPhase']=='EVENT' and right.event is not None
+            and (right.event.id,right.event.class_name,right.event.phase)==('Knowing Skull','KnowingSkull','ASK')
+            and _controls(left.event)==_controls(right.event)==[(i,True) for i in range(4)]
+            and left.deck==right.deck and left.relics==right.relics and left.potions==right.potions
+            and not any(a['runMode'].get(k) for k in ('is_daily','is_trial','is_endless'))):
+        return False
+    before,after=(e.choices[0] for e in (left.event,right.event))
+    if not all(len(x.outcomes)==1 and x.outcomes[0].probability==1 for x in (before,after)):
+        return False
+    old,new=before.outcomes[0].effects,after.outcomes[0].effects
+    if (len(old)!=2 or len(new)!=2 or (old[0].type,old[1].type)!=('lose_hp','random_potion')
+            or type(old[0].amount) is not int or old[0].amount<=0
+            or new[0]!=old[0].model_copy(update={'amount':old[0].amount+1}) or old[1]!=new[1]
+            or left.event.choices[1:]!=right.event.choices[1:]):
+        return False
+    ids={r.id for r in left.relics}
+    loss=max(0,old[0].amount-int('TungstenRod' in ids))
+    if left.player.current_hp<=loss:return False
+    streams=_streams(a)
+    if 'Sozu' not in ids:
+        if not left.potions or any(p.is_empty for p in left.potions):return False
+        # PotionHelper initializes three class-specific and thirty shared
+        # potions for a standard run. It draws before checking slot capacity.
+        potion=Stream(streams['potion']); potion.bounded(33)
+        streams=dict(streams,potion=potion.state())
+    return _streams(b)==streams and right.player==left.player.model_copy(
+        update={'current_hp':left.player.current_hp-loss})
+
+
 def _skull_fatal_gold(left,right,a,b):
     if not (_room_context(a,b,'KnowingSkull') and a['roomPhase']==b['roomPhase']=='EVENT'
             and a['phase']=='EVENT' and b['phase']=='GAME_OVER' and right.game_over_reason=='defeat'
@@ -1013,6 +1044,41 @@ def _egg_upgrade(state,card_type):
     return int(any(r.id==eggs.get(card_type) for r in state.relics))
 
 
+def _blacksmith_rummage(left,right,a,b):
+    event=right.event
+    if (not _room_context(a,b,'AccursedBlacksmith') or a['phase']!=b['phase'] or b['phase']!='EVENT'
+            or a['roomPhase']!=b['roomPhase'] or b['roomPhase']!='EVENT' or event is None
+            or (event.id,event.class_name,event.phase)!=('Accursed Blacksmith','AccursedBlacksmith','2')
+            or _controls(event)!=[(0,True)] or _streams(a)!=_streams(b) or left.potions!=right.potions
+            or any(a['runMode'].get(k) for k in ('is_daily','is_trial','is_endless'))):
+        return False
+    relics=list(left.relics)
+    ids={r.id for r in relics}
+    if 'WarpedTongs' in ids or not right.relics or (right.relics[-1].id,right.relics[-1].counter)!=('WarpedTongs',-1):
+        return False
+    raw_old,raw_new=a['player']['masterDeck'],b['player']['masterDeck']
+    hp,max_hp,gold=left.player.current_hp,left.player.max_hp,left.player.gold
+    ward=next((i for i,r in enumerate(relics) if r.id=='Omamori' and r.counter>0),None)
+    if ward is not None:
+        relics[ward]=relics[ward].model_copy(update={'counter':relics[ward].counter-1})
+        if raw_old!=raw_new:return False
+    else:
+        if (len(raw_new)!=len(raw_old)+1 or raw_new[:-1]!=raw_old
+                or raw_new[-1]['uuid'] in {c['uuid'] for c in raw_old}
+                or not right.deck or (right.deck[-1].id,right.deck[-1].type,right.deck[-1].upgrades,
+                                      right.deck[-1].is_bottled)!=('Pain','CURSE',0,False)):
+            return False
+        for relic in relics:  # The curse's pickup hooks run in inventory order.
+            if relic.id=='Darkstone Periapt':
+                max_hp+=6
+                if 'Mark of the Bloom' not in ids:hp+=6
+            if relic.id=='CeramicFish' and 'Ectoplasm' not in ids:
+                gold+=9
+                if 'Bloody Idol' in ids and 'Mark of the Bloom' not in ids:hp=min(max_hp,hp+5)
+    return (right.relics[:-1]==relics and right.player==left.player.model_copy(
+        update={'current_hp':hp,'max_hp':max_hp,'gold':gold}))
+
+
 def _mushrooms_eat(left,right,a,b):
     if (not _room_context(a,b,'Mushrooms') or (a['roomPhase'],b['roomPhase'])!=('EVENT','EVENT')
             or b['phase']!='EVENT' or right.event is None or right.event.phase!='1'
@@ -1097,6 +1163,9 @@ def _verify(before,after,button):
     amp=key[:3]==('Vampires','Vampires','0') and (button==0 or button==1 and len(e.choices)==3)
     colosseum=key==('Colosseum','Colosseum','FIGHT',0)
     skull=key==('Knowing Skull','KnowingSkull','ASK',1) and right.screen_type=='GAME_OVER'
+    skull_potion=(key==('Knowing Skull','KnowingSkull','ASK',0) and right.event is not None
+                  and (any(r.id=='Sozu' for r in left.relics)
+                       or left.potions and all(not p.is_empty for p in left.potions)))
     library=key==('The Library','TheLibrary','0',0)
     falling=key[:3]==('Falling','Falling','CHOICE')
     sensory=key[:3]==('SensoryStone','SensoryStone','INTRO_2')
@@ -1104,17 +1173,22 @@ def _verify(before,after,button):
     tomb=key==('Tomb of Lord Red Mask','TombRedMask','INTRO',0) and any(r.id=='Red Mask' for r in left.relics)
     joust=key[:2]==('The Joust','TheJoust') and e.phase in ('EXPLANATION','PRE_JOUST','JOUST')
     mushrooms=key==('Mushrooms','Mushrooms','0',1)
+    blacksmith=key==('Accursed Blacksmith','AccursedBlacksmith','0',1)
     event_fight=key in {('Mysterious Sphere','MysteriousSphere','PRE_COMBAT',0),('MindBloom','MindBloom','INTRO',0)}
-    if not (golden or simple or designer or dead or altar or coin or bandits or house or amp or colosseum or skull or library or falling or sensory or fountain or tomb or joust or mushrooms or event_fight):return None
+    if not (golden or simple or designer or dead or altar or coin or bandits or house or amp or colosseum
+            or skull or skull_potion or library or falling or sensory or fountain or tomb or joust
+            or mushrooms or blacksmith or event_fight):return None
     a,b=json.loads(before.raw_json),json.loads(after.raw_json)
     if golden:return _golden_idol_take(left,right,a,b)
     if mushrooms:return _mushrooms_eat(left,right,a,b)
+    if blacksmith:return _blacksmith_rummage(left,right,a,b)
     if fountain:return _fountain(left,right,a,b)
     if joust:return _joust(left,right,a,b,button)
     if event_fight:return _event_fight(before,after,a,b,e.class_name)
     if amp:return _vampires(left,right,a,b,button)
     if colosseum:return _colosseum_slavers(before,after,a,b)
     if skull:return _skull_fatal_gold(left,right,a,b)
+    if skull_potion:return _skull_blocked_potion(left,right,a,b)
     if library:return _library_open(left,right,a,b)
     if falling:return _falling_choice(left,right,a,b,button)
     if sensory:return _sensory_stone(left,right,a,b,button)

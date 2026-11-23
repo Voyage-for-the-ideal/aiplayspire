@@ -859,6 +859,14 @@ Action Actions::InfernalBladeAction() {
 Action Actions::JackOfAllTradesAction(bool upgraded) {
     return {[=] (BattleContext &bc) {
         const auto c1 = sts::getTrulyRandomColorlessCardInCombat(bc.cardRandomRng);
+        if (bc.headlessRngKnown && upgraded) {
+            // Java queues the cards in generation order. Push in reverse
+            // here so the first draw enters the hand (or fills it) first.
+            const auto c2 = sts::getTrulyRandomColorlessCardInCombat(bc.cardRandomRng);
+            bc.addToTop(Actions::MakeTempCardInHand(c2));
+            bc.addToTop(Actions::MakeTempCardInHand(c1));
+            return;
+        }
         bc.addToTop( Actions::MakeTempCardInHand(c1) );
         if (upgraded) {
             auto c2 = sts::getTrulyRandomColorlessCardInCombat(bc.cardRandomRng);

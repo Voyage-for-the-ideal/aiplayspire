@@ -2756,7 +2756,8 @@ MMID Monster::getMoveForRoll(BattleContext &bc, int &monsterData, const int roll
             }
 
             int myRoll = roll;
-            const bool canSpawn = bc.monsters.monstersAlive < 4;
+            // Vanilla counts up to three other monsters, excluding the summoner.
+            const bool canSpawn = bc.monsters.monstersAlive < (bc.headlessRngKnown ? 5 : 4);
 
             while (true) {
                 if (myRoll < 33) {
@@ -3432,7 +3433,9 @@ MMID Monster::getMoveForRoll(BattleContext &bc, int &monsterData, const int roll
             // 6 sludge
             // 8 tackle
 
-            if (halfDead) {
+            // A roll already queued by the outgoing attack can execute after
+            // lethal retaliation but before the forced REBIRTH SetMoveAction.
+            if (halfDead && !(bc.headlessRngKnown && (monsterData&2))) {
                 return MonsterMoveId::AWAKENED_ONE_REBIRTH;
             }
 
@@ -3746,6 +3749,10 @@ void reptoSummonHelper(const BattleContext &bc, int daggerIdxs[2], int daggerCou
 }
 
 void Monster::reptomancerSummon(BattleContext &bc, int daggerCount) {
+    if(bc.headlessRngKnown) {
+        daggerCount=std::min(daggerCount,5-bc.monsters.monstersAlive);
+        if(daggerCount<=0)return;
+    }
     int daggerIdxs[2];
     reptoSummonHelper(bc, daggerIdxs, daggerCount);
 
