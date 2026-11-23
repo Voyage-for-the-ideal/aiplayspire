@@ -7,11 +7,10 @@ Windows BattleAiMod 的 JNI 动态库和 Linux 无头 JSONL worker 均链接同�
 Linux 在仓库根目录构建 C++17 worker，无需 JNI/JDK 头文件：
 
 ```sh
-cmake -S battle_engine -B battle_engine/build/linux -DCMAKE_BUILD_TYPE=Release
-cmake --build battle_engine/build/linux --target battle-engine-worker --parallel
+bash battle_engine/build.sh 2
 ```
 
-产物为 `battle_engine/bin/battle-engine-worker`，原有 `--serve` JSONL 协议保持不变。上述构建命令只生成本地候选产物，不启动或部署采集。
+产物为 `battle_engine/bin/battle-engine-worker` 和配套的 `.release.json`，原有 `--serve` JSONL 协议保持不变。上述构建命令只生成候选产物，不启动或部署采集；生产预检同时核对内嵌构建类型和 SHA-256。
 
 ### Linux 当前采集入口
 

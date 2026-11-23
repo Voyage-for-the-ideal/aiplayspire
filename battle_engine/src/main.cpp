@@ -9,6 +9,14 @@ int main(int argc,char **argv) {
 #ifdef _WIN32
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
 #endif
+    if(argc==2 && std::string(argv[1])=="--build-info") {
+#if defined(AIP_RELEASE_BUILD) && defined(NDEBUG)
+        std::cout << "{\"build_type\":\"Release\"}\n";
+#else
+        std::cout << "{\"build_type\":\"non-release\"}\n";
+#endif
+        return 0;
+    }
     bool serve=argc==2 && std::string(argv[1])=="--serve";
     bridge::Session session;
     auto process=[&](const bridge::Json &request) {
