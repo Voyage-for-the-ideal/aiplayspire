@@ -395,6 +395,13 @@ Action Actions::TriggerOrbPassive(int orbIdx, int times) {
 
 Action Actions::ChannelOrb(Orb orb, int count) {
     return {[=] (BattleContext &bc) {
+        if (bc.headlessRngKnown && count > 1) {
+            // Each Java ChannelAction resolves the effects of evoking the
+            // oldest orb before the next channel starts.
+            bc.addToTop(Actions::ChannelOrb(orb, count - 1));
+            bc.player.channelOrb(bc, orb);
+            return;
+        }
         for (int i = 0; i < count; ++i) {
             bc.player.channelOrb(bc, orb);
         }
@@ -583,7 +590,10 @@ Action Actions::RebootAction(int drawCount) {
             java::Random(bc.shuffleRng.randomLong())
         );
 
-        bc.addToBot(Actions::DrawCards(drawCount));
+        // Reboot queues its draw when played, before its on-use hooks. The
+        // combined native shuffle must preserve that position in the queue.
+        if (bc.headlessRngKnown) bc.addToTop(Actions::DrawCards(drawCount));
+        else bc.addToBot(Actions::DrawCards(drawCount));
     }};
 }
 

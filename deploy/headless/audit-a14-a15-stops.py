@@ -38,13 +38,23 @@ def negative_probe(case, data, worker):
     # Alter the successor, keeping the original driver's method and source token.
     mutated = deepcopy(data)
     state = mutated['after']['state']
-    hp = state['player']['hp']
-    state['player']['hp'] = hp - 1 if hp else 1
+    before = data['before']['state']
+    if ('combat' in before and 'combat' not in state
+            and state['phase'] in ('REWARD', 'GAME_OVER', 'RUN_COMPLETE')):
+        # Victory settlement may heal the player after the last native action.
+        # This boundary proves outcome, not exact post-reward HP.
+        receipt = state['combat_receipt']
+        receipt['player_dead'] = not receipt['player_dead']
+        check = 'rejected_changed_terminal_flag'
+    else:
+        hp = state['player']['hp']
+        state['player']['hp'] = hp - 1 if hp else 1
+        check = 'rejected_changed_hp'
     result = recorded(case, mutated, worker)
     if result['status'] == 'recorded_step_matches':
-        raise ValueError(f'Accepted changed successor HP: {case["case_id"]}')
-    checks = {'rejected_changed_hp': True}
-    if data['before']['state']['phase'] == 'EVENT':
+        raise ValueError(f'Accepted altered successor ({check}): {case["case_id"]}')
+    checks = {check: True}
+    if before['phase'] == 'EVENT':
         mutated = deepcopy(data)
         rng = mutated['after']['state']['combat_receipt']['rng']['streams']
         potion = Stream(rng['potion'])

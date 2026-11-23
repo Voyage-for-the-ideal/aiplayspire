@@ -284,7 +284,7 @@ void sts::applyCharacterSelection(BattleContext &b,int option) {
             else if(c.id==CardId::FAME_AND_FORTUNE)b.addToBot({[amount=c.upgraded?30:25](BattleContext &next){next.player.gainGold(next,amount);}});
             else throw std::runtime_error("invalid_wish_option");
         } else if(task==CardSelectTask::FOREIGN_INFLUENCE) {
-            if(s.data0)c.costForTurn=0;
+            if(s.data0)c.setCostForTurn(0); // Keep the X-cost sentinel on generated attacks.
             b.addToBot(Actions::MakeTempCardInHand(c));
         } else if(task==CardSelectTask::SCRY) {
             for(int n=0;n<int(b.cards.drawPile.size());++n)if(b.cards.drawPile[n].uniqueId==c.uniqueId) {

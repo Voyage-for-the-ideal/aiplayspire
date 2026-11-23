@@ -1947,6 +1947,16 @@ void BattleContext::useSkillCard() {
             const int count = item.energyOnUse
                 + (player.hasRelic<R::CHEMICAL_X>() ? 2 : 0)
                 + (up ? 1 : 0);
+            if (headlessRngKnown) {
+                // TempestAction appends channels when it executes. Earlier
+                // on-use hooks such as Hex stay ahead of those channels.
+                addToBot({[count,useEnergy](BattleContext &bc) {
+                    if (count <= 0) return;
+                    bc.addToBot(Actions::ChannelOrb(Orb::LIGHTNING, count));
+                    if (useEnergy) bc.player.useEnergy(bc.player.energy);
+                }});
+                break;
+            }
             if (useEnergy) {
                 addToBot({[] (BattleContext &bc) {
                     bc.player.useEnergy(bc.player.energy);
