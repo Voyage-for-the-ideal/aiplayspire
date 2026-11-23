@@ -17,6 +17,7 @@ from .combat import HeadlessCombatBridge, verify_combat_effect, is_native_combat
 from .interaction import IroncladInteractionBridge, verify_effect
 from .layout import module_path, runtime_files
 from .policy import HeadlessValuePolicy
+from .receipt import verify_driver
 from ..models import GameAction
 
 ROLES = ("IRONCLAD", "THE_SILENT", "DEFECT", "WATCHER")
@@ -51,12 +52,6 @@ def save_json(path, value):
         directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
         try: os.fsync(directory)
         finally: os.close(directory)
-
-
-def verify_driver(before, after, method, args):
-    receipt = after["state"].get("driver_receipt", {})
-    if (receipt.get("source_state_token"), receipt.get("sequence"), receipt.get("request_id"), receipt.get("method"), receipt.get("args")) != (before["state_token"], before["sequence"]+1, after["request_id"], method, list(args)):
-        raise ValueError("Driver receipt does not bind the single requested action")
 
 
 def resource_sample(engine, cpp):
