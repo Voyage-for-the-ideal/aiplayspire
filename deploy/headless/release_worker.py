@@ -6,16 +6,19 @@ import tempfile
 from pathlib import Path
 
 
-def identity(worker: Path) -> dict:
+def identity(worker: Path, manifest: dict | None = None) -> dict:
     with worker.open("rb") as stream:
         if stream.read(4) != b"\x7fELF":
             raise ValueError("expected a Linux ELF worker")
         stream.seek(0)
         sha = hashlib.file_digest(stream, "sha256").hexdigest()
+    expected = {"schema": "battle-worker-release-v1", "build_type": "Release", "sha256": sha}
+    if manifest is not None and expected != manifest:
+        raise ValueError("worker and manifest differ")
     raw = subprocess.check_output([str(worker), "--build-info"], stdin=subprocess.DEVNULL, timeout=5)
     if json.loads(raw) != {"build_type": "Release"}:
         raise ValueError("worker does not report Release")
-    return {"schema": "battle-worker-release-v1", "build_type": "Release", "sha256": sha}
+    return expected
 
 
 def main() -> None:
@@ -28,11 +31,13 @@ def main() -> None:
     try:
         if worker.is_symlink() or manifest.is_symlink():
             raise ValueError("expected regular worker and manifest files")
-        expected = identity(worker)
         if args.mode == "verify":
-            if json.loads(manifest.read_text(encoding="utf-8")) != expected:
-                raise ValueError("worker and manifest differ")
+            claimed = json.loads(manifest.read_text(encoding="utf-8"))
+            if not isinstance(claimed, dict):
+                raise ValueError("invalid release manifest")
+            identity(worker, claimed)
         else:
+            expected = identity(worker)
             with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=worker.parent, delete=False) as output:
                 temporary = Path(output.name)
                 json.dump(expected, output, sort_keys=True)

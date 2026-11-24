@@ -14,3 +14,10 @@ GitHub 暂无 PR、审查评论或提交评论。下表使用 Git 修复记录�
 | `2bbf899`、`e71a5e9` | 羽翼跳跃边误入训练拓扑，地图输入契约不一致 | 使用真实 SQLite 索引写入并重读训练输入；快捷边与正常地图边保持隔离 |
 
 每个新增检查同时记录修复前的预期失败与修复后的成功。旧程序运行条件已缺失时，只重建 Git diff 能证明的旧逻辑，并标明证据类型；缺依赖或编译错误不算重现。
+
+## 可重复执行的检查
+
+- `python tools/test_commit_scope.py`：临时 Git 仓库实际重放未受限的提交，随后确认受限提交只包含文档。
+- `python tools/formal_headless.py`：两个实例、每实例最多重启一次、一次 RNG 漂移及两个可提交阶段。输出独立检查器发现的最短反例；重复、迟到回执和删失误标为故障注入。
+- `python -m unittest tools.test_runtime_invariants`：实际派生 JVM 以旧临时目录配置复现碰撞，再使用运行时入口隔离；错误来源 token 拒绝推进。
+- `python -m unittest tools.test_storage_e2e`：对临时 SQLite 运行真实导出、关闭和重读，并用 Release worker 对重建的打击轨迹重放；有效哈希链也无法掩盖生命值失配。原始生产轨迹不参与公开 CI。
