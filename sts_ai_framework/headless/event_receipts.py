@@ -3,6 +3,7 @@ import copy
 import json
 from uuid import UUID
 from ..event_pools import chest_relic_pool
+from ..models import Card
 from .combat import HeadlessCombatBridge, validate_rng
 from .state import HeadlessContractError
 
@@ -340,18 +341,105 @@ def _toolbox_offers(state,after,expected):
     return True
 
 
+def _toolbox_opening_piles(left, right, choice, queued, occupied, expected, ids):
+    def generated(identity, cost=0, *, upgradable=True, exhaust=True):
+        return Card(index=0, uuid='', id=identity, name=identity, cost=cost, cost_for_turn=cost,
+                    can_upgrade=upgradable, exhausts=exhaust)
+
+    picked = generated(choice['id'], choice['cost'], upgradable=choice.get('canUpgrade', False),
+                       exhaust=choice['exhaust']).model_copy(update={
+        'upgrades': choice['timesUpgraded'], 'cost_for_turn': choice['costForTurn'], 'misc': choice['misc'],
+    })
+    hand = [*left.hand, picked, *(generated(identity) for identity in queued)]
+    draw_pile = list(left.draw_pile)
+    discard, exhaust = [], []
+    randomized = set()
+    rng = Stream(expected['card_random'])
+
+    def draw(amount):
+        batch = []
+        for _ in range(min(amount, 10 - len(hand), len(draw_pile))):
+            source = draw_pile.pop()
+            card = source
+            if 'Snecko Eye' in ids and card.cost >= 0:
+                cost = rng.bounded(4)
+                randomized.add(card.uuid)
+                card = card.model_copy(update={'cost': cost, 'cost_for_turn': cost})
+            hand.append(card)
+            batch.append((source, card))
+        # DrawCardAction finishes this batch before addToTop effects resolve, last drawn first.
+        for source, drawn in reversed(batch):
+            if source.id == 'DeusExMachina':
+                hand.remove(drawn)
+                exhaust.append(drawn)
+                copies = [generated('Miracle') for _ in range(2 + int(source.upgrades > 0))]
+            elif source.id == 'Endless Agony':
+                # triggerWhenDrawn copies the card before Confusion rerolls the original.
+                copies = [source.model_copy(update={'uuid': ''})]
+            else:
+                continue
+            room = 10 - len(hand)
+            hand.extend(copies[:room])
+            discard.extend(copies[room:])
+
+    initial = 5 + 2 * ('Snecko Eye' in ids) + ('Ring of the Serpent' in ids)
+    extra_innate = max(0, sum(map(_opening_card, draw_pile)) - initial)
+    draw(initial)
+    for relic in left.relics:
+        if relic.id in ('Bag of Preparation', 'Ring of the Snake'):
+            draw(2)
+        elif relic.id == 'Mark of Pain':
+            # At battle start, after the main draw. Later relics may draw the new Wounds.
+            for _ in range(2):
+                pos = rng.bounded(len(draw_pile)) if draw_pile else 0
+                draw_pile.insert(pos, generated('Wound', -2, upgradable=False, exhaust=False))
+
+    upgrade_index = None
+    if 'WarpedTongs' in ids:
+        eligible = [i for i, c in enumerate(hand) if c.can_upgrade and c.type != 'STATUS']
+        if eligible:
+            shuffle = Stream(expected['shuffle'])
+            upgrade_index = _shuffle(shuffle.long(), eligible)[0]
+            expected['shuffle'] = shuffle.state()
+    # Excess innate cards queue a separate pre-turn action after the battle-start actions.
+    draw(extra_innate)
+    expected['card_random'] = rng.state()
+
+    for planned, observed, upgrade in ((hand, right.hand, upgrade_index),
+                                       (draw_pile, right.draw_pile, None),
+                                       (discard, right.discard_pile, None),
+                                       (exhaust, right.exhaust_pile, None)):
+        if len(planned) != len(observed):
+            return False
+        for i, (want, got) in enumerate(zip(planned, observed)):
+            if (want.id, want.upgrades + int(i == upgrade), want.misc) != (got.id, got.upgrades, got.misc):
+                return False
+            if want.uuid:
+                if got.uuid != want.uuid:
+                    return False
+            else:
+                if not got.uuid or got.uuid in occupied or got.exhausts != want.exhausts:
+                    return False
+                occupied.add(got.uuid)
+            if not want.uuid or want.uuid in randomized:
+                if (want.cost, want.cost_for_turn) != (got.cost, got.cost_for_turn):
+                    return False
+    return True
+
+
 def toolbox_event_pick_receipt(before,after,index):
     """Verify the Toolbox copy, queued opening draw and combat handoff."""
     a,b=json.loads(before.raw_json),json.loads(after.raw_json)
     left,right=before.state,after.state
-    event=a['interaction']['flow']['event_class']
     ids={r.id for r in left.relics}
-    if (not _room_context(a,b,event) or a['phase']!='CARD_PICK' or a['roomPhase']!=b['roomPhase']
+    stable=('seed','floor','act','ascension','room','roomPhase','map','history','observedKeys','runMode')
+    if (any(a[k]!=b[k] for k in stable) or a['phase']!='CARD_PICK'
             or a['roomPhase']!='COMBAT' or a['interaction']['card_reward'].get('source_action')!='ChooseOneColorless'
             or 'Toolbox' not in ids or left.deck!=right.deck or left.keys!=right.keys
             or b['phase'] not in ('PLAYER_TURN','CARD_SELECT')
             or b['phase']=='CARD_SELECT' and not after.native_combat_handoff
-            or left.discard_pile or left.exhaust_pile or right.discard_pile or right.exhaust_pile
+            or left.discard_pile or left.exhaust_pile
+            or len(left.draw_pile)!=len(left.deck)
             or [p.id for p in left.potions]!=[p.id for p in right.potions]):
         return False
     offered=a['cardRewardOptions']
@@ -362,35 +450,24 @@ def toolbox_event_pick_receipt(before,after,index):
     total=_predraw_cards(left.relics,False)
     queued=total[len(relic_to_card):]
     if [c.id for c in left.hand]!=relic_to_card or len(total)+1>10:return False
-    kept=len(left.hand);picked=right.hand[kept]
-    choice=offered[index]
-    if (picked.id,picked.upgrades,picked.cost,picked.cost_for_turn,picked.misc,picked.exhausts)!=(
-            choice['id'],choice['timesUpgraded'],choice['cost'],choice['costForTurn'],choice['misc'],choice['exhaust']):
-        return False
     occupied={c.uuid for c in left.deck+left.draw_pile+left.hand}|{c['uuid'] for c in offered}
-    created=right.hand[kept:kept+1+len(queued)]
-    if (picked.uuid in occupied or [c.id for c in created[1:]]!=queued
-            or len({c.uuid for c in created})!=len(created) or any(c.uuid in occupied for c in created)
-            or any(c.upgrades or c.cost!=0 or c.cost_for_turn!=0 for c in created[1:])):
-        return False
-    def facts(cards):return [(c.uuid,c.id,c.upgrades,c.misc) for c in cards]
-    count=min(10-len(total)-1,_opening_draw(left.draw_pile,left.relics))
-    split=len(left.draw_pile)-count
-    if (len(left.draw_pile)!=len(left.deck) or facts(right.hand[:kept])!=facts(left.hand)
-            or facts(right.hand[kept+len(created):])!=facts(left.draw_pile[split:][::-1])
-            or facts(right.draw_pile)!=facts(left.draw_pile[:split])):
+    expected=_streams(a)
+    if not _toolbox_opening_piles(left,right,offered[index],queued,occupied,expected,ids):
         return False
     ra,rb=a['combat_receipt'],b['combat_receipt']
     if ({k:v for k,v in ra.items() if k!='rng'}!={k:v for k,v in rb.items() if k!='rng'}
             or (rb['turn'],rb['battle_over'],rb['player_dead'],rb['played_card_uuids'])!=(1,False,False,[])
             or rb['active_monsters']!=len(right.monsters)):
         return False
-    expected=_streams(a)
-    if not _opening_snecko_costs(left,right,expected,False) or expected!=_streams(b):return False
+    if expected!=_streams(b):return False
     damage=3 if 'Mercury Hourglass' in ids else 0
-    if ([(m.id,m.current_hp,m.max_hp,m.intent) for m in right.monsters]!=[
-            (m.id,m.current_hp-max(0,damage-m.block),m.max_hp,m.intent) for m in left.monsters]
-            or right.player!=left.player.model_copy(update={'block':min(999,left.player.block+10*('Anchor' in ids))})
+    if ([(m.id,m.current_hp,m.max_hp,m.block) for m in right.monsters]!=[
+            (m.id,m.current_hp-max(0,damage-m.block),m.max_hp,max(0,m.block-damage)) for m in left.monsters]
+            or any(old.intent!=new.intent and not (old.intent=='NONE' and 'Runic Dome' in ids)
+                   for old,new in zip(left.monsters,right.monsters,strict=True))
+            or right.player!=left.player.model_copy(update={
+                'energy':left.player.energy+int(any(r.id=='Happy Flower' and r.counter==0 for r in left.relics)),
+                'block':min(999,left.player.block+10*('Anchor' in ids))})
             or right.relics!=left.relics):
         return False
     snapshot=HeadlessCombatBridge().observe(b,run_id=after.run_id,sequence=after.sequence).snapshot
