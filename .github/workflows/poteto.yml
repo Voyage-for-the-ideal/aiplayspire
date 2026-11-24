@@ -4,6 +4,12 @@ permissions:
   contents: read
 
 jobs:
+  formal:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - run: python3 tools/formal_headless.py
+      - run: python3 -m unittest tools.test_runtime_invariants -v
   pickers:
     runs-on: ubuntu-24.04
     steps:
