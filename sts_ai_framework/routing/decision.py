@@ -53,6 +53,7 @@ class CandidateAssessment:
     best_path: Tuple[Tuple[int, int], ...] = field(default_factory=tuple)
     reaches_rest: bool = False
     reaches_burning_elite: bool = False
+    diagnostics: dict = field(default_factory=dict)
 
     def __post_init__(self):
         if abs(self.score - self.breakdown.total) > 1e-9:

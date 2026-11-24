@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Install definitions only. Never enable/start units or create launch gates.
+set -euo pipefail
+source "$(dirname -- "${BASH_SOURCE[0]}")/common.sh"
+[[ "$AIP_ROOT" == /home/ubuntu/aiplayspire && "$AIP_RUNTIME" == /home/ubuntu/aiplayspire-runtime ]] || {
+    echo 'Unit templates target /home/ubuntu/aiplayspire and its isolated runtime.' >&2; exit 78;
+}
+for unit in aiplayspire-gateway aiplayspire-game aiplayspire-collector; do
+    if systemctl is-active --quiet "$unit"; then echo "Stop $unit before installation" >&2; exit 78; fi
+done
+for gate in ALLOW_GAME ALLOW_COLLECTION; do
+    [[ ! -e "$AIP_RUNTIME/$gate" ]] || { echo "Close launch gate first: $gate" >&2; exit 78; }
+done
+sudo install -d -m 0750 -o root -g ubuntu /etc/aiplayspire
+if [[ ! -e /etc/aiplayspire/collector.env ]]; then
+    sudo install -m 0640 -o root -g ubuntu "$AIP_ROOT/deploy/linux/collector.env.example" /etc/aiplayspire/collector.env
+fi
+for source in "$AIP_ROOT"/deploy/linux/systemd/*; do
+    target="/etc/systemd/system/$(basename "$source")"
+    if [[ -e "$target" ]] && ! cmp -s "$source" "$target"; then
+        sudo cp -p -- "$target" "$target.bak-$(date -u +%Y%m%dT%H%M%S)"
+    fi
+    sudo install -m 0644 "$source" "$target"
+done
+sudo install -d /etc/systemd/journald@aiplayspire.conf.d
+sudo install -m 0644 "$AIP_ROOT/deploy/linux/journald.conf" /etc/systemd/journald@aiplayspire.conf.d/limits.conf
+sudo install -m 0644 "$AIP_ROOT/deploy/linux/logrotate.conf" /etc/logrotate.d/aiplayspire
+sudo systemd-analyze verify /etc/systemd/system/aiplayspire.target /etc/systemd/system/aiplayspire-*.service /etc/systemd/system/aiplayspire.slice
+sudo logrotate --debug /etc/logrotate.d/aiplayspire
+sudo systemctl daemon-reload
+echo 'Installed unit definitions only; enable/start were not invoked. Both launch gates remain closed.'

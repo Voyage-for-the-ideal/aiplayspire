@@ -16,6 +16,15 @@ import static org.junit.Assert.assertTrue;
  */
 public class ProtocolContractTest {
     @Test
+    public void permanentCardNumbersDoNotRequireCombatInitialization() {
+        java.util.Map<String, Object> values = new java.util.HashMap<>();
+        GameStateConverter.addPermanentCardValues(values, 6, 0, -1);
+        assertTrue(values.get("base_damage").equals(6));
+        assertTrue(values.get("base_block").equals(0));
+        assertFalse(values.containsKey("base_magic_number"));
+    }
+
+    @Test
     public void shopPurgeUsesTheActualGameEntryPoint() throws Exception {
         assertNotNull(ShopScreen.class.getDeclaredMethod("purchasePurge"));
     }
@@ -72,6 +81,20 @@ public class ProtocolContractTest {
         assertTrue(ChoiceScreenUtils.gridIsTransform(false, true));
         assertTrue(ChoiceScreenUtils.gridIsTransform(true, false));
         assertFalse(ChoiceScreenUtils.gridIsTransform(false, false));
+    }
+
+    @Test
+    public void bossRelicLandingIsDeferredOnlyForNewlyAddedRelics() {
+        // Picked via bossObtainLogic(): obtain() appended it, so the arrival
+        // (and its onEquip grid) has to wait for the boss screen to close.
+        assertTrue(ChoiceScreenUtils.needsDeferredBossRelicLanding(false, true));
+        // Holy Water / Black Blood / Ring of the Serpent / Frozen Core are
+        // instant-obtained by BossRelicSelectScreen itself; that path owns
+        // onEquip and must not be deferred a second time.
+        assertFalse(ChoiceScreenUtils.needsDeferredBossRelicLanding(false, false));
+        // Already owned before the pick (duplicate / manual state): vanilla
+        // behaviour is kept.
+        assertFalse(ChoiceScreenUtils.needsDeferredBossRelicLanding(true, true));
     }
 
     @Test

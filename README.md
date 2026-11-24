@@ -12,7 +12,7 @@ Plain LLM prompting is a poor fit for Slay the Spire's decision structure, so th
 
 1. **Long-horizon, enumerable decisions** — card rewards, purchases, removals, upgrades, boss relics, event branches. Each candidate can be applied to the current state and scored, but its true value only shows up acts later. A **learned value function** V(S) — trained on ~157M decision states replayed from 13.4M validated recorded runs — provides the long-horizon comparison; candidates are evaluated as hypothetical next-states (enumerate → simulate → argmax V).
 2. **Map routing** — a **deterministic six-level limited-horizon planner** enumerates visible DAG paths, evaluates growth, forced risk, recovery access, optionality, and key reachability, then executes one step and replans. MAP states never enter the LLM path.
-3. **Combat** — exact, deterministic, and cheap to run once game state is serialized. A **best-first tree search** explores card-play/targeting/potion sequences on an accelerated copy of the real game engine, with budgets up to 50k branch expansions per turn.
+3. **Combat** — one native C++ core simulates and searches card plays, targets and potions. Windows calls it inside the game through JNI; Linux headless collection uses its worker.
 4. **Everything else that is unstructured** — rare non-map screens, legacy non-map payloads, novel situations. An **LLM** with a structured-output contract acts as the general reasoning fallback, and deterministic rules handle the few decisions that have a provably correct answer (opening chests, claiming key relics).
 
 ## System Architecture
@@ -31,15 +31,15 @@ flowchart TB
         R["Deterministic 6-level map planner"] --> D
     end
     D -->|non-combat choices| Game
-    D -->|combat detected| Combat["BattleAiMod tree search<br/>(headless 2nd game instance, :5125)"]
-    Combat -->|winning command list| Game
+    D -->|combat detected| Combat["BattleAiMod → native planner (JNI)"]
+    Combat -->|guarded action| Game
 ```
 
 Components:
 
 - **CommunicationMod** (`StSCommunicationMod/`) — Java mod that exposes the live game over HTTP (`/state`, `/action`, `/card_info`): full state JSON with structured event semantics (~50 vanilla events classified as forced/deterministic/complex), grid and reward metadata, and executable actions submitted through the real game UI.
 - **sts_ai_framework/** — Python agent loop: polls state, classifies the screen, picks a decision path, submits one action, and verifies it actually took effect (retry / fallback otherwise).
-- **BattleAiMod** (`scumthespire/`) — combat AI owned by a separate headless game instance, coordinated with the visible client through `STSStateSaver` (full combat-state serialization incl. RNG) and `LudicrousSpeed` (blocking, animation-free engine execution). The combat mods in this repo are forked from [boardengineer](https://github.com/boardengineer)'s open-source mods and substantially extended here (tactical turn evaluation, search budgets, replay verification); see [AUTOFIGHT.md](AUTOFIGHT.md) for the full design.
+- **BattleAiMod** embeds the Windows x64 C++ planner. STSStateSaver captures live state and LudicrousSpeed executes verified actions. The combat mods derive from [boardengineer](https://github.com/boardengineer); see [installation and usage](AUTOFIGHT.md).
 
 ## Learned Value Model
 
@@ -87,7 +87,7 @@ Every decision in a run is owned by exactly one mechanism:
 | Combat rewards | Fixed priority (relic > gold > potion > card) + structured Emerald/Sapphire key claims with value-based key-vs-relic tradeoff |
 | Chests | Auto-open |
 | **Map routing** | **Deterministic 6-level limited-horizon planner** — DAG path enumeration with `RouteContext` risk/health/gold/keys/`?` state, hard constraints (Act-3 key reachability, recovery safety), and local four-mode fallback (`FULL_GRAPH`, `IMMEDIATE_ONLY`, `FIRST_LEGAL`, `WAIT`); `MAP` decisions are never sent to LLM |
-| **Combat** (card plays, targeting, potions, end-turn, in-combat selections) | **BattleAiMod best-first tree search** on the real (fast-forwarded) engine; turn nodes prioritized by a hand-tuned tactical evaluator (threat, survival bands, lethal breakpoints); budgets 5k–50k expansions; result replayed command-by-command with per-step state-diff verification |
+| **Combat** | Shared C++ simulation and budgeted turn search; live checks before and after each action. |
 | Novel / unstructured screens | LLM with JSON-output contract + safe-action fallback chain |
 
 The design rule of thumb: **if a decision can be enumerated and needs long-horizon value → value network; if it is exact and reversible → search; if it is ambiguous or new → LLM.** The LLM is the last resort, not the default brain.
@@ -101,10 +101,10 @@ The design rule of thumb: **if a decision can be enumerated and needs long-horiz
 | `StSCommunicationMod/` | Java mod: in-game HTTP bridge exposing state JSON and executing actions |
 | `STSStateSaver/` | Java mod: full combat-state serialization/restore (incl. RNG) — the search rewind primitive |
 | `LudicrousSpeed/` | Java mod: animation-free, blocking execution of the real game engine + command interface |
-| `scumthespire/` | Java mod ("Battle Ai Mod"): combat tree search, tactical evaluator, client/server networking |
+| `scumthespire/` | BattleAiMod: in-game UI, JNI client and command replay |
 | `cardcrawl/` | Decompiled vanilla game source — used as the read-only content catalog for data validation |
 
-Architecture and run instructions for the combat pipeline (two game instances, search budgets, mod build order via `./build_all.sh`) are documented in [AUTOFIGHT.md](AUTOFIGHT.md). Note: a few repository docs are in Chinese.
+For combat build order and the three-JAR Windows install see [AUTOFIGHT.md](AUTOFIGHT.md).
 
 ## Training the Value Network
 
@@ -148,14 +148,14 @@ The single configuration entry for the automatic run character is `sts_ai_framew
 
 Runs restart automatically: when a run ends (death/victory), the agent returns to the main menu, re-picks the configured character (`CHARACTER`, default DEFECT / robot) and ascension level (`ASCENSION`, default 15), and starts the next run — see the option list in [sts_ai_framework/README.md](sts_ai_framework/README.md) (needs CommunicationMod 1.4.0+).
 
-For the combat pipeline (headless search instance, save-state dirs, BattleAiMod activation in fights) follow [AUTOFIGHT.md](AUTOFIGHT.md).
+For the in-game combat controls see [AUTOFIGHT.md](AUTOFIGHT.md).
 
 ## Tech Stack
 
-**Python** — agent loop, HTTP client, JSON state models · **PyTorch** — Set Transformer value network, replay data pipeline (pandas/Parquet) · **Transformers** — custom permutation-invariant Set Attention blocks, Pre-LN, no positional encoding · **FastAPI** — optional inference server · **LLM API** — OpenAI-compatible chat completions (DeepSeek), JSON-output prompting, used as reasoning fallback · **Java** — four game mods (Maven), in-game HTTP server (JDK `HttpServer`) · **Tree search** — best-first over turn nodes with expansion budgets, executed on the real game engine · **Custom game modding** — ModTheSpire/BaseMod patching, UI event simulation, state serialization.
+**Python** — agent loop, HTTP client, JSON state models · **PyTorch** — Set Transformer value network, replay data pipeline (pandas/Parquet) · **Transformers** — custom permutation-invariant Set Attention blocks, Pre-LN, no positional encoding · **FastAPI** — optional inference server · **LLM API** — OpenAI-compatible chat completions (DeepSeek), JSON-output prompting, used as reasoning fallback · **Java** — four game mods (Maven), in-game HTTP server (JDK `HttpServer`) · **Tree search** — best-first over turn nodes with expansion budgets, executed in the native simulator and checked in the game · **Custom game modding** — ModTheSpire/BaseMod patching, UI event simulation, state serialization.
 
 ## Project Status
 
 Experimental research-engineering project under active iteration; event coverage, combat-search robustness, and value-model quality are the main work areas.
 
-**Attribution and disclaimers:** Slay the Spire is a game by Mega Crit — this project is an unofficial research effort, unaffiliated with Mega Crit. The combat-search mods (`STSStateSaver`, `LudicrousSpeed`, `scumthespire`) are derived from [boardengineer](https://github.com/boardengineer)'s open-source mods of the same names and have been extended here (tactical evaluator, search-budget profiles, replay/state-diff verification, server auto-spawn, recall support).
+**Attribution and disclaimers:** Slay the Spire is a game by Mega Crit — this project is an unofficial research effort, unaffiliated with Mega Crit. The combat-search mods (`STSStateSaver`, `LudicrousSpeed`, `scumthespire`) are derived from [boardengineer](https://github.com/boardengineer)'s open-source mods of the same names and have been extended here (tactical evaluator, search-budget profiles, replay/state-diff verification, native JNI integration, recall support).

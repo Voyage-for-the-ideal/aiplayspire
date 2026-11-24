@@ -23,6 +23,7 @@ sts_ai_framework/
   agent_base.py                   # Agent 抽象基类
   llm_agent.py                    # LLMAgent 组装与初始化（DeepSeek 客户端 + 本地价值网络）
   run_log.py                      # 运行日志：终端输出双写 + EVENT 结构化事件
+  headless/                       # 无界面采集、批次调度、动作校验和离线回放
   llm_agent_parts/
     __init__.py
     action_mixin.py               # choose_action 主流程、状态流转与回退
@@ -127,7 +128,8 @@ python -m sts_ai_framework --model deepseek-flash[1m] --interval 2.0
 10. --policy-types：显式启用策略的决策类型列表；其余保持影子评分。
 11. --policy-trace-dir：策略 trace 输出目录，同时用于采集训练数据。
 12. --policy-runtime-manifest：实际 mod/战斗配置指纹 JSON，作为采集元数据保存。
-13. --max-runs：采集模式下最多运行的局数（需正整数并配合 --policy-trace-dir）。
+13. --max-runs：采集模式下最多运行的局数（需正整数，并配合 --policy-trace-dir 或 --learning-trace-dir）。
+14. --learning-trace-dir：独立实战学习日志的新目录，可与旧策略 trace 同时使用；`--max-runs` 也支持此开关。日志、离线导出与 CPU 合成闭环见 [实战学习说明](../docs/LIVE_LEARNING.md)。默认决策保持原配置。
 
 策略数据、训练与评估说明见 [docs/NONCOMBAT_POLICY.md](../docs/NONCOMBAT_POLICY.md)。
 
@@ -159,6 +161,9 @@ Mod 接口：
 3. 地图路由使用确定性规划器执行（6 层有限视野、硬约束与安全约束检查），不进入 LLM。
 4. 战斗失败回退优先安全动作，避免直接无脑 end_turn。
 5. 商店/事件/选卡可走本地 value model 决策。
+   - 蒙面强盗、神秘球体用固定规则：当前血量至少为最大血量的 10% 就战斗；低于 10% 时分别交出全部金币、离开。实际战斗仍由 BattleAiMod 接手。
+   - 图书馆使用 CommunicationMod 1.7.0 的 20 张牌预演：读取实时牌池及复制的抽牌 RNG，比较「加入其中价值最高的一张牌」和「按事件实际数值回血」的状态价值。点阅读后按实际出现的牌再打分，必须选一张。
+   - Knowing Skull 使用 CommunicationMod 1.8.0 的无色牌预演：复制当前无色牌池和洗牌 RNG，预测这次会直接入组的牌，再用扣除本次 HP、加入该牌后的状态和其他选项比较。常规和 headless 使用同一评分逻辑；旧桥接层未上报牌名时仍只计 HP。
 6. LLM Prompt 只服务于非地图兜底，融合卡牌信息与结构化事件效果，不包含地图路线信息。
 
 ## 常见问题

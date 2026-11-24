@@ -42,6 +42,7 @@ class TraceRecorder:
         self.pending = None
         self.step = 0
         self.completed_runs = 0
+        self.last_observed_floor = 0
 
     def write(self, value):
         self.handle.write(json.dumps({"run_id": self.run_id, **value}, ensure_ascii=False) + "\n")
@@ -54,6 +55,7 @@ class TraceRecorder:
         if self.handle is None and state.screen_type not in LIFECYCLE and state.character:
             self.run_id = uuid.uuid4().hex
             self.step = 0
+            self.last_observed_floor = state.floor or 0
             self.handle = (self.directory / (self.run_id + ".jsonl")).open("x", encoding="utf-8")
             self.write({"record_type": "run_start", "seed_group": state.seed_group,
                         "started_at": time.time(),
@@ -64,6 +66,8 @@ class TraceRecorder:
                                                      "event": state.event.model_dump(mode="json") if state.event else None})})
         if self.handle is None:
             return
+        if state.floor is not None:
+            self.last_observed_floor = max(self.last_observed_floor, min(57, state.floor))
         if self.pending is not None:
             before, action, record, submitted = self.pending
             if confirms(before, state, action):
@@ -76,6 +80,8 @@ class TraceRecorder:
         if state.screen_type == "GAME_OVER" and state.game_over_reason in ("victory", "defeat"):
             victory = state.game_over_reason == "victory"
             self.finish({"terminal_known": True, "victory": victory,
+                         "terminal_floor_raw": state.floor,
+                         "terminal_floor": 57 if victory and state.act == 4 and (state.floor or 0) >= 55 else state.floor,
                          "heart_victory": victory and state.act == 4 and (state.floor or 0) >= 55})
             self.completed_runs += 1
         elif state.screen_type in ("MAIN_MENU", "CHAR_SELECT"):
@@ -101,6 +107,8 @@ class TraceRecorder:
 
     def finish(self, outcome):
         if self.handle:
+            outcome = {"terminal_floor": self.last_observed_floor,
+                       "last_observed_floor": self.last_observed_floor, **outcome}
             self.write({"record_type": "run_end", "outcome": outcome})
             self.handle.close()
         self.handle = None

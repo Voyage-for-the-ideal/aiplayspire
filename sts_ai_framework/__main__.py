@@ -104,10 +104,13 @@ def _fetch_post_action_state(client, retries: int = 2, delay: float = 0.15):
     return None
 
 def main():
+    from . import config
     parser = argparse.ArgumentParser(description="运行杀戮尖塔 AI Agent")
     parser.add_argument("--model", type=str, default=LLM_MODEL, help="使用的模型 (例如 deepseek-flash)")
     parser.add_argument("--api-base-url", default=STS_API_BASE_URL, help="可指定隔离游戏的 CommunicationMod 地址")
     parser.add_argument("--interval", type=float, default=2.0, help="行动间隔时间 (秒)")
+    parser.add_argument("--route-policy", choices=("planner", "resource_v2", "legacy"),
+                        default=config.ROUTE_POLICY, help="地图策略；默认保持现有六层 planner")
     parser.add_argument("--debug-prompt-file", type=str, default=DEBUG_PROMPT_FILE, help="将最新 Prompt 持续写入到指定文件，便于调试")
     parser.add_argument("--character", type=str, default=CHARACTER,
                         help="自动重开时选择的角色 (默认 DEFECT/机器人；可选 IRONCLAD/SILENT/WATCHER)")
@@ -122,11 +125,14 @@ def main():
     parser.add_argument("--policy-mode", choices=("shadow", "policy"), default="shadow")
     parser.add_argument("--policy-types", nargs="*", default=[], help="显式启用的策略决策类型；其余保持影子评分")
     parser.add_argument("--policy-trace-dir", default=None)
+    parser.add_argument("--learning-trace-dir", default=None,
+                        help="独立学习日志的新目录；仅采集，保持现有决策")
     parser.add_argument("--policy-runtime-manifest", default=None, help="实际 mod/战斗配置指纹 JSON，作为采集元数据保存")
     parser.add_argument("--max-runs", type=int, default=None)
     args = parser.parse_args()
-    if args.max_runs is not None and (args.max_runs <= 0 or not args.policy_trace_dir):
-        parser.error("--max-runs requires a positive count and --policy-trace-dir")
+    config.ROUTE_POLICY = args.route_policy
+    if args.max_runs is not None and (args.max_runs <= 0 or not (args.policy_trace_dir or args.learning_trace_dir)):
+        parser.error("--max-runs requires a positive count and a trace directory")
 
     # 安装运行日志:此后所有终端输出同时写入 debug/run_YYYYMMDD_HHMMSS.log
     run_log_path = setup_run_log(RUN_LOG_DIR)
@@ -162,16 +168,45 @@ def main():
     print(Fore.GREEN + "连接成功!" + Style.RESET_ALL)
 
     trace_recorder = None
+    learning_recorder = None
+    learning_client = None
+    runtime_metadata = {}
+    if args.policy_runtime_manifest:
+        import json
+        with open(args.policy_runtime_manifest, encoding="utf-8") as handle:
+            runtime_metadata = json.load(handle)
+    if args.learning_trace_dir:
+        from sts_ai_framework.learning_trace import LearningRecorder, LearningGameClient
+        learning_recorder = LearningRecorder(args.learning_trace_dir,
+            metadata={"runtime": runtime_metadata, "route_policy": args.route_policy,
+                      "llm_model": args.model, "collector": "sts_ai_framework"})
+        learning_client = LearningGameClient(client, learning_recorder)
+        client = learning_client
     if args.policy_trace_dir:
         import json
         from sts_ai_framework.policy_trace import TraceRecorder, TracingGameClient
         metadata = {"policy_checkpoint": args.policy_checkpoint, "mode": args.policy_mode, "enabled_types": args.policy_types}
-        if args.policy_runtime_manifest:
-            with open(args.policy_runtime_manifest, encoding="utf-8") as handle:
-                metadata["runtime"] = json.load(handle)
+        if runtime_metadata:
+            metadata["runtime"] = runtime_metadata
         trace_recorder = TraceRecorder(args.policy_trace_dir, metadata=metadata)
         client = TracingGameClient(client, trace_recorder)
     agent = LLMAgent(model_name=args.model, game_client=client, debug_prompt_file=args.debug_prompt_file or None)
+    if learning_recorder is not None and agent.value_engine is not None:
+        from selectcard.src.live_contract import file_sha256
+        agent.value_engine.trace_observer = learning_recorder.value_query
+        # The inference engine stores the resolved source path, not weights or secrets.
+        source = getattr(agent.value_engine, "model_path", None)
+        if source:
+            learning_recorder.metadata["value_checkpoint_sha256"] = file_sha256(source)
+    if learning_recorder is not None:
+        from pathlib import Path
+        from selectcard.src.live_contract import file_sha256
+        repository = Path(__file__).resolve().parents[1]
+        learning_recorder.metadata["sources"] = {
+            str(path.relative_to(repository)): file_sha256(path)
+            for folder in (repository / "sts_ai_framework", repository / "selectcard" / "src")
+            for path in sorted(folder.rglob("*.py")) if "tests" not in path.parts and not path.name.startswith("test_")}
+        learning_recorder.metadata["runtime_manifest_supplied"] = bool(runtime_metadata)
     if args.policy_checkpoint:
         from sts_ai_framework.policy_runtime import PolicyAgent
         try:
@@ -185,6 +220,8 @@ def main():
             import hashlib
             with open(args.policy_checkpoint, "rb") as handle:
                 trace_recorder.metadata["policy_sha256"] = hashlib.sha256(handle.read()).hexdigest()
+    if learning_client is not None:
+        learning_client.behavior_provider = lambda: getattr(agent, "last_behavior", None) or {"source": "baseline_unclassified"}
     
     # 重试计数器
     retry_count = 0
@@ -194,6 +231,8 @@ def main():
     prev_state = None
     stall_watcher = StallWatcher(BATTLE_STALL_WARN_SECONDS)
     reward_transition_tracker = RewardTransitionTracker()
+    from .routing.telemetry import RouteForecastTracker
+    route_forecast_tracker = RouteForecastTracker()
 
     try:
         while True:
@@ -211,8 +250,14 @@ def main():
                 continue
 
             # 如果成功获取状态，重置计数器并清除之前的重试消息
+            route_error = route_forecast_tracker.observe(state)
+            if route_error is not None:
+                log_event(event="route_prediction_error", **route_error)
             if trace_recorder is not None:
                 if args.max_runs is not None and trace_recorder.completed_runs >= args.max_runs:
+                    break
+            if learning_recorder is not None:
+                if args.max_runs is not None and learning_recorder.completed_runs >= args.max_runs:
                     break
             if retry_count > 0:
                 sys.stdout.write("\n") # 换行
@@ -364,6 +409,9 @@ def main():
                         submitted_at = time.monotonic()
                         reward_transition_tracker.begin(
                             pre_action_state, action, submitted_at)
+                        if pre_action_state.screen_type == "MAP":
+                            route_forecast_tracker.begin(pre_action_state,
+                                getattr(agent, "_pending_route_forecast", None))
                         print(Fore.GREEN + "行动已提交到 Mod 队列。" + Style.RESET_ALL)
                         if server_resp is not None:
                             print(f"Mod 响应: {server_resp}")
@@ -406,6 +454,8 @@ def main():
     except KeyboardInterrupt:
         print("\n正在停止 AI...")
     finally:
+        if learning_recorder is not None:
+            learning_recorder.close()
         if trace_recorder is not None:
             trace_recorder.close()
         # 写入残留行缓冲、恢复 sys.stdout,并关闭日志 handler 确保全部落盘

@@ -1,0 +1,11 @@
+[Unit]
+Description=AIPlaySpire single-lane resource budget
+
+[Slice]
+MemoryAccounting=yes
+MemoryHigh=2304M
+MemoryMax=2560M
+MemorySwapMax=256M
+CPUAccounting=yes
+CPUQuota=250%
+TasksMax=256

@@ -227,8 +227,11 @@ class RouteMixin:
 
     def _get_planner_map_action(self, state: GameState) -> Optional[GameAction]:
         try:
-            planner_module = import_module("sts_ai_framework.routing.planner")
-            PlannerClass = getattr(planner_module, "RoutePlanner", None)
+            resource_mode = config.ROUTE_POLICY == "resource_v2"
+            planner_module = import_module("sts_ai_framework.routing.resource" if resource_mode
+                                           else "sts_ai_framework.routing.planner")
+            PlannerClass = getattr(planner_module, "ResourceRoutePlanner" if resource_mode
+                                   else "RoutePlanner", None)
         except ModuleNotFoundError:
             return None
         except Exception as exc:
@@ -254,6 +257,7 @@ class RouteMixin:
         mode = candidate["mode"]
         choice_index = candidate["choice_index"]
         score = candidate["score"]
+        self._pending_route_forecast = None
         # Keep the chosen route for router diagnostics only. Value-network
         # payloads deliberately do not consume this transient planner output.
         self._last_plan_symbols = (
@@ -263,6 +267,9 @@ class RouteMixin:
         for assessment in getattr(decision, "candidates", ()) or ():
             breakdown = getattr(assessment, "breakdown", None)
             components = breakdown.as_dict() if hasattr(breakdown, "as_dict") else breakdown
+            diagnostics = getattr(assessment, "diagnostics", {}) or {}
+            if getattr(assessment, "choice_index", None) == choice_index and diagnostics:
+                self._pending_route_forecast = diagnostics
             log_event(
                 event="route_candidate",
                 floor=state.floor,
@@ -277,6 +284,8 @@ class RouteMixin:
                 key_feasible=getattr(assessment, "key_feasible", None),
                 components=json.dumps(components, sort_keys=True, separators=(",", ":")),
                 reasons=",".join(getattr(assessment, "reasons", ()) or ()),
+                policy=config.ROUTE_POLICY,
+                diagnostics=json.dumps(diagnostics, sort_keys=True, separators=(",", ":")),
             )
         print(
             f"[route_candidate] mode={mode} index={choice_index} score={score} "
@@ -300,7 +309,7 @@ class RouteMixin:
                 candidate["components"], sort_keys=True, separators=(",", ":")
             ) if candidate["components"] is not None else None,
             reason=candidate["explanation"],
-            policy="planner",
+            policy=config.ROUTE_POLICY,
         )
         print(f"[route_decision] mode={mode} index={choice_index} score={score}")
         return action

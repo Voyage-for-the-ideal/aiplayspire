@@ -1,0 +1,27 @@
+[Unit]
+Description=AIPlaySpire native search gateway (no Java fallback)
+PartOf=aiplayspire.target
+StartLimitIntervalSec=900
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+Slice=aiplayspire.slice
+MemoryAccounting=yes
+WorkingDirectory=/home/ubuntu/aiplayspire
+ExecStart=/bin/bash /home/ubuntu/aiplayspire/battle_engine/start.sh
+ExecStartPost=/bin/bash /home/ubuntu/aiplayspire/deploy/linux/wait-ready.sh gateway --timeout 20
+Restart=on-failure
+RestartSec=10
+KillSignal=SIGINT
+KillMode=control-group
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+IPAddressDeny=any
+IPAddressAllow=localhost
+LogNamespace=aiplayspire

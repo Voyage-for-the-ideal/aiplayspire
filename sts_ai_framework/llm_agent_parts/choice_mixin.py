@@ -141,6 +141,32 @@ class ChoiceMixin:
 
         return GameAction(type=ActionType.WAIT)
 
+    def _handle_shop_room(self, state: GameState) -> GameAction:
+        """进入商店房间的唯一动作：选择 "shop" 打开商人界面。
+
+        The Java side exposes exactly one choice (``choice_list == ["shop"]``);
+        executing it sets ``MerchantPatch.visitMerchant``, which clicks the
+        merchant on the next frame to open the ShopScreen.  The decision is
+        therefore deterministic and must not consume an external LLM round
+        trip.  Returning from ShopScreen is handled earlier in
+        :meth:`ActionMixin.choose_action`.
+        """
+        choices = getattr(state, "choice_list", None) or []
+        for i, choice_text in enumerate(choices):
+            if str(choice_text).strip().lower() == "shop":
+                print(Fore.MAGENTA + "商店房间 (SHOP_ROOM)：本地直接选择 shop，打开商人界面..." + Style.RESET_ALL)
+                return GameAction(type=ActionType.CHOOSE, choice_index=i)
+
+        # A single unknown label is still the only legal action.
+        if len(choices) == 1:
+            return GameAction(type=ActionType.CHOOSE, choice_index=0)
+
+        if state.can_proceed:
+            return GameAction(type=ActionType.PROCEED)
+        if state.can_cancel:
+            return GameAction(type=ActionType.CANCEL)
+        return GameAction(type=ActionType.WAIT)
+
     def _handle_combat_reward(self, state: GameState) -> GameAction:
         print(Fore.MAGENTA + "自动处理 COMBAT_REWARD (优先遗物>金币>药水>卡牌)..." + Style.RESET_ALL)
 

@@ -88,6 +88,8 @@ public final class HeadlessCombatExport {
             }
             if (p.ID.equals("DevaForm")) row.put("energy_gain_amount",read(p,"energyGainAmount"));
             if (p.ID.equals("Ritual")) row.put("just_applied",read(p,"skipFirst"));
+            if (p instanceof com.megacrit.cardcrawl.powers.NightmarePower)
+                row.put("card",card((AbstractCard)read(p,"card")));
             powers.add(row);
         }
         return obj("id",c.id,"current_health",c.currentHealth,"max_health",c.maxHealth,"current_block",c.currentBlock,
@@ -218,11 +220,12 @@ public final class HeadlessCombatExport {
         var am=AbstractDungeon.actionManager;var c=AbstractDungeon.player.cardInUse;
         var continuation=new ArrayList<Object>();
         var use=skillSelectionTail(continuation,source);
-        boolean autoplay="Omniscience".equals(source) && c.isInAutoplay;
+        boolean autoplay=c.isInAutoplay;
         boolean targetOk=use.target==null || autoplay && AbstractDungeon.getMonsters().monsters.contains(use.target);
         if (read(use,"targetCard")!=c || !targetOk || use.returnToHand || Boolean.TRUE.equals(read(use,"reboundCard"))
-                || use.exhaustCard!=c.exhaust || c.exhaust!=("Seek".equals(source) || "Omniscience".equals(source) || !c.upgraded) || c.exhaustOnUseOnce ||
-                (c.purgeOnUse && !autoplay) || c.dontTriggerOnUseCard || c.returnToHand)
+                || use.exhaustCard!=(c.exhaust || AbstractDungeon.player.hasPower("Corruption"))
+                || c.exhaust!=("Seek".equals(source) || "Omniscience".equals(source) || !c.upgraded) || c.exhaustOnUseOnce ||
+                (c.purgeOnUse && !(autoplay && "Omniscience".equals(source))) || c.dontTriggerOnUseCard || c.returnToHand)
             throw new IllegalStateException("Unmapped fetch cleanup owner/flags");
         continuation.add(obj("state_class","savestate.actions.UseCardActionState","state",
                 obj("card",card(c),"targetIndex",-2,"exhaustCard",use.exhaustCard,"returnToHand",false,"reboundCard",false)));
@@ -239,26 +242,69 @@ public final class HeadlessCombatExport {
     }
     private static int selectionJuggernaut(String source,AbstractCard played) {
         var p=AbstractDungeon.player;var power=p.getPower("Juggernaut");
-        return "True Grit".equals(source) && played.block>0 && !p.hasPower("NoBlockPower") && power!=null?power.amount:0;
+        return played.type==AbstractCard.CardType.SKILL && played.block>0 && !p.hasPower("NoBlockPower") && power!=null?power.amount:0;
+    }
+    private static boolean orangePelletsTriggered() {
+        var p=AbstractDungeon.player;var relic=p==null?null:p.getRelic("OrangePellets");
+        return relic!=null && Boolean.FALSE.equals(read(relic,"ATTACK"))
+                && Boolean.FALSE.equals(read(relic,"SKILL")) && Boolean.FALSE.equals(read(relic,"POWER"));
+    }
+    private static void orangePelletsContinuation(List<Object> out,
+            com.megacrit.cardcrawl.actions.AbstractGameAction flash,
+            com.megacrit.cardcrawl.actions.AbstractGameAction purge) {
+        var p=AbstractDungeon.player;var relic=p.getRelic("OrangePellets");
+        if(relic==null || flash.getClass()!=com.megacrit.cardcrawl.actions.common.RelicAboveCreatureAction.class
+                || flash.target!=p || flash.source!=p || flash.isDone || read(flash,"relic")!=relic
+                || !Boolean.FALSE.equals(read(flash,"used"))
+                || purge.getClass()!=com.megacrit.cardcrawl.actions.unique.RemoveDebuffsAction.class
+                || purge.source!=null || purge.target!=null || purge.isDone || read(purge,"c")!=p)
+            throw new IllegalStateException("Unmapped Orange Pellets continuation");
+        out.add(obj("state_class","savestate.actions.SelectionOrangePelletsActionState","state",obj()));
     }
     private static com.megacrit.cardcrawl.actions.utility.UseCardAction skillSelectionTail(List<Object> out,String source) {
         var p=AbstractDungeon.player;var actions=AbstractDungeon.actionManager.actions;var played=p.cardInUse;
         if(played==null || !source.equals(played.cardID))throw new IllegalStateException("Unmapped selection source "+source);
-        var hex=p.getPower("Hex");var ink=p.getRelic("InkBottle");int i=0;
+        var ink=p.getRelic("InkBottle");int i=0;
         var letter=p.getRelic("Letter Opener");
-        boolean letterHit="Hologram".equals(source) && letter!=null && letter.counter==0;
-        int expected=1+(letterHit?2:0)+("Burning Pact".equals(source)?1:0)+(hex!=null?1:0)+(ink!=null && ink.counter==0?2:0)
-                +(selectionJuggernaut(source,played)>0?1:0);
+        boolean letterHit=letter!=null && letter.counter==0;
+        boolean pellets=orangePelletsTriggered();
+        int powerActions=(int)p.powers.stream().filter(pow->pow.ID.equals("Hex") || pow.ID.equals("After Image")
+                || pow.ID.equals("Panache") && pow.amount==5).count();
+        int expected=1+(letterHit?2:0)+("Burning Pact".equals(source)?1:0)+powerActions+(ink!=null && ink.counter==0?2:0)
+                +(pellets?2:0)+(selectionJuggernaut(source,played)>0?1:0);
         if(actions.size()!=expected)throw new IllegalStateException("Unmapped selection continuation: "+actions);
         if("Burning Pact".equals(source)) {
             int amount=played.upgraded?3:2;
             if(played.magicNumber!=amount)throw new IllegalStateException("Burning Pact draw amount changed");
             selectionDraw(out,actions.get(i++),p,amount,"burning_pact");
         }
-        if(hex!=null) {
+        for (var power:p.powers) {
+            if (power instanceof com.megacrit.cardcrawl.powers.AfterImagePower) {
+                var action=actions.get(i++);
+                if(action.getClass()!=com.megacrit.cardcrawl.actions.common.GainBlockAction.class
+                        || action.source!=p || action.target!=p || action.isDone || power.amount<1 || action.amount!=power.amount)
+                    throw new IllegalStateException("Unmapped After Image continuation");
+                out.add(obj("state_class","savestate.actions.SelectionAfterImageActionState","state",obj("amount",power.amount)));
+                continue;
+            }
+            if (power instanceof com.megacrit.cardcrawl.powers.PanachePower && power.amount==5) {
+                var action=actions.get(i++);int amount=(int)read(power,"damage");
+                if(action.getClass()!=com.megacrit.cardcrawl.actions.common.DamageAllEnemiesAction.class
+                        || action.source!=p || action.target!=null || action.isDone || amount<1
+                        || action.damageType!=com.megacrit.cardcrawl.cards.DamageInfo.DamageType.THORNS
+                        || !read(action,"attackEffect").toString().equals("SLASH_DIAGONAL")
+                        || !Boolean.TRUE.equals(read(action,"firstFrame")) || !Boolean.FALSE.equals(read(action,"utilizeBaseDamage"))
+                        || !(read(action,"damage") instanceof int[] damage)
+                        || damage.length!=AbstractDungeon.getMonsters().monsters.size()
+                        || java.util.Arrays.stream(damage).anyMatch(value->value!=amount))
+                    throw new IllegalStateException("Unmapped Panache continuation");
+                out.add(obj("state_class","savestate.actions.SelectionPanacheActionState","state",obj("amount",amount)));
+                continue;
+            }
+            if (!power.ID.equals("Hex"))continue;
             var action=actions.get(i++);
             if(action.getClass()!=com.megacrit.cardcrawl.actions.common.MakeTempCardInDrawPileAction.class ||
-                    action.source!=null || action.target!=null || action.amount!=hex.amount || action.amount<1 || action.isDone ||
+                    action.source!=null || action.target!=null || action.amount!=power.amount || action.amount<1 || action.isDone ||
                     !Boolean.TRUE.equals(read(action,"randomSpot")) || !Boolean.TRUE.equals(read(action,"autoPosition")) ||
                     !Boolean.FALSE.equals(read(action,"toBottom")) || !read(action,"duration").equals(read(action,"startDuration")))
                 throw new IllegalStateException("Unmapped Hex continuation");
@@ -266,7 +312,7 @@ public final class HeadlessCombatExport {
             if(template.getClass()!=com.megacrit.cardcrawl.cards.status.Dazed.class || template.timesUpgraded!=0 ||
                     template.cost!=-2 || template.costForTurn!=-2 || !template.isEthereal)
                 throw new IllegalStateException("Unmapped Hex card template");
-            out.add(obj("state_class","savestate.actions.SelectionHexActionState","state",obj("amount",hex.amount)));
+            out.add(obj("state_class","savestate.actions.SelectionHexActionState","state",obj("amount",power.amount)));
         }
         if(ink!=null && ink.counter==0) {
             var flash=actions.get(i++);
@@ -275,6 +321,7 @@ public final class HeadlessCombatExport {
                     !Boolean.FALSE.equals(read(flash,"used")))throw new IllegalStateException("Unmapped Ink Bottle presentation");
             selectionDraw(out,actions.get(i++),null,1,"ink_bottle");
         }
+        if(pellets)orangePelletsContinuation(out,actions.get(i++),actions.get(i++));
         if(letterHit) {
             var flash=actions.get(i++);
             if(flash.getClass()!=com.megacrit.cardcrawl.actions.common.RelicAboveCreatureAction.class ||
@@ -327,6 +374,8 @@ public final class HeadlessCombatExport {
             && read(a,"p")==p && Boolean.FALSE.equals(read(a,"upgraded")))return c.cardID;
         if(c.cardID.equals("Dual Wield") && a instanceof com.megacrit.cardcrawl.actions.unique.DualWieldAction
             && read(a,"p")==p && a.source==p && a.target==p && read(a,"dupeAmount").equals(c.upgraded?2:1))return c.cardID;
+        if(c.cardID.equals("Night Terror") && a instanceof com.megacrit.cardcrawl.actions.unique.NightmareAction
+                && read(a,"p")==p && a.source==p && a.target==p && a.amount==3)return c.cardID;
         if((c.cardID.equals("True Grit") && c.upgraded || c.cardID.equals("Burning Pact")) && a instanceof com.megacrit.cardcrawl.actions.common.ExhaustAction
             && read(a,"p")==p && a.amount==1 && a.source==null && a.target==null && read(a,"isRandom").equals(false)
             && read(a,"anyNumber").equals(false) && read(a,"canPickZero").equals(false))return c.cardID;
@@ -340,13 +389,14 @@ public final class HeadlessCombatExport {
         // Distilled Chaos samples a monster even for a nontargeted skill.
         // These four skills' cleanup uses the played card, not that monster.
         boolean targetOk=q.target==null || c.isInAutoplay && AbstractDungeon.getMonsters().monsters.contains(q.target);
-        if(read(q,"targetCard")!=c || !targetOk || q.exhaustCard || q.returnToHand || read(q,"reboundCard").equals(true)
-                || c.exhaustOnUseOnce || c.purgeOnUse || c.exhaust || c.dontTriggerOnUseCard || c.returnToHand)
+        boolean exhaust=c.exhaust || p.hasPower("Corruption");
+        if(read(q,"targetCard")!=c || !targetOk || q.exhaustCard!=exhaust || q.returnToHand || read(q,"reboundCard").equals(true)
+                || c.exhaustOnUseOnce || c.purgeOnUse || c.dontTriggerOnUseCard || c.returnToHand)
             throw new IllegalStateException("Single hand cleanup flags");
-        List<AbstractCard> hidden=source.equals("True Grit") || source.equals("Burning Pact") || source.equals("Forethought")?List.of():(List<AbstractCard>)read(am.currentAction,
+        List<AbstractCard> hidden=source.equals("True Grit") || source.equals("Burning Pact") || source.equals("Forethought") || source.equals("Night Terror")?List.of():(List<AbstractCard>)read(am.currentAction,
                 source.equals("Armaments")?"cannotUpgrade":"cannotDuplicate");
         continuation.add(obj("state_class","savestate.actions.UseCardActionState","state",
-                    obj("card",card(c),"targetIndex",-2,"exhaustCard",false,"returnToHand",false,"reboundCard",false)));
+                    obj("card",card(c),"targetIndex",-2,"exhaustCard",exhaust,"returnToHand",false,"reboundCard",false)));
         int juggernaut=selectionJuggernaut(source,c);
         if(juggernaut>0) {
             var action=am.actions.get(am.actions.size()-1);
@@ -362,7 +412,7 @@ public final class HeadlessCombatExport {
         return obj("num_cards_to_select",h.numCardsToSelect,"selected_cards",cards(h.selectedCards.group),"any_number",read(h,"anyNumber"),
                 "up_to",h.upTo,"can_pick_zero",h.canPickZero,"were_cards_retrieved",read(h,"wereCardsRetrieved"),
                 "current_action_state",obj("state_class","savestate.actions.SingleHandActionState","state",
-                    obj("source",source,"owner_index",-1,"copies",source.equals("Dual Wield") && c.upgraded?2:1,"hidden",cards(hidden))),
+                    obj("source",source,"owner_index",-1,"copies",source.equals("Night Terror")?3:source.equals("Dual Wield") && c.upgraded?2:1,"hidden",cards(hidden))),
                 "action_queue",continuation,
                 "card_queue_state",singleHandAutoplayQueue(c));
     }
@@ -394,123 +444,168 @@ public final class HeadlessCombatExport {
     }
     public static List<Object> headbuttContinuation(Iterable<com.megacrit.cardcrawl.actions.AbstractGameAction> actions) {
         List<Object> queue=new ArrayList<>();var rows=actions.iterator();int sourceTarget=-1;
+        boolean bootPresentation=false;
+        var removed=new java.util.HashSet<String>();
         while(rows.hasNext()) {
             var action=rows.next();
-            if(queue.isEmpty() && action.getClass()==com.megacrit.cardcrawl.actions.common.DamageAction.class) {
-                var p=AbstractDungeon.player;var monsters=AbstractDungeon.getMonsters().monsters;
-                var owner=monsters.isEmpty()?null:monsters.get(0);
-                var power=owner==null?null:owner.getPower("Sharp Hide");
-                var info=(com.megacrit.cardcrawl.cards.DamageInfo)read(action,"info");
-                if(power==null || !owner.id.equals("TheGuardian") || info.owner!=owner || action.source!=owner || action.target!=p
-                        || info.type!=com.megacrit.cardcrawl.cards.DamageInfo.DamageType.THORNS || power.amount<=0
-                        || info.base!=power.amount || info.output!=power.amount || action.isDone ||
-                        !Integer.valueOf(0).equals(read(action,"goldAmount")) ||
-                        !Boolean.FALSE.equals(read(action,"skipWait")) || !rows.hasNext())
-                    throw new IllegalStateException("Unmapped Headbutt Sharp Hide damage");
-                queue.add(obj("state_class","savestate.actions.HeadbuttSharpHideActionState","state",
-                         obj("owner_index",0,"target_index",-1,"amount",power.amount)));
-                action=rows.next();
+            var p=AbstractDungeon.player;
+            if(action.getClass()==com.megacrit.cardcrawl.actions.common.RelicAboveCreatureAction.class
+                    && p.hasRelic("Boot") && read(action,"relic")==p.getRelic("Boot")) {
+                if(bootPresentation || action.source!=p || action.target!=p || action.isDone
+                        || !Boolean.FALSE.equals(read(action,"used")))
+                    throw new IllegalStateException("Unmapped Boot presentation");
+                bootPresentation=true;
+                continue;
             }
-            if(queue.isEmpty() && action.getClass()==com.megacrit.cardcrawl.actions.common.RemoveSpecificPowerAction.class) {
-                var p=AbstractDungeon.player;
-                if(p==null || action.source!=p || action.target!=p || !"Double Tap".equals(read(action,"powerToRemove"))
-                        || read(action,"powerInstance")!=null || !p.hasPower("Double Tap") || p.getPower("Double Tap").amount!=0 ||
-                        headbuttReplayQueue().size()!=1 || !rows.hasNext())
-                    throw new IllegalStateException("Unmapped Headbutt power removal");
-                queue.add(obj("state_class","savestate.actions.RemoveSpecificPowerActionState","state",obj("ownerIndex",-1,"powerId","Double Tap")));
-                action=rows.next();
-            }
-            if(sourceTarget<0 && action.getClass()==com.megacrit.cardcrawl.actions.common.GainBlockAction.class) {
-                var p=AbstractDungeon.player;
-                var rage=p.getPower("Rage");
-                if(rage==null || rage.amount<=0 || action.source!=p || action.target!=p || action.isDone
-                        || action.amount!=rage.amount || !read(action,"startDuration").equals(read(action,"duration"))
-                        || !headbuttReplayQueue().isEmpty() || !rows.hasNext()
-                        || queue.stream().anyMatch(row->"savestate.actions.HeadbuttRageBlockActionState".equals(((Map<?,?>)row).get("state_class"))))
-                    throw new IllegalStateException("Unmapped Headbutt pending Rage block");
-                queue.add(obj("state_class","savestate.actions.HeadbuttRageBlockActionState",
-                              "state",obj("owner_index",-1,"amount",rage.amount)));
-                action=rows.next();
-            }
-            while(sourceTarget<0 && action.getClass()==com.megacrit.cardcrawl.actions.common.RelicAboveCreatureAction.class) {
-                var p=AbstractDungeon.player;
-                var relic=(com.megacrit.cardcrawl.relics.AbstractRelic)read(action,"relic");
-                boolean kunai=relic!=null && relic.relicId.equals("Kunai");
-                if(relic==null || (!kunai && !relic.relicId.equals("Shuriken"))
-                        || p.getRelic(relic.relicId)!=relic || relic.counter!=0
-                        || action.source!=p || action.target!=p || action.isDone
-                        || !Boolean.FALSE.equals(read(action,"used")) || !rows.hasNext())
-                    throw new IllegalStateException("Unmapped Headbutt relic flash");
-                var buff=rows.next();
-                if(buff.getClass()!=com.megacrit.cardcrawl.actions.common.ApplyPowerAction.class ||
-                        buff.source!=p || buff.target!=p || buff.amount!=1 || buff.isDone || !rows.hasNext())
-                    throw new IllegalStateException("Unmapped Headbutt attack relic buff");
-                var power=(com.megacrit.cardcrawl.powers.AbstractPower)read(buff,"powerToApply");
-                if(power==null || !(kunai ? power instanceof com.megacrit.cardcrawl.powers.DexterityPower
-                        : power instanceof com.megacrit.cardcrawl.powers.StrengthPower) ||
-                        power.owner!=p || power.amount!=1)
-                    throw new IllegalStateException("Invalid Headbutt attack relic power");
-                queue.add(obj("state_class",kunai?"savestate.actions.HeadbuttKunaiActionState":"savestate.actions.HeadbuttShurikenActionState",
-                              "state",obj("owner_index",-1,"amount",1)));
-                action=rows.next();
-            }
-            if(sourceTarget>=0) {
-                var m=AbstractDungeon.getMonsters().monsters.get(sourceTarget);
-                if(action.getClass()==com.megacrit.cardcrawl.actions.utility.TextAboveCreatureAction.class
-                        && m instanceof com.megacrit.cardcrawl.monsters.exordium.SlimeBoss
-                        && action.source==m && action.target==m && !action.isDone
-                        && Boolean.FALSE.equals(read(action,"used")) && m.currentHealth>0 && 2*m.currentHealth<=m.maxHealth
-                        && com.megacrit.cardcrawl.core.AbstractCreature.TEXT[4].equals(read(action,"msg"))
-                        && m.nextMove==3 && m.intent==com.megacrit.cardcrawl.monsters.AbstractMonster.Intent.UNKNOWN
-                        && rows.hasNext()) {
-                    var move=rows.next();
-                    // Only omit the text and the exact no-op reapplication of the already active Split.
-                    if(move.getClass()==com.megacrit.cardcrawl.actions.common.SetMoveAction.class && !move.isDone
-                            && read(move,"monster")==m && Byte.valueOf((byte)3).equals(read(move,"theNextMove"))
-                            && read(m,"SPLIT_NAME").equals(read(move,"theNextName"))
-                            && read(move,"theNextIntent")==m.intent && Integer.valueOf(-1).equals(read(move,"theNextDamage"))
-                            && Integer.valueOf(0).equals(read(move,"theMultiplier"))
-                            && Boolean.FALSE.equals(read(move,"isMultiplier")) && !rows.hasNext()) continue;
-                    throw new IllegalStateException("Unmapped Headbutt Slime Boss Split continuation");
-                }
-                String tail=null;
-                if(action.getClass()==com.megacrit.cardcrawl.actions.common.ReducePowerAction.class
-                        && action.source==m && action.target==m && action.amount==1 && "Plated Armor".equals(read(action,"powerID"))
-                        && read(action,"powerInstance")==null && m.hasPower("Plated Armor") && m.getPower("Plated Armor").amount>0)
-                    tail="plated_armor_minus_one";
-                else if(action.getClass()==com.megacrit.cardcrawl.actions.common.ReducePowerAction.class
-                        && action.source==m && action.target==m && action.amount==1 && "Flight".equals(read(action,"powerID"))
-                        && read(action,"powerInstance")==null && m.id.equals("Byrd") && m.hasPower("Flight") && m.getPower("Flight").amount>0)
-                    tail="flight_minus_one";
-                else if(action.getClass()==com.megacrit.cardcrawl.actions.common.GainBlockAction.class
-                        && action.source==m && action.target==m && !action.isDone && m.id.equals("SnakePlant")
-                        && m.hasPower("Malleable") && m.getPower("Malleable").amount>3
-                        && action.amount==m.getPower("Malleable").amount-1)
-                    tail="malleable_block";
-                else if(action.getClass()==com.megacrit.cardcrawl.actions.animations.VFXAction.class
-                        && m.id.equals("TheGuardian") && action.target==m && action.source==m && m.hasPower("Mode Shift")
-                        && m.getPower("Mode Shift").amount<=0 && Boolean.TRUE.equals(read(m,"closeUpTriggered"))
-                        && Boolean.TRUE.equals(read(action,"isTopLevelEffect")) && read(action,"effect").getClass()==com.megacrit.cardcrawl.vfx.combat.IntenseZoomEffect.class
-                        && rows.hasNext()) {
-                    var change=rows.next();
-                    if(change.getClass()==com.megacrit.cardcrawl.actions.common.ChangeStateAction.class
-                            && read(change,"m")==m && "Defensive Mode".equals(read(change,"stateName")) && Boolean.FALSE.equals(read(change,"called")))
-                        tail="guardian_defensive_mode";
-                }
-                if(tail!=null && !rows.hasNext()) {
-                    queue.add(obj("state_class","savestate.actions.HeadbuttMonsterTailState","state",obj("owner_index",sourceTarget,"kind",tail)));
+            if(sourceTarget<0) {
+                var monsters=AbstractDungeon.getMonsters().monsters;
+                if(action.getClass()==com.megacrit.cardcrawl.actions.common.DamageAction.class) {
+                    var owner=monsters.isEmpty()?null:monsters.get(0);var power=owner==null?null:owner.getPower("Sharp Hide");
+                    var info=(com.megacrit.cardcrawl.cards.DamageInfo)read(action,"info");
+                    if(power==null || !owner.id.equals("TheGuardian") || info.owner!=owner || action.source!=owner || action.target!=p
+                            || info.type!=com.megacrit.cardcrawl.cards.DamageInfo.DamageType.THORNS || power.amount<=0
+                            || info.base!=power.amount || info.output!=power.amount || action.isDone
+                            || !Integer.valueOf(0).equals(read(action,"goldAmount")) || !Boolean.FALSE.equals(read(action,"skipWait"))
+                            || queue.stream().anyMatch(row->"savestate.actions.HeadbuttSharpHideActionState".equals(((Map<?,?>)row).get("state_class"))))
+                        throw new IllegalStateException("Unmapped Headbutt Sharp Hide damage");
+                    queue.add(obj("state_class","savestate.actions.HeadbuttSharpHideActionState","state",
+                            obj("owner_index",0,"target_index",-1,"amount",power.amount)));
                     continue;
                 }
+                if(action.getClass()==com.megacrit.cardcrawl.actions.common.RemoveSpecificPowerAction.class) {
+                    String power=(String)read(action,"powerToRemove");
+                    boolean doubleTap="Double Tap".equals(power) && p!=null && p.hasPower(power)
+                            && p.getPower(power).amount==0 && headbuttReplayQueue().size()==1;
+                    boolean penNib="Pen Nib".equals(power) && p!=null && p.hasPower(power) && p.getPower(power).amount==1;
+                    if(p==null || action.source!=p || action.target!=p || (!doubleTap && !penNib)
+                            || read(action,"powerInstance")!=null || !removed.add(power))
+                        throw new IllegalStateException("Unmapped Headbutt power removal");
+                    queue.add(obj("state_class","savestate.actions.RemoveSpecificPowerActionState","state",
+                            obj("ownerIndex",-1,"powerId",power)));
+                    continue;
+                }
+                if(action.getClass()==com.megacrit.cardcrawl.actions.common.GainBlockAction.class) {
+                    var rage=p.getPower("Rage");
+                    if(rage==null || rage.amount<=0 || action.source!=p || action.target!=p || action.isDone
+                            || action.amount!=rage.amount || !read(action,"startDuration").equals(read(action,"duration"))
+                            || queue.stream().anyMatch(row->"savestate.actions.HeadbuttRageBlockActionState".equals(((Map<?,?>)row).get("state_class"))))
+                        throw new IllegalStateException("Unmapped Headbutt pending Rage block");
+                    queue.add(obj("state_class","savestate.actions.HeadbuttRageBlockActionState","state",
+                            obj("owner_index",-1,"amount",rage.amount)));
+                    continue;
+                }
+                if(action.getClass()==com.megacrit.cardcrawl.actions.common.RelicAboveCreatureAction.class) {
+                    var relic=(com.megacrit.cardcrawl.relics.AbstractRelic)read(action,"relic");String id=relic==null?"":relic.relicId;
+                    boolean supported=java.util.Set.of("Kunai","Shuriken","InkBottle","Nunchaku",
+                            "Ornamental Fan","Pen Nib","OrangePellets").contains(id);
+                    int counter="Pen Nib".equals(id)?9:"OrangePellets".equals(id)?-1:0;
+                    if(relic==null || !supported || p.getRelic(id)!=relic || relic.counter!=counter
+                            || action.source!=p || action.target!=p || action.isDone
+                            || !Boolean.FALSE.equals(read(action,"used")) || !rows.hasNext())
+                        throw new IllegalStateException("Unmapped Headbutt relic flash");
+                    var effect=rows.next();
+                    if(id.equals("InkBottle"))selectionDraw(queue,effect,null,1,"ink_bottle");
+                    else if(id.equals("OrangePellets"))orangePelletsContinuation(queue,action,effect);
+                    else if(id.equals("Nunchaku")) {
+                        if(effect.getClass()!=com.megacrit.cardcrawl.actions.common.GainEnergyAction.class || effect.source!=p
+                                || effect.target!=p || effect.isDone || !Integer.valueOf(1).equals(read(effect,"energyGain")))
+                            throw new IllegalStateException("Unmapped Headbutt Nunchaku energy");
+                        queue.add(obj("state_class","savestate.actions.HeadbuttNunchakuActionState","state",obj("amount",1)));
+                    } else if(id.equals("Ornamental Fan")) {
+                        if(effect.getClass()!=com.megacrit.cardcrawl.actions.common.GainBlockAction.class || effect.source!=p
+                                || effect.target!=p || effect.isDone || effect.amount!=4)
+                            throw new IllegalStateException("Unmapped Headbutt Ornamental Fan block");
+                        queue.add(obj("state_class","savestate.actions.HeadbuttOrnamentalFanActionState","state",obj("amount",4)));
+                    } else {
+                        if(effect.getClass()!=com.megacrit.cardcrawl.actions.common.ApplyPowerAction.class
+                                || effect.source!=p || effect.target!=p || effect.amount!=1 || effect.isDone)
+                            throw new IllegalStateException("Unmapped Headbutt attack relic buff");
+                        var power=(com.megacrit.cardcrawl.powers.AbstractPower)read(effect,"powerToApply");
+                        boolean valid=id.equals("Kunai") && power instanceof com.megacrit.cardcrawl.powers.DexterityPower
+                                || id.equals("Shuriken") && power instanceof com.megacrit.cardcrawl.powers.StrengthPower
+                                || id.equals("Pen Nib") && power instanceof com.megacrit.cardcrawl.powers.PenNibPower;
+                        if(power==null || !valid || power.owner!=p || power.amount!=1)
+                            throw new IllegalStateException("Invalid Headbutt attack relic power");
+                        String state=id.equals("Kunai")?"HeadbuttKunaiActionState":id.equals("Shuriken")?
+                                "HeadbuttShurikenActionState":"HeadbuttPenNibActionState";
+                        queue.add(obj("state_class","savestate.actions."+state,"state",obj("owner_index",-1,"amount",1)));
+                    }
+                    continue;
+                }
+                if(!action.getClass().getSimpleName().equals("UseCardAction"))
+                    throw new IllegalStateException("Unmapped Headbutt executable continuation: "+action.getClass().getName()+" at queue index "+queue.size());
+                var c=(AbstractCard)read(action,"targetCard");Object target=read(action,"target");
+                sourceTarget=monsters.indexOf(target);
+                if(!AbstractDungeon.actionManager.cardQueue.isEmpty() && AbstractDungeon.actionManager.cardQueue.get(0).monster!=target)
+                    throw new IllegalStateException("Stale Headbutt replay target");
+                queue.add(obj("state_class","savestate.actions.UseCardActionState","state",headbuttCleanupCard(c,p.cardInUse,sourceTarget,
+                        (Boolean)read(action,"exhaustCard"),(Boolean)read(action,"returnToHand"),(Boolean)read(action,"reboundCard"))));
+                continue;
             }
-            if(sourceTarget>=0 || !action.getClass().getSimpleName().equals("UseCardAction"))
+            var m=AbstractDungeon.getMonsters().monsters.get(sourceTarget);
+            if(action.getClass()==com.megacrit.cardcrawl.actions.common.SetMoveAction.class
+                    && m instanceof com.megacrit.cardcrawl.monsters.beyond.Darkling && m.currentHealth<=0 && m.halfDead
+                    && m.nextMove==4 && m.intent==com.megacrit.cardcrawl.monsters.AbstractMonster.Intent.UNKNOWN
+                    && read(action,"monster")==m && Byte.valueOf((byte)4).equals(read(action,"theNextMove"))
+                    && read(action,"theNextName")==null && read(action,"theNextIntent")==m.intent
+                    && Integer.valueOf(-1).equals(read(action,"theNextDamage")) && Integer.valueOf(0).equals(read(action,"theMultiplier"))
+                    && Boolean.FALSE.equals(read(action,"isMultiplier")) && !action.isDone && !rows.hasNext()) {
+                queue.add(obj("state_class","savestate.actions.HeadbuttMonsterTailState","state",
+                        obj("owner_index",sourceTarget,"kind","darkling_repeat_regrow")));
+                continue;
+            }
+            if(action.getClass()==com.megacrit.cardcrawl.actions.utility.TextAboveCreatureAction.class
+                    && m instanceof com.megacrit.cardcrawl.monsters.exordium.SlimeBoss
+                    && action.source==m && action.target==m && !action.isDone && Boolean.FALSE.equals(read(action,"used"))
+                    && m.currentHealth>0 && 2*m.currentHealth<=m.maxHealth
+                    && com.megacrit.cardcrawl.core.AbstractCreature.TEXT[4].equals(read(action,"msg"))
+                    && m.nextMove==3 && m.intent==com.megacrit.cardcrawl.monsters.AbstractMonster.Intent.UNKNOWN && rows.hasNext()) {
+                var move=rows.next();
+                if(move.getClass()==com.megacrit.cardcrawl.actions.common.SetMoveAction.class && !move.isDone
+                        && read(move,"monster")==m && Byte.valueOf((byte)3).equals(read(move,"theNextMove"))
+                        && read(m,"SPLIT_NAME").equals(read(move,"theNextName")) && read(move,"theNextIntent")==m.intent
+                        && Integer.valueOf(-1).equals(read(move,"theNextDamage")) && Integer.valueOf(0).equals(read(move,"theMultiplier"))
+                        && Boolean.FALSE.equals(read(move,"isMultiplier")) && !rows.hasNext())continue;
+                throw new IllegalStateException("Unmapped Headbutt Slime Boss Split continuation");
+            }
+            String tail=null;
+            if(action.getClass()==com.megacrit.cardcrawl.actions.common.ReducePowerAction.class
+                    && action.source==m && action.target==m && action.amount==1 && "Plated Armor".equals(read(action,"powerID"))
+                    && read(action,"powerInstance")==null && m.hasPower("Plated Armor") && m.getPower("Plated Armor").amount>0)
+                tail="plated_armor_minus_one";
+            else if(action.getClass()==com.megacrit.cardcrawl.actions.common.ReducePowerAction.class
+                    && action.source==m && action.target==m && action.amount==1 && "Flight".equals(read(action,"powerID"))
+                    && read(action,"powerInstance")==null && m.id.equals("Byrd") && m.hasPower("Flight") && m.getPower("Flight").amount>0)
+                tail="flight_minus_one";
+            else if(action.getClass()==com.megacrit.cardcrawl.actions.common.GainBlockAction.class
+                    && action.source==m && action.target==m && !action.isDone
+                    && m.getPower("Malleable") instanceof com.megacrit.cardcrawl.powers.MalleablePower
+                    && m.getPower("Malleable").amount>3
+                    && action.amount==m.getPower("Malleable").amount-1) {
+                tail="malleable_block";
+                if (m.id.equals("WrithingMass") && m.getPower("Compulsive") instanceof com.megacrit.cardcrawl.powers.ReactivePower
+                        && rows.hasNext()) {
+                    var roll=rows.next();
+                    if(roll.getClass()!=com.megacrit.cardcrawl.actions.common.RollMoveAction.class
+                            || read(roll,"monster")!=m || roll.isDone)
+                        throw new IllegalStateException("Unmapped Writhing Mass reactive continuation");
+                    tail="malleable_then_reactive";
+                }
+            }
+            else if(action.getClass()==com.megacrit.cardcrawl.actions.animations.VFXAction.class
+                    && m.id.equals("TheGuardian") && action.target==m && action.source==m && m.hasPower("Mode Shift")
+                    && m.getPower("Mode Shift").amount<=0 && Boolean.TRUE.equals(read(m,"closeUpTriggered"))
+                    && Boolean.TRUE.equals(read(action,"isTopLevelEffect"))
+                    && read(action,"effect").getClass()==com.megacrit.cardcrawl.vfx.combat.IntenseZoomEffect.class && rows.hasNext()) {
+                var change=rows.next();
+                if(change.getClass()==com.megacrit.cardcrawl.actions.common.ChangeStateAction.class
+                        && read(change,"m")==m && "Defensive Mode".equals(read(change,"stateName"))
+                        && Boolean.FALSE.equals(read(change,"called")))tail="guardian_defensive_mode";
+            }
+            if(tail==null || rows.hasNext())
                 throw new IllegalStateException("Unmapped Headbutt executable continuation: "+action.getClass().getName()+" at queue index "+queue.size());
-            var c=(AbstractCard)read(action,"targetCard");
-            Object target=read(action,"target");int index=AbstractDungeon.getMonsters().monsters.indexOf(target);
-            sourceTarget=index;
-            if(!AbstractDungeon.actionManager.cardQueue.isEmpty() && AbstractDungeon.actionManager.cardQueue.get(0).monster!=target)
-                throw new IllegalStateException("Stale Headbutt replay target");
-            queue.add(obj("state_class","savestate.actions.UseCardActionState","state",headbuttCleanupCard(c,AbstractDungeon.player.cardInUse,index,
-                    (Boolean)read(action,"exhaustCard"),(Boolean)read(action,"returnToHand"),(Boolean)read(action,"reboundCard"))));
+            queue.add(obj("state_class","savestate.actions.HeadbuttMonsterTailState","state",
+                    obj("owner_index",sourceTarget,"kind",tail)));
         }
         if(queue.isEmpty())throw new IllegalStateException("Headbutt cleanup missing");
         return queue;
@@ -546,7 +641,11 @@ public final class HeadlessCombatExport {
         return obj("card",card(card),"targetIndex",target,"exhaustCard",false,"returnToHand",false,"reboundCard",false);
     }
     public static List<Object> gamblingContinuation(Iterable<com.megacrit.cardcrawl.actions.AbstractGameAction> actions) {
-        List<Object> queue=new ArrayList<>();boolean refresh=false,wait=false,toy=false;
+        List<Object> queue=new ArrayList<>();boolean refresh=false,wait=false,toy=false,tongs=false;
+        var doubtResets=new java.util.HashSet<java.util.UUID>();
+        var plasmaSlots=new java.util.HashSet<Integer>();
+        boolean chip=gamblerSelection() &&
+                Boolean.FALSE.equals(read(AbstractDungeon.actionManager.currentAction,"notchip"));
         var rows=actions.iterator();
         while(rows.hasNext()) {
             var action=rows.next();
@@ -557,6 +656,33 @@ public final class HeadlessCombatExport {
                 if(read(action,"player")!=AbstractDungeon.player)throw new IllegalStateException("Unmapped Gambler refresh owner");
                 refresh=true;
                 queue.add(obj("state_class","savestate.actions.HandCheckActionState","state",obj("owner_index",-1,"derived_refresh",true)));
+            } else if (chip && action.getClass()==com.megacrit.cardcrawl.actions.common.RelicAboveCreatureAction.class
+                    && read(action,"relic")==AbstractDungeon.player.getRelic("WarpedTongs")
+                    && AbstractDungeon.player.hasRelic("WarpedTongs")) {
+                var p=AbstractDungeon.player;
+                if(tongs || action.source!=p || action.target!=p || !rows.hasNext() || action.isDone
+                        || !Boolean.FALSE.equals(read(action,"used")))
+                    throw new IllegalStateException("Unmapped Warped Tongs presentation");
+                var upgrade=rows.next();
+                if(upgrade.getClass()!=com.megacrit.cardcrawl.actions.common.UpgradeRandomCardAction.class
+                        || read(upgrade,"p")!=p || upgrade.isDone)
+                    throw new IllegalStateException("Unmapped Warped Tongs upgrade");
+                tongs=true;
+                queue.add(obj("state_class","savestate.actions.SelectionWarpedTongsActionState","state",obj()));
+            } else if (chip && action.getClass()==com.megacrit.cardcrawl.actions.animations.VFXAction.class
+                    && read(action,"effect") instanceof com.megacrit.cardcrawl.vfx.combat.OrbFlareEffect) {
+                var p=AbstractDungeon.player;var effect=read(action,"effect");var orb=read(effect,"orb");
+                int slot=p.orbs.indexOf(orb);
+                if(!(orb instanceof com.megacrit.cardcrawl.orbs.Plasma plasma) || slot<0
+                        || !plasmaSlots.add(slot) || !rows.hasNext() || action.isDone)
+                    throw new IllegalStateException("Unmapped Plasma presentation");
+                var gain=rows.next();
+                if(gain.getClass()!=com.megacrit.cardcrawl.actions.common.GainEnergyAction.class
+                        || gain.target!=p || gain.source!=p || gain.isDone
+                        || !Integer.valueOf(plasma.passiveAmount).equals(read(gain,"energyGain")))
+                    throw new IllegalStateException("Unmapped Plasma energy continuation");
+                queue.add(obj("state_class","savestate.actions.SelectionPlasmaEnergyActionState","state",
+                        obj("orb_slot",slot,"amount",plasma.passiveAmount)));
             } else if(action.getClass()==com.megacrit.cardcrawl.actions.common.RelicAboveCreatureAction.class && refresh && !wait && !toy) {
                 var p=AbstractDungeon.player;
                 if(p==null || !p.hasRelic("Toy Ornithopter") || action.source!=p || action.target!=p
@@ -569,6 +695,17 @@ public final class HeadlessCombatExport {
                 toy=true;
                 queue.add(obj("state_class","savestate.actions.OrnithopterHealActionState",
                         "state",obj("source_index",-1,"target_index",-1,"amount",5)));
+            } else if(action.getClass()==com.megacrit.cardcrawl.actions.common.SetDontTriggerAction.class && chip) {
+                // Drawing Doubt queues an explicit reset even when its flag is
+                // already false. At the opening chip picker this is a no-op;
+                // a reset of any other target or a true flag still fails closed.
+                var c=(AbstractCard)read(action,"card");
+                if(c==null || c.getClass()!=com.megacrit.cardcrawl.cards.curses.Doubt.class ||
+                        action.isDone || c.dontTriggerOnUseCard || !Boolean.FALSE.equals(read(action,"trigger")) ||
+                        !doubtResets.add(c.uuid) ||
+                        (!AbstractDungeon.player.hand.group.contains(c) &&
+                                !AbstractDungeon.handCardSelectScreen.selectedCards.group.contains(c)))
+                    throw new IllegalStateException("Unmapped Gambling Chip Doubt reset");
             } else if(name.equals("WaitAction") && !wait) {
                 wait=true;
                 queue.add(obj("state_class","savestate.actions.WaitActionState","state",obj("duration",read(action,"duration"))));
@@ -648,7 +785,7 @@ public final class HeadlessCombatExport {
         if (!"PLAYER_TURN".equals(observation.get("phase")) && !selection)return observation;
         var p=AbstractDungeon.player;var am=AbstractDungeon.actionManager;
         List<Object> headbuttReplay=headbutt?headbuttReplayQueue():new ArrayList<>();
-        if ((!selection && (am.currentAction!=null || !am.actions.isEmpty())) || (!headbutt && single==null && !"Omniscience".equals(fetch) && !am.cardQueue.isEmpty()) || !am.monsterQueue.isEmpty() || !am.preTurnActions.isEmpty()
+        if ((!selection && (am.currentAction!=null || !am.actions.isEmpty())) || (!headbutt && single==null && fetch==null && !am.cardQueue.isEmpty()) || !am.monsterQueue.isEmpty() || !am.preTurnActions.isEmpty()
                 || (p.cardInUse!=null && !headbutt && fetch==null && single==null) || (!headbutt && !p.limbo.isEmpty()) || p.isEndingTurn || p.endTurnQueued)
             throw new IllegalStateException("Not a settled normal combat decision: current="+(am.currentAction==null?"null":am.currentAction.getClass().getName())
                     +",actions="+am.actions.stream().map(a->a.getClass().getSimpleName()).collect(java.util.stream.Collectors.joining(","))
@@ -698,7 +835,8 @@ public final class HeadlessCombatExport {
                         "number_of_cards","Omniscience".equals(fetch) || secretFetch(fetch)?1:read(action,"numberOfCards"),"owner_index",-1)):headbutt?obj("state_class","savestate.actions.DiscardPileToTopOfDeckActionState","state",obj("owner_index",-1)):obj("state_class","savestate.actions.BetterDiscardPileToHandActionState","state",obj(
                         "number_of_cards",read(action,"numberOfCards"),"optional",read(action,"optional"),
                         "set_cost",read(action,"setCost"),"new_cost",read(action,"newCost"),"owner_index",-1)),
-                    "action_queue",queue,"card_queue_state","Omniscience".equals(fetch)?omniscienceQueue():headbuttReplay));
+                    "action_queue",queue,"card_queue_state","Omniscience".equals(fetch)?omniscienceQueue():
+                        fetch!=null?singleHandAutoplayQueue(p.cardInUse):headbuttReplay));
         }
         var pools=battleaimod.networking.BattleCardPools.current();
         var liveCommon=new com.google.gson.JsonArray();

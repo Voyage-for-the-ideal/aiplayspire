@@ -15,7 +15,7 @@ from .contracts import CHARACTERS, digest
 from .encoding import state_parts
 from .profiles import RUN_PROFILE
 from .run_replay import MODE_FLAGS, run_identity
-from .shards import DATA_FORMAT, check_coverage, file_hash, group_key
+from .shards import DATA_FORMAT, ascension_coverage, check_coverage, file_hash, group_key, validate_min_ascension
 from .training import pilot_member
 
 
@@ -97,15 +97,18 @@ def unpack(value):
         raise ValueError("unsupported archive wrapper")
 
 
-def eligible(run):
+def eligible(run, *, min_ascension=0):
     if run.get("victory") is not True:
         return "not_victory"
     if any(key not in run for key in MODE_FLAGS if key != "special_seed"):
         return "unknown_run_mode"
     if any(run.get(key, 0) for key in MODE_FLAGS):
         return "nonordinary"
-    if run.get("character_chosen") not in CHARACTERS or not 0 <= int(run.get("ascension_level", -1)) <= 20:
+    ascension = int(run.get("ascension_level", -1))
+    if run.get("character_chosen") not in CHARACTERS or not 0 <= ascension <= 20:
         return "unsupported_character_or_ascension"
+    if ascension < min_ascension:
+        return f"below_min_ascension_{min_ascension}"
     # Watcher-era standard PC rules only; unverified builds do not silently
     # inherit the seed/map assumptions of another game version.
     version = str(run.get("build_version", ""))
@@ -126,29 +129,32 @@ def eligible(run):
 def process_file(argument):
     path, stage = argument[:2]
     include_map = argument[3] if len(argument) >= 4 else False
+    min_ascension = argument[4] if len(argument) >= 5 else 0
     # Worker output is spooled to disk instead of returning a large pickled
     # sample list. Tests can still request the simple in-memory file interface.
     if len(argument) >= 3:
         spool = Path(argument[2])
         with spool.with_suffix(".rows").open("w", encoding="utf-8") as row_file, spool.with_suffix(".audit").open("w", encoding="utf-8") as report_file:
-            _process_file(path, stage, JsonSink(row_file), JsonSink(report_file), include_map=include_map)
+            _process_file(path, stage, JsonSink(row_file), JsonSink(report_file), include_map=include_map,
+                          min_ascension=min_ascension)
         return spool.with_suffix(".rows"), spool.with_suffix(".audit")
     report, rows = [], []
-    _process_file(path, stage, rows, report)
+    _process_file(path, stage, rows, report, include_map=include_map, min_ascension=min_ascension)
     return rows, report
 
 
-def _process_file(path, stage, rows, report, *, include_map=False):
+def _process_file(path, stage, rows, report, *, include_map=False, min_ascension=0):
     try:
         opener = gzip.open if str(path).lower().endswith(".gz") else open
         with opener(path, "rt", encoding="utf-8-sig") as stream:
             # Keep the stream open while the generator consumes array members.
-            _process_runs((run for value in archive_values(stream) for run in unpack(value)), stage, rows, report, include_map=include_map)
+            _process_runs((run for value in archive_values(stream) for run in unpack(value)), stage, rows, report,
+                          include_map=include_map, min_ascension=min_ascension)
     except (OSError, ValueError, TypeError) as exc:
         report.append(dict(status="invalid_archive", detail=str(exc)))
 
 
-def _process_runs(runs, stage, rows, report, *, include_map=False):
+def _process_runs(runs, stage, rows, report, *, include_map=False, min_ascension=0):
     seen = set()
     for run in runs:
         try:
@@ -157,7 +163,7 @@ def _process_runs(runs, stage, rows, report, *, include_map=False):
                 report.append(dict(status="duplicate_in_archive"))
                 continue
             seen.add(identity)
-            reason = eligible(run)
+            reason = eligible(run, min_ascension=min_ascension)
             if reason:
                 report.append(dict(run_id=identity, status=reason))
                 continue
@@ -201,11 +207,13 @@ def code_fingerprint():
     return digest({p.relative_to(package.parent).as_posix(): file_hash(p) for p in sorted(sources)})
 
 
-def export_runs(input_dir, output_dir, *, stage="pilot", workers=1, shard_size=10000, include_map=False):
+def export_runs(input_dir, output_dir, *, stage="pilot", workers=1, shard_size=10000, include_map=False,
+                min_ascension=0):
     if stage not in ("pilot", "confirm"):
         raise ValueError("unknown export stage")
     if not 1 <= workers <= 15 or shard_size < 1:
         raise ValueError("workers must be 1..15; shard-size must be positive")
+    validate_min_ascension(min_ascension)
     input_dir, output_dir = Path(input_dir).resolve(), Path(output_dir).resolve()
     if not input_dir.is_dir():
         raise ValueError("input archive directory does not exist")
@@ -215,7 +223,8 @@ def export_runs(input_dir, output_dir, *, stage="pilot", workers=1, shard_size=1
     if not files:
         raise ValueError("no .run/.json/.json.gz archives")
     specification = dict(format=DATA_FORMAT, input_profile=RUN_PROFILE, stage=stage, cohort_fraction=.01 if stage == "pilot" else 1.,
-                         pilot_sampling="run-hash-once-at-export", split="seed-group-80-10-10", shard_size=shard_size, sources=inventory, code=code_fingerprint())
+                         pilot_sampling="run-hash-once-at-export", split="seed-group-80-10-10", shard_size=shard_size,
+                         min_ascension=min_ascension, sources=inventory, code=code_fingerprint())
     if include_map:
         specification["include_map"] = True
     fingerprint = digest(specification)
@@ -225,7 +234,7 @@ def export_runs(input_dir, output_dir, *, stage="pilot", workers=1, shard_size=1
         if existing["source_fingerprint"] != fingerprint:
             raise ValueError("existing output has incompatible inputs/code/profile; choose a new directory")
         if stage == "confirm":
-            check_coverage(output_dir)
+            check_coverage(output_dir, min_ascension=min_ascension)
         elif not existing["report"]["splits"].get("train") or not existing["report"]["splits"].get("val"):
             raise ValueError("empty pilot train/val; choose additional data, not a resample")
         return existing
@@ -247,16 +256,16 @@ def export_runs(input_dir, output_dir, *, stage="pilot", workers=1, shard_size=1
         def results():
             if executor is None:
                 for index, path in enumerate(files):
-                    yield path, process_file((path, stage, spool_dir / str(index), include_map))
+                    yield path, process_file((path, stage, spool_dir / str(index), include_map, min_ascension))
             else:
                 pending = {}
                 for index in range(min(len(files), workers*2)):
-                    pending[index] = executor.submit(process_file, (files[index], stage, spool_dir / str(index), include_map))
+                    pending[index] = executor.submit(process_file, (files[index], stage, spool_dir / str(index), include_map, min_ascension))
                 for index, path in enumerate(files):
                     result = pending.pop(index).result()
                     next_index = index + workers*2
                     if next_index < len(files):
-                        pending[next_index] = executor.submit(process_file, (files[next_index], stage, spool_dir / str(next_index), include_map))
+                        pending[next_index] = executor.submit(process_file, (files[next_index], stage, spool_dir / str(next_index), include_map, min_ascension))
                     yield path, result
         with (output_dir / "audit.jsonl").open("w", encoding="utf-8") as audit:
             for path, (rows_path, reports_path) in results():
@@ -314,12 +323,14 @@ def export_runs(input_dir, output_dir, *, stage="pilot", workers=1, shard_size=1
     spool_dir.rmdir()
     report = dict(samples=total, splits=dict(counts), coverage=dict(coverage), reasons=dict(reasons), prefix_stops=dict(stops), unknown_context=dict(unknowns),
                   scope="archive inventory only; local samples are not global coverage", promotion="offline BC evidence only; existing game policy remains default")
+    if min_ascension >= 15:
+        report["ascension_coverage"] = ascension_coverage(output_dir, min_ascension)
     (output_dir / "coverage.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     data_files = {p.name: file_hash(p) for p in sorted(output_dir.iterdir()) if p.is_file()}
     manifest = dict(specification, source_fingerprint=fingerprint, fingerprint=digest([fingerprint, data_files]), report=report, files=data_files)
     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     if stage == "confirm":
-        check_coverage(output_dir)
+        check_coverage(output_dir, min_ascension=min_ascension)
     elif not counts["train"] or not counts["val"]:
         raise ValueError("empty pilot train/val; report saved, no resampling or scope reduction")
     return manifest
@@ -332,9 +343,12 @@ def main():
     parser.add_argument("--stage", choices=("pilot", "confirm"), default="pilot")
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--shard-size", type=int, default=10000)
+    parser.add_argument("--min-ascension", type=int, choices=range(21), default=0,
+                        help="exclude runs below this ascension before sampling and replay")
     parser.add_argument("--include-map", action="store_true", help="export only unambiguous historical map decisions")
     args = parser.parse_args()
-    manifest = export_runs(args.input_dir, args.output_dir, stage=args.stage, workers=args.workers, shard_size=args.shard_size, include_map=args.include_map)
+    manifest = export_runs(args.input_dir, args.output_dir, stage=args.stage, workers=args.workers,
+                           shard_size=args.shard_size, include_map=args.include_map, min_ascension=args.min_ascension)
     print(json.dumps(manifest["report"], ensure_ascii=True))
 
 

@@ -404,6 +404,10 @@ void CardManager::draw(BattleContext &bc, int amount) {
     for (int i = 0; i < amount; i++) {
         auto c = popFromDrawPile();
         bc.lastDrawnCardType=c.getType();
+        // Endless Agony creates its stat-equivalent copy in triggerWhenDrawn,
+        // before Confusion or another onCardDraw hook changes the original.
+        auto agonyCopy=c;
+        agonyCopy.retain=false;
         // Eviscerate.triggerWhenDrawn precedes the Confusion draw hook.
         if (bc.headlessRngKnown && c.id==CardId::EVISCERATE)
             c.setCostForTurn(std::max(0,int(c.cost)-bc.player.cardsDiscardedThisTurn));
@@ -436,8 +440,10 @@ void CardManager::draw(BattleContext &bc, int amount) {
                 bc.addToBot( Actions::DamageAllEnemy(fireBreathing) );
             }
             if (c.getId() == CardId::VOID) {
-                // game adds action to bottom of the queue but I think it is ok to do directly
-                bc.player.energy = std::max(0, bc.player.energy-1);
+                if (bc.headlessRngKnown) bc.addToBot({[](BattleContext &b) {
+                    b.player.energy=std::max(0,b.player.energy-1);
+                }});
+                else bc.player.energy = std::max(0, bc.player.energy-1);
             }
 
         } else if (c.getType() == CardType::CURSE) {
@@ -460,7 +466,7 @@ void CardManager::draw(BattleContext &bc, int amount) {
                 }
             }
             if(c.id==CardId::ENDLESS_AGONY) {
-                if(bc.headlessRngKnown)bc.addToTop(Actions::MakeTempCardInHand(c));
+                if(bc.headlessRngKnown)bc.addToTop(Actions::MakeTempCardInHand(agonyCopy));
                 else bc.addToBot(Actions::MakeTempCardInHand(c));
             }
             if(!bc.headlessRngKnown && c.id==CardId::EVISCERATE)hand[cardsInHand-1].costForTurn=std::max(0,int(c.cost)-bc.player.cardsDiscardedThisTurn);

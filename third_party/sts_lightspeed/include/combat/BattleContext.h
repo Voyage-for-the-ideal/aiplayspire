@@ -72,7 +72,7 @@ namespace sts {
         bool headlessSettledExhaust = false; // driver waits for cost-changing exhaust effects
 
         // Source action waiting *after* Headbutt cleanup when its discard grid opens.
-        enum class HeadbuttTail { NONE, PLATED, GUARDIAN, FLIGHT, MALLEABLE };
+        enum class HeadbuttTail { NONE, PLATED, GUARDIAN, FLIGHT, MALLEABLE, MALLEABLE_REACTIVE };
         HeadbuttTail headbuttTail=HeadbuttTail::NONE;
         void enqueueHeadbuttTail(int target,HeadbuttTail kind);
         Random headlessRng;
@@ -112,6 +112,14 @@ namespace sts {
         CardQueueItem curCardQueueItem;
 
         std::bitset<32> miscBits; // 0 stolen gold check,
+        static constexpr int STORM_BEFORE_HEX = 1;
+        static constexpr int MAGNETISM_BEFORE_HELLO = 2;
+        static constexpr int HELLO_BEFORE_CREATIVE = 3;
+        static constexpr int MAGNETISM_BEFORE_CREATIVE = 4;
+        static constexpr int WRAITH_BEFORE_FLEX = 5;
+        static constexpr int BOMB_AFTER_RETAIN_1 = 6;
+        static constexpr int WRAITH_BEFORE_RETAIN = 9;
+        void updatePowerOrderOnNewApplication(PlayerStatus added);
 
         BattleContext() = default;
         BattleContext(const BattleContext &rhs) = default;
@@ -250,7 +258,13 @@ namespace sts {
                 bc.cards.onBuffCorruption();
             }
             if constexpr(s==PS::MANTRA)bc.mantraGained+=amount;
+            const bool orderTracked = bc.headlessRngKnown &&
+                (s==PS::STORM || s==PS::MAGNETISM || s==PS::HELLO_WORLD || s==PS::CREATIVE_AI || s==PS::WELL_LAID_PLANS);
+            const bool hadPower = orderTracked && bc.player.hasStatus<s>();
             bc.player.buff<s>(amount);
+            if constexpr(s==PS::THE_BOMB)
+                if(bc.headlessRngKnown)bc.miscBits.set(BattleContext::BOMB_AFTER_RETAIN_1+2,bc.player.hasStatus<PS::WELL_LAID_PLANS>());
+            if (orderTracked && !hadPower && bc.player.hasStatus<s>()) bc.updatePowerOrderOnNewApplication(s);
             if constexpr(s==PS::MANTRA) {
                 if(bc.player.getStatus<PS::MANTRA>()>=10) {
                     bc.player.setStatusValueNoChecks<PS::MANTRA>(bc.player.getStatus<PS::MANTRA>()-10);
@@ -264,7 +278,12 @@ namespace sts {
     template <PlayerStatus s>
     Action Actions::DebuffPlayer(int amount, bool isSourceMonster) {
         return {[=] (BattleContext &bc) {
-            bc.player.debuff<s>(amount, isSourceMonster);
+            if constexpr(s==PS::HEX || s==PS::WRAITH_FORM || s==PS::LOSE_STRENGTH) {
+                const bool hadPower=bc.player.hasStatus<s>();
+                bc.player.debuff<s>(amount, isSourceMonster);
+                if (bc.headlessRngKnown && !hadPower && bc.player.hasStatus<s>())
+                    bc.updatePowerOrderOnNewApplication(s);
+            } else bc.player.debuff<s>(amount, isSourceMonster);
         }};
     }
 

@@ -1,10 +1,13 @@
 package com.example.communicationmod;
 
+import com.badlogic.gdx.math.RandomXS128;
 import com.megacrit.cardcrawl.cards.AbstractCard;
 import com.megacrit.cardcrawl.cards.CardGroup;
 import com.megacrit.cardcrawl.dungeons.AbstractDungeon;
 import com.megacrit.cardcrawl.events.AbstractEvent;
+import com.megacrit.cardcrawl.events.city.TheLibrary;
 import com.megacrit.cardcrawl.relics.AbstractRelic;
+import com.megacrit.cardcrawl.rooms.AbstractRoom;
 import com.megacrit.cardcrawl.ui.buttons.LargeDialogOptionButton;
 
 import java.lang.reflect.Field;
@@ -19,6 +22,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.WeakHashMap;
+import java.util.function.Predicate;
 
 /** Extracts locale-independent semantics for the base game's event state. */
 public final class EventStateExtractor {
@@ -44,6 +48,7 @@ public final class EventStateExtractor {
     ));
 
     private static final Map<String, String> EVENT_IDS = new HashMap<>();
+    private static final int LIBRARY_CARD_COUNT = 20;
     private static final Map<AbstractEvent, Map<UUID, Integer>> MATCH_GAME_SLOTS =
         Collections.synchronizedMap(new WeakHashMap<AbstractEvent, Map<UUID, Integer>>());
 
@@ -367,7 +372,13 @@ public final class EventStateExtractor {
                 break;
             case "TheJoust": describeJoust(phase,c); break;
             case "TheLibrary":
-                if ("0".equals(phase)) { complex(c,0,"CARD_REWARD","GENERATED_CARD_GRID",effect("choose_generated_card","count",1)); deterministic(c,1,"EFFECT","NONE",gainHp(intField(event,"healAmt"))); }
+                if ("0".equals(phase)) {
+                    List<String> offers = event instanceof TheLibrary
+                        ? predictLibraryCards() : Collections.emptyList();
+                    complex(c,0,"CARD_REWARD","GENERATED_CARD_GRID",
+                        effect("choose_generated_card","count",1,"card_ids",offers));
+                    deterministic(c,1,"EFFECT","NONE",gainHp(intField(event,"healAmt")));
+                }
                 break;
             case "TheMausoleum":
                 if (start) { double cursed=intField(event,"percent")/100.0D; stochastic(c,0,"STOCHASTIC","NONE",outcome(cursed,addCard("Writhe",1),randomRelic("ANY")),outcome(1.0D-cursed,randomRelic("ANY"))); leave(c,1); }
@@ -416,6 +427,66 @@ public final class EventStateExtractor {
         }
     }
 
+    private static List<String> predictLibraryCards() {
+        if (AbstractDungeon.cardRng == null || AbstractDungeon.player == null
+                || AbstractDungeon.currMapNode == null) return Collections.emptyList();
+        AbstractRoom room = AbstractDungeon.getCurrRoom();
+        int rare = room.baseRareCardChance;
+        if (AbstractDungeon.player.hasRelic("Nloth's Gift")) rare *= 3;
+        return predictLibraryCards(
+            AbstractDungeon.cardRng.random, AbstractDungeon.cardBlizzRandomizer,
+            rare, room.baseUncommonCardChance, poolIds(AbstractDungeon.commonCardPool),
+            poolIds(AbstractDungeon.uncommonCardPool), poolIds(AbstractDungeon.rareCardPool));
+    }
+
+    private static List<String> poolIds(CardGroup pool) {
+        List<String> ids = new ArrayList<>();
+        if (pool != null) {
+            for (AbstractCard card : pool.group) ids.add(card.cardID);
+        }
+        return ids;
+    }
+
+    static List<String> predictLibraryCards(RandomXS128 source, int offset, int rare,
+                                            int uncommon, List<String> commonPool,
+                                            List<String> uncommonPool, List<String> rarePool) {
+        if (commonPool.isEmpty() || uncommonPool.isEmpty() || rarePool.isEmpty()) {
+            return Collections.emptyList();
+        }
+        // Random.copy() calls the default constructor, which advances MathUtils.random.
+        // Clone the underlying words directly; even repeated state polls must be pure.
+        RandomXS128 rng = new RandomXS128(source.getState(0), source.getState(1));
+        List<String> cards = new ArrayList<>(LIBRARY_CARD_COUNT);
+        int remainingRolls = 4096; // A malformed/modded pool may never yield 20 distinct cards.
+        while (cards.size() < LIBRARY_CARD_COUNT) {
+            if (--remainingRolls < 0) return Collections.emptyList();
+            String card = drawLibraryCard(rng, offset, rare, uncommon, commonPool, uncommonPool, rarePool);
+            boolean duplicate;
+            do {
+                duplicate = false;
+                // Vanilla keeps scanning after a reroll, then rescans from the front.
+                for (String previous : cards) {
+                    if (previous.equals(card)) {
+                        if (--remainingRolls < 0) return Collections.emptyList();
+                        card = drawLibraryCard(rng, offset, rare, uncommon, commonPool, uncommonPool, rarePool);
+                        duplicate = true;
+                    }
+                }
+            } while (duplicate);
+            cards.add(0, card); // CardGroup.addToBottom
+        }
+        return cards;
+    }
+
+    private static String drawLibraryCard(RandomXS128 rng, int offset, int rare, int uncommon,
+                                          List<String> commonPool, List<String> uncommonPool,
+                                          List<String> rarePool) {
+        // The Library calls rollRarity/getCard directly; it never adjusts the pity offset.
+        int roll = rng.nextInt(100) + offset;
+        List<String> pool = roll < rare ? rarePool : (roll < rare + uncommon ? uncommonPool : commonPool);
+        return pool.get(rng.nextInt(pool.size()));
+    }
+
     private static void describeCursedTome(AbstractEvent e, String phase, List<Map<String,Object>> c) {
         int finalDmg = cursedTomeFinalDmg(e);
         List<String> bookRelics = cursedTomeBookRelics();
@@ -444,8 +515,29 @@ public final class EventStateExtractor {
         if (!"ASK".equals(phase)) return;
         deterministic(c,0,"RANDOM_REWARD","EVENT",loseHp(intField(e,"potionCost")),effect("random_potion","count",1));
         deterministic(c,1,"EFFECT","EVENT",loseHp(intField(e,"goldCost")),gainGold(90));
-        complex(c,2,"CARD_REWARD","EVENT",loseHp(intField(e,"cardCost")),effect("random_card_reward","count",1));
+        deterministic(c,2,"RANDOM_REWARD","EVENT",loseHp(intField(e,"cardCost")),
+            effect("random_card","pool","COLORLESS_UNCOMMON","card_id",predictKnowingSkullCard()));
         deterministic(c,3,"LEAVE","NONE",loseHp(intField(e,"leaveCost")));
+    }
+
+    private static String predictKnowingSkullCard() {
+        if (AbstractDungeon.shuffleRng == null || AbstractDungeon.colorlessCardPool == null) return null;
+        AbstractCard card = firstAfterColorlessShuffle(
+            AbstractDungeon.shuffleRng.random, AbstractDungeon.colorlessCardPool.group,
+            candidate -> candidate.rarity == AbstractCard.CardRarity.UNCOMMON);
+        return card == null ? "Swift Strike" : card.cardID;
+    }
+
+    static <T> T firstAfterColorlessShuffle(RandomXS128 source, List<T> pool, Predicate<T> matches) {
+        // Vanilla returnColorlessCard shuffles the entire pool, then takes the
+        // first card of the requested rarity. Copy both the stream and the order.
+        RandomXS128 rng = new RandomXS128(source.getState(0), source.getState(1));
+        List<T> shuffled = new ArrayList<>(pool);
+        Collections.shuffle(shuffled, new java.util.Random(rng.nextLong()));
+        for (T entry : shuffled) {
+            if (matches.test(entry)) return entry;
+        }
+        return null;
     }
 
     private static void describeJoust(String phase, List<Map<String,Object>> c) {

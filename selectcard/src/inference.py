@@ -190,6 +190,7 @@ class InferenceTokenizer:
 
 class STSInferenceEngine:
     def __init__(self, model_path=None):
+        self.model_path = str(model_path) if model_path is not None else None
         self.content_catalog = _vanilla_content_catalog()
         if model_path:
             checkpoint, vocabulary, self.feature_encoder = load_checkpoint(model_path)
@@ -309,6 +310,9 @@ class STSInferenceEngine:
                       heart_conditional=float(torch.sigmoid(outputs.heart[0])), heart_probability=heart,
                       expected_floor=expected_floor, value=(expected_floor+bonus*heart)/(57+bonus))
         self._last_evaluation = result
+        observer = getattr(self, "trace_observer", None)
+        if observer is not None:
+            observer(state, result)
         return result
 
     def evaluate_state_distribution(self, state):
@@ -368,6 +372,20 @@ class STSInferenceEngine:
                 return relic_item.get("name") or relic_item.get("id") or ""
             return str(relic_item)
 
+        def _heal(amount):
+            if "Mark of the Bloom" not in new_state["relics"]:
+                new_state["hp"] = min(new_state["max_hp"], new_state["hp"] + amount)
+
+        def _gain_max_hp(amount):
+            new_state["max_hp"] += amount
+            _heal(amount)
+
+        def _gain_gold(amount):
+            if "Ectoplasm" not in new_state["relics"]:
+                new_state["gold"] += amount
+                if amount > 0 and "Bloody Idol" in new_state["relics"]:
+                    _heal(5)
+
         def _add_obtained_card(card_id, amount=1):
             card = canonical_reference(card_id)
             if not card:
@@ -426,38 +444,39 @@ class STSInferenceEngine:
                 return False
             return _consume_omamori_charge_if_possible()
 
+        # Shop, event and boss-reward acquisitions must share on-equip effects.
+        if action == "buy_relic" and target:
+            new_state["gold"] -= choice.get("cost", 0)
+            action = "composite_event"
+            choice = {"effects": [{"type": "obtain_relic", "relic_id": target}]}
+
         if action == "composite_event":
             for effect in choice.get("effects", []):
                 e_type = effect.get("type")
                 if e_type == "lose_hp":
                     new_state["hp"] = max(1, new_state["hp"] - effect["amount"])
                 elif e_type == "gain_hp":
-                    new_state["hp"] = min(new_state["max_hp"], new_state["hp"] + effect["amount"])
+                    _heal(effect["amount"])
                 elif e_type == "lose_max_hp":
                     new_state["max_hp"] = max(1, new_state["max_hp"] - effect["amount"])
                     new_state["hp"] = min(new_state["hp"], new_state["max_hp"])
                 elif e_type == "gain_max_hp":
-                    new_state["max_hp"] += effect["amount"]
-                    new_state["hp"] += effect["amount"]
+                    _gain_max_hp(effect["amount"])
                 elif e_type == "gain_gold":
-                    new_state["gold"] += effect["amount"]
+                    _gain_gold(effect["amount"])
                 elif e_type == "lose_gold":
                     new_state["gold"] = max(0, new_state["gold"] - effect["amount"])
                 elif e_type == "lose_all_gold":
                     new_state["gold"] = 0
                 elif e_type == "remove_card":
                     card_id = effect.get("card_id")
-                    if card_id:
-                        entry = resolve_deck_entry(new_state["deck"], card_id)
+                    targets = effect.get("card_ids") or [card_id] * effect.get("amount", 1)
+                    for removal_target in targets:
+                        # Resolve each instance after the previous removal, so
+                        # duplicate IDs and mixed upgrade levels remain distinct.
+                        entry = (resolve_deck_entry(new_state["deck"], removal_target)
+                                 if removal_target else resolve_starter_entry(new_state["deck"]))
                         if entry is not None:
-                            new_state["deck"].remove(entry)
-                    else:
-                        # Unqualified removal: take the first starter still in the
-                        # deck, preferring its unupgraded copy.
-                        for _ in range(effect.get("amount", 1)):
-                            entry = resolve_starter_entry(new_state["deck"])
-                            if entry is None:
-                                break
                             new_state["deck"].remove(entry)
                 elif e_type == "random_upgrade":
                     amount = effect.get("amount", 1)
@@ -496,6 +515,8 @@ class STSInferenceEngine:
                     relic_id = effect.get("relic_id")
                     if not relic_id:
                         continue
+                    if relic_id in new_state["relics"]:
+                        continue
                     replacements = {
                         "Black Blood": ("Burning Blood",),
                         "Ring of the Serpent": ("Ring of the Snake", "Ring of Snake"),
@@ -507,6 +528,15 @@ class STSInferenceEngine:
                             new_state["relics"].remove(starter)
                     if relic_id not in new_state["relics"]:
                         new_state["relics"].append(relic_id)
+
+                    hp_gains = {"Strawberry": 7, "Pear": 10, "Mango": 14,
+                                "Lee's Waffle": 7, "Tiny House": 5}
+                    if relic_id in hp_gains:
+                        _gain_max_hp(hp_gains[relic_id])
+                    if relic_id == "Lee's Waffle":
+                        _heal(new_state["max_hp"])
+                    elif relic_id == "Old Coin":
+                        _gain_gold(300)
 
                     if relic_id == "Empty Cage":
                         for _ in range(2):
@@ -557,7 +587,7 @@ class STSInferenceEngine:
                     excluded = set(effect.get("exclude_ids", []))
                     new_state["deck"] = [card for card in new_state["deck"] if card not in curse_names or card in excluded]
                 elif e_type == "full_heal":
-                    new_state["hp"] = new_state["max_hp"]
+                    _heal(new_state["max_hp"])
                 elif e_type == "upgrade_all_cards":
                     new_state["deck"] = [card if "+" in card else card + "+1" for card in new_state["deck"]]
                 elif e_type == "upgrade_matching":
@@ -580,15 +610,11 @@ class STSInferenceEngine:
                     ]
                     new_state["deck"].extend([effect.get("card_id", "Bite")] * effect.get("amount", 5))
         elif action == "singing_bowl":
-            new_state["max_hp"] += 2
-            new_state["hp"] += 2
+            _gain_max_hp(2)
         elif action == "pick_card" and target:
             _add_obtained_card(target)
         elif action == "buy_card" and target:
             _add_obtained_card(target)
-            new_state["gold"] -= choice.get("cost", 0)
-        elif action == "buy_relic" and target:
-            new_state["relics"].append(target)
             new_state["gold"] -= choice.get("cost", 0)
         elif action == "buy_potion":
             new_state["gold"] -= choice.get("cost", 0)
@@ -625,7 +651,7 @@ class STSInferenceEngine:
             heal_amt = int(new_state["max_hp"] * 0.3)
             if "Regal Pillow" in new_state["relics"]:
                 heal_amt += 15
-            new_state["hp"] = min(new_state["hp"] + heal_amt, new_state["max_hp"])
+            _heal(heal_amt)
         elif action == "skip":
             pass
             
@@ -662,7 +688,40 @@ class STSInferenceEngine:
             elif choice.get("action") == "duplicate" and not choice.get("target"):
                 needs_duplicate_eval = True
 
-            if needs_purge_eval:
+            multi_purge = needs_purge_eval and any(
+                effect.get("type") == "remove_card"
+                and effect.get("card_id") in (None, "", "unknown_card")
+                and effect.get("amount", 1) > 1
+                for effect in choice.get("effects", [])
+            )
+            if multi_purge:
+                working = copy.deepcopy(current_state)
+                resolved, targets = [], []
+                complete = True
+                for effect in choice["effects"]:
+                    if (effect.get("type") == "remove_card"
+                            and effect.get("card_id") in (None, "", "unknown_card")):
+                        count = effect.get("amount", 1)
+                        selected = self.rank_cards_for_purpose(
+                            working, "purge", count, exclude_ids=exclude_purge_ids)
+                        if len(selected) != count:
+                            complete = False
+                            break
+                        effects = [{"type": "remove_card", "card_id": card, "amount": 1}
+                                   for card in selected]
+                        targets.extend(selected)
+                    else:
+                        effects = [effect]
+                    working = self._apply_choice(working, {"action": "composite_event", "effects": effects})
+                    resolved.extend(effects)
+                if not complete:
+                    continue
+                score = self.evaluate_state(working)
+                eval_choice = copy.deepcopy(choice)
+                eval_choice.update(effects=resolved, _purge_intent_id=targets[0],
+                                   _purge_intent_ids=targets, _grid_num_cards=len(targets))
+                self._print_choice_score(f"Choice: composite_purge (remove={targets})", score)
+            elif needs_purge_eval:
                 max_score_for_choice = -1.0
                 best_card_to_purge = None
 
@@ -795,6 +854,25 @@ class STSInferenceEngine:
         exclude_ids: optional set of card IDs to skip (e.g. curse cards for transform).
         Falls back to all cards if excluding leaves nothing.
         """
+        if n > 1 and purpose in ("purge", "transform"):
+            # A selection is a sequence of removals, not the top distinct IDs
+            # scored against the original deck. Re-rank after each instance.
+            working = copy.deepcopy(current_state)
+            targets = []
+            excluded = set(exclude_ids or ())
+            excluded.update({"AscendersBane", "Necronomicurse", "CurseOfTheBell"})
+            for _ in range(n):
+                legal = [card for card in working["deck"] if not _is_excluded(card, excluded)]
+                if not legal:
+                    break
+                ranked = self.rank_cards_for_purpose(working, purpose, 1, excluded)
+                target = next((card for card in ranked if card in legal), None)
+                if target is None:
+                    break
+                targets.append(target)
+                working["deck"].remove(target)
+            return targets
+
         deck = current_state.get("deck", [])
         unique_cards = list(dict.fromkeys(deck))
         scored = []

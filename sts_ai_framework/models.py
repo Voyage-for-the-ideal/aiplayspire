@@ -20,6 +20,14 @@ class Card(BaseModel):
     is_bottled: bool = False
     can_upgrade: bool = True
     misc: int = 0
+    # Already emitted by the bridge; None distinguishes absent data from zero.
+    damage: Optional[int] = None
+    base_damage: Optional[int] = None
+    block: Optional[int] = None
+    base_block: Optional[int] = None
+    magic_number: Optional[int] = None
+    base_magic_number: Optional[int] = None
+    exhausts: Optional[bool] = None
 
     @property
     def reference(self) -> str:

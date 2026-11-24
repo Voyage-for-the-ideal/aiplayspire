@@ -48,7 +48,7 @@ namespace sts {
         ELIXIR_EXHAUST,
         HOLOGRAM_GRID, SEEK_GRID,
         ARMAMENTS_HAND, TRUE_GRIT_HAND, DUAL_WIELD_HAND, BURNING_PACT_HAND,
-        SECRET_WEAPON_GRID, SECRET_TECHNIQUE_GRID, FORETHOUGHT_HAND,
+        SECRET_WEAPON_GRID, SECRET_TECHNIQUE_GRID, FORETHOUGHT_HAND, NIGHTMARE_HAND,
     };
     inline bool isHeadlessSecretFetch(CardSelectTask t) {
         return t==CardSelectTask::SECRET_WEAPON_GRID || t==CardSelectTask::SECRET_TECHNIQUE_GRID;
@@ -57,7 +57,7 @@ namespace sts {
         return t==CardSelectTask::HOLOGRAM_GRID || t==CardSelectTask::SEEK_GRID || t==CardSelectTask::OMNISCIENCE || isHeadlessSecretFetch(t);
     }
     inline bool isHeadlessSingleHand(CardSelectTask t) {
-        return t==CardSelectTask::ARMAMENTS_HAND || t==CardSelectTask::TRUE_GRIT_HAND || t==CardSelectTask::DUAL_WIELD_HAND || t==CardSelectTask::BURNING_PACT_HAND || t==CardSelectTask::FORETHOUGHT_HAND;
+        return t==CardSelectTask::ARMAMENTS_HAND || t==CardSelectTask::TRUE_GRIT_HAND || t==CardSelectTask::DUAL_WIELD_HAND || t==CardSelectTask::BURNING_PACT_HAND || t==CardSelectTask::FORETHOUGHT_HAND || t==CardSelectTask::NIGHTMARE_HAND;
     }
     inline bool isHeadlessMultiHand(CardSelectTask t) {
         return t==CardSelectTask::GAMBLER_DISCARD || t==CardSelectTask::ELIXIR_EXHAUST;
@@ -89,7 +89,7 @@ namespace sts {
             "DISCARD", "SCRY", "RETAIN",
             "OMNISCIENCE", "FOREIGN_INFLUENCE", "WISH", "GAMBLER_DISCARD", "LIQUID_MEMORIES_GRID", "HEADBUTT_GRID", "ELIXIR_EXHAUST", "HOLOGRAM_GRID", "SEEK_GRID",
             "ARMAMENTS_HAND", "TRUE_GRIT_HAND", "DUAL_WIELD_HAND", "BURNING_PACT_HAND",
-            "SECRET_WEAPON_GRID", "SECRET_TECHNIQUE_GRID", "FORETHOUGHT_HAND",
+            "SECRET_WEAPON_GRID", "SECRET_TECHNIQUE_GRID", "FORETHOUGHT_HAND", "NIGHTMARE_HAND",
     };
 
     struct CardSelectInfo {
@@ -113,8 +113,14 @@ namespace sts {
         int hexDazed = 0;
         bool inkDraw = false;
         bool letterOpener = false; // Pending third-skill relic hit.
-        int juggernautDamage = 0; // True Grit's block queues retaliation after cleanup.
+        bool orangePellets = false; // Pending debuff purge after completing the relic trio.
+        int juggernautDamage = 0; // A blocking skill queues retaliation after cleanup.
         int sharpHide = 0;
+        bool headbuttPenNibRemove = false;
+        bool headbuttPenNibBuff = false;
+        bool headbuttNunchakuEnergy = false;
+        bool headbuttOrnamentalBlock = false;
+        bool headbuttDarklingRepeat = false;
         bool headlessDiscovery = false;
         bool headlessShuffleScry = false;
         CardType discoverySourceType = CardType::INVALID; // INVALID=all colored, STATUS=colorless

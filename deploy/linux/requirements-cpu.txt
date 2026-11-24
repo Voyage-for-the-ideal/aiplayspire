@@ -1,0 +1,11 @@
+# Install torch==2.7.1 separately using the official CPU-only index (see README).
+-r ../../sts_ai_framework/requirements.txt
+# Match the versions exercised in the existing local spire environment.
+openai==3.8.0
+httpx==0.28.1
+pydantic>=2.0,<3
+numpy==2.4.6
+pandas==3.0.5
+pyarrow==23.0.0
+scikit-learn==1.9.0
+matplotlib==3.11.1

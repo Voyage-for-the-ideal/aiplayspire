@@ -11,6 +11,7 @@ add_library(battle_core STATIC src/Snapshot.cpp src/SelectionSnapshot.cpp src/Tu
 target_link_libraries(battle_core PUBLIC sts_engine)
 add_executable(battle-engine-worker src/main.cpp)
 target_link_libraries(battle-engine-worker PRIVATE battle_core)
+target_compile_definitions(battle-engine-worker PRIVATE "$<$<CONFIG:Release>:AIP_RELEASE_BUILD>")
 target_compile_definitions(battle_core PUBLIC NOMINMAX)
 set(BATTLE_ENGINE_OUTPUT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/bin" CACHE PATH "Worker output directory")
 set_target_properties(battle-engine-worker PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${BATTLE_ENGINE_OUTPUT_DIR}")

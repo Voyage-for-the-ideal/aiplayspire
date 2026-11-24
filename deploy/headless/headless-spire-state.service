@@ -1,0 +1,37 @@
+[Unit]
+Description=Headless Spire pre-run read-only state
+After=network.target
+
+[Service]
+Type=exec
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/headless-spire-poc
+ExecStart=/bin/bash /home/ubuntu/headless-spire-poc/tools/start-state.sh
+Restart=no
+TimeoutStartSec=30
+TimeoutStopSec=10
+KillMode=control-group
+UMask=0027
+MemoryHigh=256M
+MemoryMax=768M
+MemorySwapMax=0
+CPUQuota=100%
+TasksMax=64
+LimitNOFILE=256
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/headless-spire-poc/saves
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=100
+
+# Intentionally no Install section: this PoC has no boot-time activation.

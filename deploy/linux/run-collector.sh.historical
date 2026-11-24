@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source "$(dirname -- "${BASH_SOURCE[0]}")/common.sh"
+require_gate ALLOW_GAME
+require_gate ALLOW_COLLECTION
+claim_lock collector
+cd "$AIP_ROOT"
+"$AIP_PYTHON" "$AIP_ROOT/deploy/linux/preflight.py" --mode collector --model
+"$AIP_PYTHON" "$AIP_ROOT/deploy/linux/wait-ready.py" game
+session="$("$AIP_PYTHON" -c 'import uuid; print(uuid.uuid4().hex)')"
+# LearningRecorder creates the session directory exclusively; create only its parent.
+mkdir -p "$AIP_RUNTIME/traces" "$RUN_LOG_DIR"
+export AUTO_RESTART=true
+arguments=(--api-base-url "http://127.0.0.1:$AIP_API_PORT" --character "$AIP_CHARACTER"
+    --ascension "$AIP_ASCENSION" --interval "$AIP_INTERVAL" --restart-delay 3
+    --route-policy planner --debug-prompt-file ''
+    --learning-trace-dir "$AIP_RUNTIME/traces/$session"
+    --policy-runtime-manifest "$AIP_RUNTIME/runtime-manifest.json")
+if [[ "$AIP_MAX_RUNS" != 0 ]]; then arguments+=(--max-runs "$AIP_MAX_RUNS"); fi
+exec "$AIP_PYTHON" -m sts_ai_framework "${arguments[@]}"

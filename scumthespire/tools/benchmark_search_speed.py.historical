@@ -1,0 +1,216 @@
+"""Fixed-work Java search timing on existing snapshots; never plays a live run.
+
+Both jars use DEEP (no wall-clock-dependent streamed commits), an explicit fixed
+expansion limit, identical input snapshots and unchanged tactical evaluation.
+Every measured result must match commands, final key and expansion count; the
+last sample of each snapshot is also replayed with the ordinary diff guards.
+"""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import socket
+import statistics
+import subprocess
+import sys
+import time
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from battle_engine import protocol
+
+MODS = ("BaseMod.jar", "SaveStateMod.jar", "StSLib.jar", "LudicrousSpeed.jar", "BattleAiMod.jar", "CommunicationMod.jar")
+
+
+def sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def write(path, data):
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def sample(args, source, directory, replay):
+    directory.mkdir(parents=True)
+    start = directory / "start.txt"
+    shutil.copy2(source, start)
+    with socket.create_connection(("127.0.0.1", args.port), timeout=5) as connection:
+        connection.settimeout(180)
+        started = time.perf_counter()
+        protocol.send(connection, json.dumps({"fileName": str(start), "client_cwd": str(directory),
+            "command_file": str(directory / "commands.json"), "search_profile": "DEEP",
+            "num_turns": args.nodes, "max_expansions": args.nodes, "timeout_ms": 90000}))
+        final = None
+        progress_at_ms = []
+        while True:
+            text = protocol.receive(connection)
+            if text == "DONE":
+                break
+            response = json.loads(text)
+            if response.get("type") == "STATUS_UPDATE":
+                progress_at_ms.append((time.perf_counter() - started) * 1000)
+            if response.get("type") == "ERROR":
+                raise RuntimeError(str(response))
+            if response.get("type") == "COMMAND_LIST":
+                final = response
+        wall_ms = (time.perf_counter() - started) * 1000
+        if final is None:
+            raise RuntimeError("missing final command list")
+        if "commands" not in final:
+            final = json.loads(Path(final["command_path"]).read_text(encoding="utf-8"))
+        write(directory / "result.json", final)
+        if replay:
+            protocol.send(connection, json.dumps({"type": "REPLAY", "fileName": str(start),
+                "client_cwd": str(directory), "commands": final["commands"], "timeout_ms": 30000}))
+            check = json.loads(protocol.receive(connection))
+            write(directory / "replay.json", check)
+            if not check.get("diff_valid") or check.get("final_state_key") != final["final_state_key"]:
+                raise RuntimeError("replay mismatch: " + str(check))
+    commands = [json.loads(entry["command"]) for entry in final["commands"] if entry is not None]
+    return {"metrics": final["metrics"], "wall_ms": wall_ms, "final_state_key": final["final_state_key"],
+            "completion_wakeup_ms": final.get("completion_wakeup_ms"),
+            "progress_at_ms": progress_at_ms,
+            "commands": commands, "replay_checked": replay,
+            "commands_sha256": hashlib.sha256(json.dumps(commands, sort_keys=True).encode()).hexdigest()}
+
+
+def phase(args, name, jar, verify=False, samples=None):
+    directory = args.output / name
+    runtime = directory / "runtime"
+    runtime.mkdir(parents=True)
+    for filename in ("desktop-1.0.jar", "ModTheSpire.jar"):
+        shutil.copy2(args.game_dir / filename, runtime / filename)
+    shutil.copytree(args.game_dir / "jre", runtime / "jre")
+    shutil.copytree(args.game_dir / "preferences", runtime / "preferences")
+    (runtime / "mods").mkdir()
+    for filename in MODS:
+        shutil.copy2(jar if filename == "BattleAiMod.jar" else ROOT / "_ModTheSpire/mods" / filename,
+                     runtime / "mods" / filename)
+    config = runtime / "appdata/ModTheSpire"
+    config.mkdir(parents=True)
+    (runtime / "tmp").mkdir()
+    write(config / "mod_lists.json", {"defaultList": "SearchSpeed", "lists": {"SearchSpeed": list(MODS)}})
+    env = dict(os.environ, LOCALAPPDATA=str(runtime / "appdata"), APPDATA=str(runtime / "appdata"))
+    command = [str(args.game_dir / "jre/bin/java.exe"), *args.jvm_args, "-DisServer=true", "-DisPlaidMode=true",
+        "-Djava.io.tmpdir=" + str(runtime / "tmp"),
+        "-Dbattleai.testMode=true", "-Dbattleai.port=" + str(args.port), "-Dcommunicationmod.port=15001",
+        "-Xms512m", "-Xmx2048m", "-jar", "ModTheSpire.jar", "--profile", "SearchSpeed",
+        "--skip-launcher", "--skip-intro", "--jre51"]
+    if verify:
+        command.insert(1, "-Dbattleai.verifyDirectStateKey=true")
+    warmups = 1 if verify else args.warmups
+    write(directory / "launch.json", {"command": command, "reference_verification": verify, "warmups": warmups})
+    samples = args.samples if samples is None else samples
+    result = {}
+    with (directory / "server.log").open("w", encoding="utf-8") as log:
+        process = subprocess.Popen(command, cwd=runtime, stdout=log, stderr=subprocess.STDOUT, env=env,
+                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        try:
+            deadline = time.monotonic() + 180
+            while True:
+                if process.poll() is not None:
+                    raise RuntimeError("Java search engine exited; see " + str(directory / "server.log"))
+                try:
+                    with socket.create_connection(("127.0.0.1", args.port), timeout=1) as connection:
+                        connection.settimeout(1)
+                        protocol.send(connection, '{"type":"PING"}')
+                        if json.loads(protocol.receive(connection)).get("test_mode"):
+                            break
+                except (OSError, EOFError):
+                    pass
+                if time.monotonic() > deadline:
+                    raise TimeoutError("Java test-engine startup timeout")
+                time.sleep(1)
+            for index, source in enumerate(args.snapshots):
+                case = directory / str(index)
+                for warmup in range(warmups):
+                    label = "warmup" if warmup == warmups - 1 else "warmup-" + str(warmup)
+                    print(name, source.name, label, flush=True)
+                    sample(args, source, case / label, False)
+                rows = []
+                for iteration in range(samples):
+                    row = sample(args, source, case / str(iteration), iteration == samples - 1)
+                    rows.append(row)
+                    print(name, source.name, iteration, json.dumps(row["metrics"]), flush=True)
+                result[source.name] = rows
+                write(directory / "samples.json", result)
+        finally:
+            if process.poll() is None:
+                try:
+                    # A normal test-mode shutdown also flushes JVM profiler output.
+                    with socket.create_connection(("127.0.0.1", args.port), timeout=2) as connection:
+                        connection.settimeout(2)
+                        protocol.send(connection, '{"type":"SHUTDOWN"}')
+                        protocol.receive(connection)
+                    process.wait(timeout=15)
+                except (OSError, EOFError, subprocess.TimeoutExpired):
+                    if process.poll() is None:
+                        process.terminate()
+                        process.wait(timeout=10)
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--game-dir", type=Path, default=Path("D:/Program Files/Slay the Spire"))
+    parser.add_argument("--baseline-jar", type=Path, required=True)
+    parser.add_argument("--candidate-jar", type=Path, default=ROOT / "_ModTheSpire/mods/BattleAiMod.jar")
+    parser.add_argument("--snapshots", type=Path, nargs="+", required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--nodes", type=int, default=15000)
+    parser.add_argument("--samples", type=int, default=3)
+    parser.add_argument("--warmups", type=int, default=1, help="Untimed fixed-work warmups per case (reference-verification phase uses one)")
+    parser.add_argument("--candidate-first", action="store_true", help="Reverse phase order for a counterbalanced timing repeat")
+    parser.add_argument("--port", type=int, default=15125)
+    parser.add_argument("--verify-candidate", action="store_true", help="Extra untimed candidate phase checking every direct key against the full canonical reference")
+    parser.add_argument("--jvm-arg", dest="jvm_args", action="append", default=[],
+                        help="Optional JVM diagnostics (e.g. --jvm-arg=-Xprof); omit for timing comparisons")
+    args = parser.parse_args()
+    args.game_dir, args.output = args.game_dir.resolve(), args.output.resolve()
+    args.snapshots = [p.resolve() for p in args.snapshots]
+    args.baseline_jar, args.candidate_jar = args.baseline_jar.resolve(), args.candidate_jar.resolve()
+    if args.nodes <= 0 or args.samples <= 0 or args.warmups <= 0:
+        parser.error("nodes, samples and warmups must be positive")
+    if len({p.name for p in args.snapshots}) != len(args.snapshots):
+        parser.error("snapshot basenames must be distinct")
+    args.output.mkdir(parents=True, exist_ok=False)
+    write(args.output / "manifest.json", {"nodes": args.nodes, "samples": args.samples, "warmups": args.warmups,
+        "phase_order": ["candidate", "baseline"] if args.candidate_first else ["baseline", "candidate"], "jvm_args": args.jvm_args,
+        "baseline_sha256": sha(args.baseline_jar), "candidate_sha256": sha(args.candidate_jar),
+        "snapshots": {str(p): sha(p) for p in args.snapshots}})
+    if args.candidate_first:
+        after = phase(args, "candidate", args.candidate_jar)
+        before = phase(args, "baseline", args.baseline_jar)
+    else:
+        before = phase(args, "baseline", args.baseline_jar)
+        after = phase(args, "candidate", args.candidate_jar)
+    verified = phase(args, "verified", args.candidate_jar, verify=True, samples=1) if args.verify_candidate else None
+    comparisons = {}
+    for source in args.snapshots:
+        a, b = before[source.name], after[source.name]
+        signature = lambda row: (row["final_state_key"], row["commands_sha256"], row["metrics"]["expanded_nodes"])
+        signatures = {signature(row) for row in a + b}
+        entry = {"identical_search_result": len(signatures) == 1}
+        if verified is not None:
+            entry["per_node_reference_verified"] = all(signature(row) in signatures for row in verified[source.name])
+        for field in ("elapsed_ms", "state_key_ms", "state_key_encode_ms", "state_key_canonical_hash_ms"):
+            left = statistics.median(row["metrics"][field] for row in a)
+            right = statistics.median(row["metrics"][field] for row in b)
+            entry[field] = {"baseline": left, "candidate": right, "speedup": left / right if right else None}
+        entry["wall_ms"] = {"baseline": statistics.median(row["wall_ms"] for row in a),
+                            "candidate": statistics.median(row["wall_ms"] for row in b)}
+        wakes = [row["completion_wakeup_ms"] for row in b if row.get("completion_wakeup_ms") is not None]
+        if wakes:
+            entry["completion_wakeup_ms"] = {"median": statistics.median(wakes), "max": max(wakes)}
+        gaps = [right - left for row in b for left, right in zip(row["progress_at_ms"], row["progress_at_ms"][1:])]
+        entry["minimum_observed_progress_interval_ms"] = min(gaps) if gaps else None
+        comparisons[source.name] = entry
+    write(args.output / "comparison.json", comparisons)
+    print(json.dumps(comparisons, indent=2), flush=True)
+    return 0 if all(r["identical_search_result"] and r.get("per_node_reference_verified", True) for r in comparisons.values()) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

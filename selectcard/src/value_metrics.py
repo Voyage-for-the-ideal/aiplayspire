@@ -20,6 +20,14 @@ def common_entropy(rates):
     return np.maximum(-(p*np.log(p)+(1-p)*np.log1p(-p)), COMMON_ENTROPY_FLOOR)
 
 
+def terminal_floor_mae(predictions, terminals):
+    # Cast before subtraction: float32 rounding can turn an exact MAE tie into
+    # a regression against the float64 contextual baseline on another platform.
+    predicted = np.asarray(predictions, dtype=np.float64)
+    observed = np.asarray(terminals, dtype=np.float64)
+    return float(np.abs(predicted - observed).mean()) if predicted.size else float("nan")
+
+
 def nll_metrics(probabilities, targets, masks, baseline_rates, sample_weights=None):
     p = np.clip(np.asarray(probabilities, dtype=float), 1e-7, 1-1e-7)
     y, m = np.asarray(targets, dtype=float), np.asarray(masks, dtype=bool)
@@ -122,7 +130,7 @@ def evaluate(model, loader, device, progress=None, name="Validation", baseline_r
         known = include & a["known"]
         result["samples"] = int(include.sum())
         result["terminal_samples"] = int(known.sum())
-        result["terminal_floor_mae"] = float(np.abs(a["prediction"][known]-a["terminal"][known]).mean()) if known.any() else float("nan")
+        result["terminal_floor_mae"] = terminal_floor_mae(a["prediction"][known], a["terminal"][known])
         result["heart_win"] = _classification_metrics(a["y"][known, -1], a["p"][known, -1])
         result["heart_win"].update(samples=int(known.sum()), positive_rate=float(a["y"][known, -1].mean()) if known.any() else float("nan"))
         return result
@@ -168,7 +176,7 @@ def evaluate(model, loader, device, progress=None, name="Validation", baseline_r
         heart_rows = common_mask[:, -1]
         common_metrics["heart_win"] = _classification_metrics(a["y"][heart_rows,-1], a["p"][heart_rows,-1])
         common_metrics["terminal_samples"] = int(heart_rows.sum())
-        common_metrics["terminal_floor_mae"] = float(np.abs(a["prediction"][heart_rows]-a["terminal"][heart_rows]).mean()) if heart_rows.any() else float("nan")
+        common_metrics["terminal_floor_mae"] = terminal_floor_mae(a["prediction"][heart_rows], a["terminal"][heart_rows])
         metrics["common_by_distance"][label] = common_metrics
         distance = ends[None] - a["floor"][:, None]
         metrics["by_distance"][label] = {}
@@ -193,7 +201,7 @@ def evaluate(model, loader, device, progress=None, name="Validation", baseline_r
                         bf[i] = entry["terminal_mean"]
         result = nll_metrics(bp, a["y"], a["m"], rates, w)
         observed = a["known"]
-        result["terminal_floor_mae"] = float(np.abs(np.maximum(bf, a["floor"])[observed]-a["terminal"][observed]).mean()) if observed.any() else float("nan")
+        result["terminal_floor_mae"] = terminal_floor_mae(np.maximum(bf, a["floor"])[observed], a["terminal"][observed])
         metrics[label] = result
     metrics["skill"] = 1-metrics["common_nll"]/metrics["contextual_baseline"]["common_nll"]
     metrics["value"] = metrics["common_nll"]

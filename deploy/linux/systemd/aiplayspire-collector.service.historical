@@ -1,0 +1,29 @@
+[Unit]
+Description=AIPlaySpire bounded learning-trace collector
+BindsTo=aiplayspire-game.service aiplayspire-gateway.service
+After=aiplayspire-game.service aiplayspire-gateway.service
+PartOf=aiplayspire.target
+ConditionPathExists=/home/ubuntu/aiplayspire-runtime/ALLOW_GAME
+ConditionPathExists=/home/ubuntu/aiplayspire-runtime/ALLOW_COLLECTION
+StartLimitIntervalSec=900
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+Slice=aiplayspire.slice
+MemoryAccounting=yes
+WorkingDirectory=/home/ubuntu/aiplayspire
+EnvironmentFile=-/etc/aiplayspire/credentials.env
+ExecStart=/bin/bash /home/ubuntu/aiplayspire/deploy/linux/run-collector.sh
+Restart=on-failure
+RestartSec=15
+KillSignal=SIGINT
+KillMode=control-group
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+LogNamespace=aiplayspire

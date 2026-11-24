@@ -5,9 +5,10 @@ import tempfile
 import unittest
 from unittest.mock import patch
 import torch
-from .contracts import FORMAT, observable_state, split_for, validate_example
+from .contracts import FORMAT, SCALARS, SCALES, observable_state, split_for, validate_example
 from .encoding import FEATURES, action_parts, build_vocabulary, encode_batch, state_parts
 from .model import SetPolicy, HeartValue
+from .profiles import LIVE_PROFILE, MIXED_PROFILE, RUN_PROFILE, project_state
 from .training import awr_weights, heart_return, is_bc_example, train_epoch
 from .data import build_examples
 from .evaluate_runs import compare_runs
@@ -39,6 +40,29 @@ class PolicyTests(unittest.TestCase):
             self.assertNotIn(key, projected)
         self.assertIsNone(projected["hp"])
         self.assertFalse(projected["known"]["hp"])
+
+    def test_only_run_profile_masks_gold_and_grid_scalars(self):
+        row = example()
+        state = row["pre_state"]
+        values = {"gold": 100, "grid_selected_count": 0, "grid_num_cards": 1}
+        state.update(values)
+        state["known"].update(dict.fromkeys(values, True))
+        original = copy.deepcopy(state)
+        for profile in (RUN_PROFILE, LIVE_PROFILE, MIXED_PROFILE):
+            with self.subTest(profile=profile):
+                profiled = dict(row, input_profile=profile)
+                projected = project_state(state, profile)
+                globals_ = encode_batch([profiled], build_vocabulary([profiled]))["globals"][0]
+                masked = profile == RUN_PROFILE
+                for key, value in values.items():
+                    self.assertEqual(projected[key], None if masked else value)
+                    self.assertEqual(projected["known"][key], not masked)
+                    i = SCALARS.index(key)
+                    expected = [0., 0.] if masked else [value / SCALES[i], 1.]
+                    torch.testing.assert_close(globals_[2 * i:2 * i + 2], torch.tensor(expected))
+                self.assertEqual(projected["hp"], original["hp"])
+                self.assertTrue(projected["known"]["hp"])
+        self.assertEqual(state, original)
 
     def test_set_policy_is_candidate_permutation_equivariant(self):
         row = example()

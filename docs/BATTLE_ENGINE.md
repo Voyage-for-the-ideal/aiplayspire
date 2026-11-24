@@ -7,15 +7,16 @@ Windows BattleAiMod 的 JNI 动态库和 Linux 无头 JSONL worker 均链接同�
 Linux 在仓库根目录构建 C++17 worker，无需 JNI/JDK 头文件：
 
 ```sh
-cmake -S battle_engine -B battle_engine/build/linux -DCMAKE_BUILD_TYPE=Release
-cmake --build battle_engine/build/linux --target battle-engine-worker --parallel
+bash battle_engine/build.sh 2
 ```
 
-产物为 `battle_engine/bin/battle-engine-worker`，原有 `--serve` JSONL 协议保持不变。将它部署到**独立采集运行目录**，从冻结的 repo 运行，保留已配置的 headless JVM、模型、角色、种子及并发。部署机先按现有 `deploy/headless/run-collection-acceptance.sh <runtime> --preflight` 检查完整环境，切换前保留现用 worker 文件及其 SHA-256；不要覆盖基线副本。
+产物为 `battle_engine/bin/battle-engine-worker` 和配套的 `.release.json`，原有 `--serve` JSONL 协议保持不变。上述构建命令只生成候选产物，不启动或部署采集；生产预检同时核对内嵌构建类型和 SHA-256。
 
 ### Linux 当前采集入口
 
-服务器的 `/home/ubuntu/headless-spire-poc/current-collector` 指向版本化采集目录。执行 `bash /home/ubuntu/headless-spire-poc/tools/run-current-collector.sh --preflight` 可只读查看生效配置。两份作用域许可均未开启时，启动入口直接退出。
+**服务器只留一套可运行项目。** `current-collector` 指向现有生产采集目录；发布原地更新，不切换入口、不新建并行发布目录、不留旧版备份。保持生产模型、搜索参数和冻结档案原样。历史批次只保留轨迹、配置和报告，不留可启动的项目副本。
+
+执行 `bash /home/ubuntu/headless-spire-poc/tools/run-current-collector.sh --preflight` 只读检查当前入口。验收使用同一项目下的临时 session，验收轨迹归入报告，不混进采集集。发布默认不启动采集或重启只读服务；整局验收结束后收回临时许可。早期验收报告引用的独立运行目录和 `run-collection-acceptance.sh <runtime>` 命令仅为历史记录。
 
 当前配置沿用桌面 `legacy / DEEP` 的搜索行为，按要求将 Linux 预算固定为每次 **15,000 次节点展开**。采集根目录的 `combat-search.json` 中 `timeout_ms=0` 表示没有搜索墙钟截止，Python worker 等待也不设搜索超时；关闭采集闸门或发出停止信号仍可取消。其他游戏驱动的超时不变。已封存的旧批次配置和数据不改写。
 
@@ -39,6 +40,8 @@ python -m unittest discover -s sts_ai_framework/tests -t .
 ```
 
 Maven JNI 契约和隔离的游戏实战见[实机步骤](../AUTOFIGHT.md)。Linux 整局验收单独进行：验证胜、负、异常隔离及下一局继续；检查 episode 验证器的终局证据。正常战败属于有效完整对局；中断、引擎失配或缺失终局不属于有效样本。
+
+历史故障及可复验入口见[防错验收证据](REGRESSION_EVIDENCE.md)。单步回执优先离线回放，只有最终发布验收需要整局。
 
 ## 第二阶段：对照实测后再切策略
 

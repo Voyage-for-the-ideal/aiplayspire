@@ -2,8 +2,8 @@
   "modid": "CommunicationMod",
   "name": "Communication Mod",
   "author_list": ["YourName"],
-  "description": "Structured state/action bridge with event semantics, local Cursed Tome flow, full run-lifecycle control, card reward skip and Singing Bowl handling, and pre-rolled chest facts. Adds full visible shop stock/prices with legacy action-index alignment, selected grid cards and permanent card values, seed-group metadata, legal potion use/discard, configurable port, an opt-in isolated real-engine shop-generation probe, and guarded boss relic pickup with Astrolabe grid recognition.",
-  "version": "1.6.2",
+  "description": "Structured state/action bridge with event semantics, local Cursed Tome flow, full run-lifecycle control, card reward skip and Singing Bowl handling, and pre-rolled chest facts. Adds full visible shop stock/prices with legacy action-index alignment, selected grid cards and permanent card values, seed-group metadata, legal potion use/discard, configurable port, an opt-in isolated real-engine shop-generation probe, guarded boss relic pickup with Astrolabe grid recognition, and deferred boss relic landing so transform/purge card grids open after the boss relic screen closes. Publishes permanent base damage/block/magic values before combat initialization for visible-deck routing and previews The Library's 20-card offer and Knowing Skull's next colorless card without advancing game RNG.",
+  "version": "1.8.0",
   "dependencies": ["basemod"],
   "entry_point": "com.example.communicationmod.CommunicationMod",
   "credits": ""

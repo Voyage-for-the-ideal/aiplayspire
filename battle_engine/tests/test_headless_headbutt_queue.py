@@ -42,6 +42,15 @@ class HeadbuttQueueGuardTest(unittest.TestCase):
             bad=copy.deepcopy(s);change(bad['grid_card_select_screen_state'])
             with self.assertRaises(HeadlessContractError):_headbutt_evidence(bad)
 
+    def test_stacked_double_tap_keeps_remaining_charge_without_removal_action(self):
+        _,s=double_boundary();p=s['player_state'];v=s['grid_card_select_screen_state']
+        p['creature']['powers'][-1]['amount']=1
+        v['action_queue'].pop(0)
+        _headbutt_evidence(s)
+        v['action_queue'].insert(0,{'state_class':'savestate.actions.RemoveSpecificPowerActionState',
+            'state':{'ownerIndex':-1,'powerId':'Double Tap'}})
+        with self.assertRaises(HeadlessContractError):_headbutt_evidence(s)
+
     def test_guardian_pending_transition_keys_on_slot_not_pixel_x(self):
         s=opened_headbutt_raw(normal_headbutt_raw())['combat']['snapshot'];m=s['cur_map_node_state']['monster_data'][0]
         m['creature'].update(id='TheGuardian',draw_x=926.6667,powers=[{'power_id':'Mode Shift','amount':-8}])
@@ -66,6 +75,20 @@ class NativeHeadbuttQueueTest(unittest.TestCase):
         for expected,observed in (('expected_after','projection'),('expected_selection','selection'),('expected_exact_rng','exact_rng'),
                                   ('expected_selection_native_key','selection_native_key')):
             self.assertEqual(pred[expected],f[observed],expected)
+
+    def test_cleanup_keeps_the_defeated_external_target_slot(self):
+        s=opened_headbutt_raw(normal_headbutt_raw())['combat']['snapshot']
+        monsters=s['cur_map_node_state']['monster_data']
+        defeated=copy.deepcopy(monsters[0])
+        defeated['creature'].update(current_health=0,is_dead=True,is_dying=True)
+        monsters.insert(0,defeated)
+        probe=self.request(s,'fingerprint')
+        self.assertTrue(probe['supported'],probe)
+        self.assertEqual(probe['selection']['pending_card']['target'],0)
+        picked=self.run_action(s,{'type':'GRID_SELECT','card_index':0})
+        self.assertEqual(picked['expected_screen'],'NONE')
+        s['grid_card_select_screen_state']['action_queue'][-1]['state']['targetIndex']=2
+        self.assertFalse(self.request(s,'fingerprint')['supported'])
 
     def test_rage_block_waits_for_choice_and_binds_power_amount(self):
         raw=normal_headbutt_raw();s=raw['combat']['snapshot'];p=s['player_state']
@@ -96,7 +119,23 @@ class NativeHeadbuttQueueTest(unittest.TestCase):
         tail['state']['owner_index']=1
         self.assertFalse(self.request(paused,'fingerprint')['supported'])
 
-    def test_shuriken_and_kunai_wait_for_grid_in_relic_order(self):
+    def test_darkling_queued_regrow_repeats_move_history_after_choice(self):
+        paused=opened_headbutt_raw(normal_headbutt_raw())['combat']['snapshot'];m=paused['cur_map_node_state']['monster_data'][0]
+        m['creature'].update(id='Darkling',current_health=0,is_dead=False,is_dying=False,half_dead=True)
+        m.update(next_move=4,move_history=[2,4],intent_name='UNKNOWN',move_base_damage=-1,
+                 move_adjusted_damage=-1,move_hits=1,_private={
+                     'Darkling.chompDmg':9,'Darkling.firstMove':False,'Darkling.nipDmg':10})
+        tail={'state_class':'savestate.actions.HeadbuttMonsterTailState',
+              'state':{'kind':'darkling_repeat_regrow','owner_index':0}}
+        mqueue=paused['grid_card_select_screen_state']['action_queue'];mqueue.append(tail)
+        self.assertTrue(self.request(paused,'fingerprint')['supported'])
+        done=self.run_action(paused,{'type':'GRID_SELECT','card_index':0})
+        darkling=next(row for row in done['expected_native_key'] if isinstance(row,list) and len(row)==30 and row[1]==0)
+        self.assertEqual(darkling[8],darkling[9])
+        tail['state']['kind']='darkling_repeat_unknown'
+        self.assertFalse(self.request(paused,'fingerprint')['supported'])
+
+    def test_shuriken_and_kunai_wait_for_grid_with_exact_effects(self):
         raw=normal_headbutt_raw();s=raw['combat']['snapshot'];p=s['player_state']
         p['relics'].extend([{'relic_id':relic,'counter':2} for relic in ('Shuriken','Kunai')])
         prior=copy.deepcopy(p['discard_pile'][:2])
@@ -113,10 +152,46 @@ class NativeHeadbuttQueueTest(unittest.TestCase):
         done=self.run_action(paused,{'type':'GRID_SELECT','card_index':0})
         self.assertEqual(done['expected_screen'],'NONE')
         q[0],q[1]=q[1],q[0]
-        self.assertFalse(self.request(paused,'fingerprint')['supported'])
-        q[0],q[1]=q[1],q[0]
+        self.assertTrue(self.request(paused,'fingerprint')['supported'])
         q[0]['state']['amount']=2
         self.assertFalse(self.request(paused,'fingerprint')['supported'])
+
+    def test_pen_nib_remove_and_attack_relic_followups_are_bound(self):
+        raw=normal_headbutt_raw();s=raw['combat']['snapshot'];p=s['player_state']
+        prior=copy.deepcopy(p['discard_pile'][:2])
+        for c in prior:c['card_id']='Strike_R'
+        s['cards_played_this_turn_backup']=prior
+        p['relics'].extend([
+            {'relic_id':'Pen Nib','counter':8},
+            {'relic_id':'Nunchaku','counter':9},
+            {'relic_id':'Ornamental Fan','counter':2},
+        ])
+        first=self.run_action(s,{'type':'CARD','card_index':0,'monster_index':0})
+        paused=opened_headbutt_raw(raw)['combat']['snapshot'];pp=paused['player_state']
+        paused['cards_played_this_turn_backup']=prior+[pp['card_in_use']]
+        for relic,counter in zip(pp['relics'][-3:],(9,0,0)):relic['counter']=counter
+        q=paused['grid_card_select_screen_state']['action_queue']
+        q[:0]=[
+            {'state_class':'savestate.actions.HeadbuttPenNibActionState','state':{'owner_index':-1,'amount':1}},
+            {'state_class':'savestate.actions.HeadbuttNunchakuActionState','state':{'amount':1}},
+            {'state_class':'savestate.actions.HeadbuttOrnamentalFanActionState','state':{'amount':4}},
+        ]
+        self.compare(first,paused)
+        done=self.run_action(paused,{'type':'GRID_SELECT','card_index':0})
+        self.assertEqual(done['expected_after']['energy'],first['expected_after']['energy']+1)
+        self.assertEqual(done['expected_after']['block'],first['expected_after']['block']+4)
+        q[0]['state']['amount']=2
+        self.assertFalse(self.request(paused,'fingerprint')['supported'])
+
+        active=opened_headbutt_raw(normal_headbutt_raw())['combat']['snapshot'];ap=active['player_state']
+        ap['relics'].append({'relic_id':'Pen Nib','counter':9})
+        ap['creature']['powers'].append({'power_id':'Pen Nib','amount':1})
+        active['grid_card_select_screen_state']['action_queue'].insert(0,{
+            'state_class':'savestate.actions.RemoveSpecificPowerActionState',
+            'state':{'ownerIndex':-1,'powerId':'Pen Nib'}})
+        self.assertTrue(self.request(active,'fingerprint')['supported'])
+        active['grid_card_select_screen_state']['action_queue'][0]['state']['powerId']='Vigor'
+        self.assertFalse(self.request(active,'fingerprint')['supported'])
 
     def test_double_tap_binds_two_real_choices_and_does_not_discard_the_copy(self):
         s,opened=double_boundary()
@@ -129,6 +204,14 @@ class NativeHeadbuttQueueTest(unittest.TestCase):
         self.assertEqual(done['expected_exact_rng'],second['expected_exact_rng'])
         bad=copy.deepcopy(opened);bad['grid_card_select_screen_state']['action_queue'].reverse()
         self.assertFalse(self.request(bad,'fingerprint')['supported'])
+
+    def test_stacked_double_tap_keeps_one_charge_at_the_first_grid(self):
+        s,opened=double_boundary()
+        s['player_state']['creature']['powers'][-1]['amount']=2
+        opened['player_state']['creature']['powers'][-1]['amount']=1
+        opened['grid_card_select_screen_state']['action_queue'].pop(0)
+        first=self.run_action(s,{'type':'CARD','card_index':0,'monster_index':0})
+        self.compare(first,opened)
 
     def test_flight_reduction_waits_for_grid_then_grounds_byrd(self):
         raw=normal_headbutt_raw();s=raw['combat']['snapshot'];m=s['cur_map_node_state']['monster_data'][0]

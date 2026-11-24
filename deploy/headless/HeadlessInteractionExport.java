@@ -751,6 +751,7 @@ public final class HeadlessInteractionExport {
                 String purpose = flag(h, "forUpgrade") ? "upgrade" : flag(h, "forTransform") ? "transform" :
                         action.equals("WarcryAction") || action.equals("PutOnDeckAction") ? "topdeck" : action.equals("DualWieldAction") ? "duplicate_combat" :
                         action.equals("ForethoughtAction") && "Forethought".equals(HeadlessCombatExport.singleHandSource()) ? "forethought" :
+                        action.equals("NightmareAction") && "Night Terror".equals(HeadlessCombatExport.singleHandSource()) ? "nightmare" :
                         action.contains("Exhaust") ? "exhaust" : action.equals("GamblingChipAction") ? "gamble" : action.contains("Discard") ? "discard" : action.contains("Retain") ? "retain" : "unknown";
                 boolean any = flag(h, "anyNumber") || h.upTo;
                 selection = object("kind", "hand", "purpose", purpose, "count", h.numCardsToSelect,

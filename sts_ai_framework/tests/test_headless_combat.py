@@ -2,19 +2,100 @@
 import copy
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
 from uuid import UUID
 
 from battle_engine.state import projection, context
-from sts_ai_framework.headless.combat import (HeadlessCombatBridge, verify_combat_effect,
+from sts_ai_framework.headless.combat import (CombatPlan, HeadlessCombatBridge, verify_combat_effect,
     SCHEMA, STREAMS, MODELLED, RNG_POLICY, _private_invariants, _lagavulin_progress, _thief_progress, _champ_progress,
-    is_gambler_selection, _gambler_evidence, is_liquid_selection, is_native_combat_selection, _liquid_evidence)
+    is_gambler_selection, _gambler_evidence, is_liquid_selection, is_native_combat_selection, _liquid_evidence,
+    _omniscience_scry_source, _omniscience_scry_play, _selection_queue)
 from sts_ai_framework.headless.state import HeadlessContractError
 from sts_ai_framework.headless.event_receipts import _colosseum_wave_deck
 from sts_ai_framework.tests.test_headless_state import observation, card
 
 
 class SlimeLatchTest(unittest.TestCase):
+    def test_opening_chip_continuations_require_their_owners(self):
+        plasma={'state_class':'savestate.actions.SelectionPlasmaEnergyActionState',
+                'state':{'orb_slot':0,'amount':1}}
+        tongs={'state_class':'savestate.actions.SelectionWarpedTongsActionState','state':{}}
+        view={'action_queue':[plasma,tongs],'card_queue_state':[]}
+        player={'relics':[{'relic_id':'WarpedTongs'}],
+                'orbs':[{'lookup_key':'Plasma','passive_amount':1}]}
+        _selection_queue(view,True,opening_player=player)
+        with self.assertRaises(HeadlessContractError):_selection_queue(view,True)
+        with self.assertRaises(HeadlessContractError):
+            _selection_queue(view,True,opening_player=dict(player,relics=[]))
+        with self.assertRaises(HeadlessContractError):
+            _selection_queue(view,True,opening_player=dict(player,orbs=[{'lookup_key':'Frost','passive_amount':1}]))
+        with self.assertRaises(HeadlessContractError):
+            _selection_queue(dict(view,action_queue=[plasma,plasma]),True,opening_player=player)
+
+    def test_meditate_boundary_binds_exact_picker_and_source(self):
+        source={'id':'Meditate','uuid':'played','timesUpgraded':1}
+        discard=[dict(id='Strike_P',uuid=f'card-{n}',timesUpgraded=0,cost=1,costForTurn=1) for n in range(3)]
+        fact={'id':'Strike_P','upgrades':0,'cost':1,'turn_cost':1}
+        piles={'hand':[],'draw_pile':[],'discard_pile':discard,'exhaust_pile':[]}
+        card_rng=combat_raw()['combat']['snapshot']['_headless_rng']
+        previous=dict(room_class='MonsterRoom',played_card_uuids=[])
+        receipt=dict(previous,played_card_uuids=['played'],turn=3,battle_over=False,rng=card_rng)
+        original=dict(player={'hand':[source]},combat_receipt=previous)
+        before=SimpleNamespace(snapshot={'player_state': dict(piles,hand=[{'card_id':'Meditate','uuid':'played'}],
+                               master_deck=[])},raw_json=json.dumps(original),sequence=17,run_id='r',token='old',
+                               state=SimpleNamespace(floor=5,act=1,character='WATCHER'))
+        command=dict(type='CARD',card_index=0,monster_index=-1)
+        expected=dict(expected_after=dict(turn=3,hp=27,max_hp=72,block=3,energy=2,potions=[],monsters=[],
+                          hand=[],draw_pile=[],discard_pile=[fact]*3,exhaust_pile=[]),
+                      expected_screen='GRID',expected_card_uuids={k:[c['uuid'] for c in cards] for k,cards in piles.items()},
+                      expected_exact_rng={k:card_rng['streams'][k] for k in MODELLED},
+                      unmodelled_rng={k:card_rng['streams'][k] for k in STREAMS if k not in MODELLED})
+        plan=CombatPlan(before,'{}',json.dumps(command),json.dumps(expected))
+        player=dict(hp=27,maxHp=72,block=3,energy=2,potions=[],hand=[],drawPile=[],discardPile=discard,exhaustPile=[])
+        selection=dict(kind='grid',purpose='meditate',count=2,locked=False,can_confirm=False,
+                       any_number=False,can_pick_zero=False,auto_confirm=True)
+        raw=dict(player=player,monsters=[],combat_receipt=receipt,interaction={'selection':selection},
+                 cardSelection=dict(kind='grid',options=copy.deepcopy(discard),selected=[]),
+                 driver_receipt=dict(method='playCard',args=[0,-1],card_uuid='played',sequence=18))
+        def verdict(state):
+            after=SimpleNamespace(snapshot=None,run_id='r',sequence=18,token='new',raw_json=json.dumps(state),
+                                  state=SimpleNamespace(**vars(before.state),screen_type='GRID',room_phase='COMBAT'))
+            return verify_combat_effect(plan,after,{})
+        self.assertEqual(verdict(raw),'APPLIED')
+        for mutate in (
+            lambda row:row['interaction']['selection'].update(count=1),
+            lambda row:row['cardSelection']['options'].reverse(),
+            lambda row:row['cardSelection']['options'][0].update(uuid='another-instance'),
+            lambda row:row['driver_receipt'].update(sequence=17),
+            lambda row:row['combat_receipt']['rng']['streams']['headless'].update(counter=400),
+        ):
+            altered=copy.deepcopy(raw);mutate(altered)
+            self.assertEqual(verdict(altered),'UNVERIFIED')
+
+    def test_omniscience_scry_accepts_a_short_transformed_draw_pile(self):
+        raw={'interaction':{'selection':{'purpose':'omniscience'}},
+             'cardSelection':{'options':[{'id':'CutThroughFate','uuid':'cut','timesUpgraded':0}]},
+             'player':{'relics':[],'hand':[],'drawPile':[],
+                       'discardPile':[{'uuid':'top','id':'Strike_P','timesUpgraded':1}],
+                       'exhaustPile':[]}}
+        predicted={'expected_screen':'GRID','expected_menu_picker':{
+            'kind':'grid','purpose':'scry','count':1,
+            'options':[{'uuid':'top','id':'Strike_P','upgrades':1}]}}
+        command={'type':'GRID_SELECT','card_index':0}
+        self.assertEqual(_omniscience_scry_source(raw,command,predicted),'cut')
+        predicted['expected_menu_picker']['options'][0]['uuid']='unknown'
+        self.assertIsNone(_omniscience_scry_source(raw,command,predicted))
+
+    def test_omniscience_scry_binds_source_or_exact_queue_head_play(self):
+        s=combat_raw()['combat']['snapshot'];p=s['player_state'];source=p['hand'][0]['uuid']
+        queued=[copy.deepcopy(p['master_deck'][i]) for i in (1,2)]
+        s['grid_card_select_screen_state']={'card_queue_state':[{'card':c} for c in queued]}
+        self.assertTrue(_omniscience_scry_play(s,source,source))
+        self.assertTrue(_omniscience_scry_play(s,source,queued[0]['uuid']))
+        self.assertTrue(_omniscience_scry_play(s,source,'fresh-generated-copy'))
+        self.assertFalse(_omniscience_scry_play(s,source,queued[1]['uuid']))
+
     def test_nemesis_cosmetic_clock_is_not_a_combat_invariant(self):
         s=combat_raw()['combat']['snapshot'];m=s['cur_map_node_state']['monster_data'][0]
         m['creature']['id']='Nemesis';m['_private']={'Nemesis.fireTimer':0.05,'Nemesis.scytheCooldown':2,'Nemesis.fireDmg':6}
@@ -685,6 +766,27 @@ class OmniscienceRewardReceiptTests(unittest.TestCase):
         ):
             altered=copy.deepcopy(after);change(altered)
             self.assertFalse(check(altered),change)
+
+    def test_lesson_learned_accepts_every_predicted_upgrade(self):
+        import copy
+        from sts_ai_framework.headless.combat import _omniscience_victory
+        streams=combat_raw()['combat']['snapshot']['_headless_rng']['streams']
+        chosen=dict(id='LessonLearned',uuid='lesson',type='ATTACK')
+        deck=[dict(id='Strike_P',uuid='one',timesUpgraded=0,misc=0,cost=1,costForTurn=1),
+              dict(id='Eruption',uuid='two',timesUpgraded=0,misc=0,cost=2,costForTurn=2)]
+        before=dict(player=dict(hp=30,maxHp=70,gold=5,masterDeck=deck,potions=[]),
+                    cardSelection={'options':[chosen]},interaction={'selection':{'purpose':'omniscience'}})
+        after=copy.deepcopy(before);after.update(phase='REWARD',combat_receipt={'rng':{'streams':streams}},
+            driver_receipt=dict(method='chooseGridCard',args=[0],sequence=9,card_uuid=chosen['uuid']))
+        for card in after['player']['masterDeck']:card['timesUpgraded']=1
+        predicted=dict(terminal_prediction='victory',expected_after=dict(hp=30,max_hp=70,potions=[]),
+            expected_master_deck=[dict(id='Strike_P',upgrades=1,cost=1,turn_cost=1),
+                                  dict(id='Eruption',upgrades=1,cost=2,turn_cost=2)],
+            expected_exact_rng=copy.deepcopy(streams),unmodelled_rng=copy.deepcopy(streams))
+        command=dict(type='GRID_SELECT',card_index=0)
+        self.assertTrue(_omniscience_victory(before,after,command,predicted,9))
+        after['player']['masterDeck'][1]['timesUpgraded']=0
+        self.assertFalse(_omniscience_victory(before,after,command,predicted,9))
 
 
 if __name__ == "__main__": unittest.main()

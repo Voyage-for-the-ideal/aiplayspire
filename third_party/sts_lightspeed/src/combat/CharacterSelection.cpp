@@ -53,17 +53,39 @@ void sts::openCharacterSelection(BattleContext &b,CardSelectTask task,int count)
         if(task==CardSelectTask::BURNING_PACT_HAND)info.sourceDraw=b.curCardQueueItem.card.isUpgraded()?3:2;
         info.hexDazed=b.player.getStatus<PS::HEX>();
         info.inkDraw=b.player.hasRelic<R::INK_BOTTLE>() && b.player.inkBottleCounter==0;
-        info.letterOpener=task==CardSelectTask::HOLOGRAM_GRID && b.player.hasRelic<R::LETTER_OPENER>()
+        info.letterOpener=b.player.hasRelic<R::LETTER_OPENER>()
             && b.player.skillsPlayedThisTurn>=3 && b.player.skillsPlayedThisTurn%3==0;
-        if(task==CardSelectTask::TRUE_GRIT_HAND && b.calculateCardBlock(9)>0)
+        info.orangePellets=b.player.hasRelic<R::ORANGE_PELLETS>() && b.player.orangePelletsCardTypesPlayed.none();
+        int baseBlock=0;
+        switch(b.curCardQueueItem.card.id) {
+            case CardId::ARMAMENTS:baseBlock=b.curCardQueueItem.card.isUpgraded()?8:5;break;
+            case CardId::TRUE_GRIT:baseBlock=b.curCardQueueItem.card.isUpgraded()?9:7;break;
+            case CardId::HOLOGRAM:baseBlock=b.curCardQueueItem.card.isUpgraded()?5:3;break;
+            default:break;
+        }
+        if(baseBlock>0 && b.calculateCardBlock(baseBlock)>0)
             info.juggernautDamage=b.player.getStatus<PS::JUGGERNAUT>();
     }
-    if(b.headlessRngKnown && task==CardSelectTask::HEADBUTT_GRID)
+    if(b.headlessRngKnown && task==CardSelectTask::HEADBUTT_GRID) {
         info.sharpHide=b.monsters.arr[0].getStatus<MS::SHARP_HIDE>();
+        info.headbuttPenNibRemove=b.player.hasStatus<PS::PEN_NIB>();
+        info.inkDraw=b.player.hasRelic<R::INK_BOTTLE>() && b.player.inkBottleCounter==0;
+        info.orangePellets=b.player.hasRelic<R::ORANGE_PELLETS>() && b.player.orangePelletsCardTypesPlayed.none();
+        info.headbuttOrnamentalBlock=b.player.hasRelic<R::ORNAMENTAL_FAN>() && b.player.attacksPlayedThisTurn%3==0;
+        info.headbuttPenNibBuff=b.player.hasRelic<R::PEN_NIB>() && b.player.penNibCounter==-1
+            && !b.player.hasStatus<PS::PEN_NIB>();
+        info.headbuttNunchakuEnergy=b.player.hasRelic<R::NUNCHAKU>() && b.player.nunchakuCounter==0;
+        const int target=b.curCardQueueItem.target;
+        if(target>=0 && target<b.monsters.monsterCount) {
+            const auto &m=b.monsters.arr[target];
+            info.headbuttDarklingRepeat=m.id==MonsterId::DARKLING && m.halfDead &&
+                m.moveHistory[0]==MMID::DARKLING_REGROW;
+        }
+    }
     if(isHeadlessSingleHand(task)) {
         for(int i=0;i<b.cards.cardsInHand;i++) {
             const auto &c=b.cards.hand[i];
-            bool eligible=task==CardSelectTask::TRUE_GRIT_HAND || task==CardSelectTask::BURNING_PACT_HAND || task==CardSelectTask::FORETHOUGHT_HAND || (task==CardSelectTask::ARMAMENTS_HAND?c.canUpgrade():
+            bool eligible=task==CardSelectTask::TRUE_GRIT_HAND || task==CardSelectTask::BURNING_PACT_HAND || task==CardSelectTask::FORETHOUGHT_HAND || task==CardSelectTask::NIGHTMARE_HAND || (task==CardSelectTask::ARMAMENTS_HAND?c.canUpgrade():
                     c.getType()==CardType::ATTACK || c.getType()==CardType::POWER);
             (eligible?info.options:info.hiddenHand).push_back(c);
         }
@@ -131,6 +153,11 @@ void sts::openCharacterSelection(BattleContext &b,CardSelectTask task,int count)
         b.inputState=InputState::EXECUTING_ACTIONS;
         applyCharacterSelection(b,0);
     }
+    if(task==CardSelectTask::NIGHTMARE_HAND && b.cardSelectInfo.options.size()==1) {
+        b.cardSelectInfo.selected.push_back(0);
+        b.inputState=InputState::EXECUTING_ACTIONS;
+        applyCharacterSelection(b,CHARACTER_SELECT_CONFIRM);
+    }
 }
 
 bool sts::validCharacterSelection(const BattleContext &b,int option) {
@@ -172,6 +199,14 @@ void sts::applyCharacterSelection(BattleContext &b,int option) {
         for(int j=b.cards.cardsInHand-1;j>=0;j--)b.cards.removeFromHandAtIdx(j);
         for(auto &v:remaining)b.cards.moveToHand(v);
         if(s.cardSelectTask==CardSelectTask::ARMAMENTS_HAND){c.upgrade();b.cards.moveToHand(c);}
+        if(s.cardSelectTask==CardSelectTask::NIGHTMARE_HAND) {
+            b.cards.moveToHand(c);
+            if(!b.player.hasStatus<PS::NIGHTMARE>()) {
+                c.costForTurn=c.cost;c.retain=false;c.forcedExhaust=false;c.freeToPlayOnce=false;c.uniqueId=-1;
+                b.nightmareCard=c;
+            }
+            b.player.buff<PS::NIGHTMARE>(s.data0);
+        }
         for(auto &v:s.hiddenHand)b.cards.moveToHand(v);
         if(s.cardSelectTask==CardSelectTask::TRUE_GRIT_HAND || s.cardSelectTask==CardSelectTask::BURNING_PACT_HAND)b.triggerAndMoveToExhaustPile(c);
         if(s.cardSelectTask==CardSelectTask::DUAL_WIELD_HAND) {
@@ -214,6 +249,12 @@ void sts::applyCharacterSelection(BattleContext &b,int option) {
             b.cards.moveToDrawPileTop(c);found=true;break;
         }
         if(!found)throw std::runtime_error("headbutt_selection_identity");
+        if(s.headbuttDarklingRepeat) {
+            const int target=b.curCardQueueItem.target;
+            if(target<0 || target>=b.monsters.monsterCount || b.monsters.arr[target].id!=MonsterId::DARKLING ||
+                    !b.monsters.arr[target].halfDead)throw std::runtime_error("headbutt_darkling_repeat_owner");
+            b.monsters.arr[target].setMove(MMID::DARKLING_REGROW);
+        }
         b.cardSelectInfo=CardSelectInfo{};return;
     }
     if(task==CardSelectTask::SEEK_GRID || isHeadlessSecretFetch(task)) {
@@ -268,7 +309,11 @@ void sts::applyCharacterSelection(BattleContext &b,int option) {
             }
         } else if(task==CardSelectTask::OMNISCIENCE) {
             for(int n=0;n<int(b.cards.drawPile.size());++n)if(b.cards.drawPile[n].uniqueId==c.uniqueId){b.cards.removeFromDrawPileAtIdx(n);break;}
-            for(int copy=0;copy<s.data0;++copy) {
+            // Vault and Conclude end the turn during their first play. Java's
+            // end-turn queue cleanup drops Omniscience's pending purge copy
+            // before it selects another random target or records a play.
+            const int copies=(c.id==CardId::VAULT || c.id==CardId::CONCLUDE)?1:s.data0;
+            for(int copy=0;copy<copies;++copy) {
                 CardQueueItem item(c,0,b.player.energy);
                 // Only the original is forced to exhaust; a stat-equivalent
                 // purge copy gets the fresh card's intrinsic exhaust/retain flags.

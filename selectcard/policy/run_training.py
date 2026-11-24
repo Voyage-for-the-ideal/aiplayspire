@@ -50,8 +50,9 @@ def train_shards(args):
     profile = manifest["input_profile"]
     if profile not in (RUN_PROFILE, MIXED_PROFILE) or manifest["stage"] != args.stage:
         raise ValueError("input profile/stage mismatch; pilot and confirm are independent exports")
+    min_ascension = manifest.get("min_ascension", 0)
     if args.stage == "confirm":
-        check_coverage(args.data_dir)
+        check_coverage(args.data_dir, min_ascension=min_ascension)
     if args.evaluate:
         if not args.checkpoint:
             raise ValueError("evaluation requires --checkpoint")
@@ -84,7 +85,8 @@ def train_shards(args):
                   architecture=dict(d_model=args.d_model, layers=args.layers, heads=args.heads, dropout=.1),
                   data_fingerprint=manifest["fingerprint"], code=manifest["code"],
                   training_code=training_code, device_kind=args.device.split(":")[0],
-                  cohort_fraction=manifest["cohort_fraction"], sampler="character-band-task-then-run-v1")
+                  cohort_fraction=manifest["cohort_fraction"], min_ascension=min_ascension,
+                  sampler="character-band-task-then-run-v1")
     identity = digest(config)
     train, val = ShardDataset(args.data_dir, "train"), ShardDataset(args.data_dir, "val")
     try:

@@ -39,8 +39,19 @@ target/
 .vscode/
 *.iml
 
-# Claude Code
+# Claude Code: track only the three shared skill entrypoints at the repo root.
 .claude/
+!/.claude/
+/.claude/*
+!/.claude/skills/
+/.claude/skills/*
+!/.claude/skills/aiplayspire-mod-release/
+!/.claude/skills/aiplayspire-battle-validation/
+!/.claude/skills/aiplayspire-value-model/
+/.claude/skills/*/*
+!/.claude/skills/aiplayspire-mod-release/SKILL.md
+!/.claude/skills/aiplayspire-battle-validation/SKILL.md
+!/.claude/skills/aiplayspire-value-model/SKILL.md
 
 # OS
 .DS_Store

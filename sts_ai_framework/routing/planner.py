@@ -15,6 +15,9 @@ class RoutePlanner:
     def __init__(self, policy: RoutePolicyConfig = None):
         self.policy = policy or RoutePolicyConfig()
 
+    def _make_evaluator(self, graph, state):
+        return RouteEvaluator(graph, self.policy)
+
     @staticmethod
     def _valid_choices(state: GameState):
         choice_list = state.choice_list or []
@@ -60,7 +63,7 @@ class RoutePlanner:
         except (MapGraphError, TypeError, ValueError, AttributeError):
             return self._choose_immediate(state, choices)
 
-        evaluator = RouteEvaluator(graph, self.policy)
+        evaluator = self._make_evaluator(graph, state)
         assessments = []
         for choice in choices:
             node = graph.get(choice.x, choice.y)
@@ -109,7 +112,7 @@ class RoutePlanner:
         context = self._immediate_context(state, choices)
         if context is None:
             return self._simple_decision("FIRST_LEGAL", 0, "MAP player context is incomplete")
-        evaluator = RouteEvaluator(context.graph, self.policy)
+        evaluator = self._make_evaluator(context.graph, state)
         assessments = []
         for choice in choices:
             node = context.graph.get(choice.x, choice.y)

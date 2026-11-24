@@ -37,6 +37,11 @@ public class CommunicationMod implements PostInitializeSubscriber, PostUpdateSub
 
     @Override
     public void receivePostUpdate() {
+        // Land a boss relic picked through the bridge only after the boss relic
+        // screen has closed, so its onEquip() (Astrolabe / Empty Cage grids)
+        // cannot be swallowed by the same-frame screen teardown.
+        ChoiceScreenUtils.updateDeferredBossRelicLanding();
+
         // Update state if requested (this runs on game thread)
         StateController.updateState();
 

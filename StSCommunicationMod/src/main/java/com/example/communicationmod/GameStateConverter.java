@@ -713,7 +713,10 @@ public class GameStateConverter {
             jsonCard.put("exhausts", true);
         }
 
-        // Numeric values
+        // Master-deck instances often have damage/block == -1 until powers
+        // are applied. Their permanent base values are already meaningful.
+        addPermanentCardValues(jsonCard, card.baseDamage, card.baseBlock, card.baseMagicNumber);
+        // Combat-adjusted values, when available.
         if (card.damage > 0) {
             jsonCard.put("damage", card.damage);
             if (card.baseDamage != card.damage) {
@@ -734,6 +737,12 @@ public class GameStateConverter {
         }
         
         return jsonCard;
+    }
+
+    static void addPermanentCardValues(Map<String, Object> jsonCard, int damage, int block, int magic) {
+        if (damage >= 0) jsonCard.put("base_damage", damage);
+        if (block >= 0) jsonCard.put("base_block", block);
+        if (magic >= 0) jsonCard.put("base_magic_number", magic);
     }
 
     private static Map<String, Object> convertMonsterToJson(AbstractMonster monster) {

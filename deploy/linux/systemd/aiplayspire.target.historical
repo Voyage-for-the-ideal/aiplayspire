@@ -1,0 +1,7 @@
+[Unit]
+Description=AIPlaySpire gated single-lane collection
+Requires=aiplayspire-gateway.service aiplayspire-game.service aiplayspire-collector.service
+After=aiplayspire-gateway.service aiplayspire-game.service aiplayspire-collector.service
+
+[Install]
+WantedBy=multi-user.target

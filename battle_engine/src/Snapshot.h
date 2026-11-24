@@ -18,6 +18,7 @@ struct Imported {
     MonsterRoster roster;
     std::map<int,Json> selectionIdentities;
     bool desktopHeadbutt=false;
+    int headbuttDefeatedTarget=-1;
     std::string selectionScreen;
     std::vector<int> selectionIndices;
 };

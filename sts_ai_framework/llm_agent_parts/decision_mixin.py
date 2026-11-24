@@ -1,15 +1,23 @@
 # -*- coding: utf-8 -*-
 import re
+from functools import lru_cache
 from typing import Optional
 
 from colorama import Fore, Style
 
 from ..config import EVENT_DECISION_POLICY
 from ..event_pools import CHEST_CURSE_POOL, chest_relic_pool
-from ..models import ActionType, GameAction, GameState
+from ..event_rules import fight_event_choice_index
+from ..models import ActionType, EventState, GameAction, GameState
 from ..run_log import log_event
-from .event_expectimax import decide_event, event_state_payload, relic_state_payload
+from .event_expectimax import decide_event, event_state_payload, generated_card_choice, relic_state_payload
 from .value_payload import value_state_payload
+
+
+@lru_cache(maxsize=1)
+def _event_content_catalog():
+    from selectcard.src.content_catalog import VanillaContentCatalog
+    return VanillaContentCatalog.from_repo()
 
 
 class DecisionMixin:
@@ -100,74 +108,91 @@ class DecisionMixin:
         return normalized in self.CURSE_NAMES
 
     def _parse_event_effects(self, choice_text: str, state: Optional[GameState] = None):
-        """Parse event choice text into structured effects.
-
-        Each clause is checked against ALL effect categories so that combined
-        phrases like "[ Lose all Gold Remove 2 Cards ]" produce multiple effects.
-        No continue-after-match — a single clause can yield 2+ effects.
-        """
+        """Parse explicit effects; keep unidentified/random rewards as such."""
         choice_text_clean = self._clean_effect_text(choice_text)
-        choice_text_lower = choice_text_clean.lower()
         effects = []
+
+        def named_item(clause, kind):
+            catalog = _event_content_catalog()
+            known = catalog.relics if kind == "relic" else catalog.cards
+            labels = re.findall(r"\[([^\[\]]+)\]", clause)
+            labels.append(clause.strip(" []"))
+            for label in labels:
+                label = re.sub(r"^(?:obtain|gain|receive)\s+(?:(?:a|an|the)\s+)?",
+                               "", label.strip(), flags=re.I)
+                label = re.sub(r"^(?:relic|card)\s*:\s*", "", label, flags=re.I)
+                if label in known:
+                    return label
+            return None
 
         for clause in self._split_event_clauses(choice_text_clean):
             clause_lower = clause.lower()
+            for verb, amount in re.findall(
+                r"\b(gain|obtain|increase|lose|decrease)\s+(\d+)\s+(?:max(?:imum)?\s+hp)\b",
+                clause_lower,
+            ):
+                effects.append({"type": "lose_max_hp" if verb in ("lose", "decrease")
+                                else "gain_max_hp", "amount": int(amount)})
+            for sign, amount in re.findall(r"\bmax(?:imum)?\s+hp\s*([+-])\s*(\d+)\b", clause_lower):
+                effects.append({"type": "gain_max_hp" if sign == "+" else "lose_max_hp",
+                                "amount": int(amount)})
+            for amount in re.findall(r"\b(?:take|lose)\s+(\d+)\s+(?:damage|hp|life)\b", clause_lower):
+                effects.append({"type": "lose_hp", "amount": int(amount)})
+            for amount in re.findall(r"\b(?:heal|restore|regain)\s+(\d+)\b", clause_lower):
+                effects.append({"type": "gain_hp", "amount": int(amount)})
+            if re.search(r"\blose\s+all\s+(?:your\s+)?gold\b", clause_lower):
+                effects.append({"type": "lose_all_gold"})
+            for verb, amount in re.findall(r"\b(gain|obtain|lose|pay|spend)\s+(\d+)\s+gold\b", clause_lower):
+                effects.append({"type": "lose_gold" if verb in ("lose", "pay", "spend")
+                                else "gain_gold", "amount": int(amount)})
 
-            if "max hp" in clause_lower or "maximum hp" in clause_lower:
-                amount = self._extract_first_int(clause)
-                if amount is not None:
-                    if "lose" in clause_lower or "-" in clause_lower:
-                        effects.append({"type": "lose_max_hp", "amount": amount})
-                    else:
-                        effects.append({"type": "gain_max_hp", "amount": amount})
-                        effects.append({"type": "gain_hp", "amount": amount})
-
-            if "damage" in clause_lower or "lose hp" in clause_lower or "lose life" in clause_lower:
-                amount = self._extract_first_int(clause)
-                if amount is not None:
-                    effects.append({"type": "lose_hp", "amount": amount})
-
-            elif "heal" in clause_lower or "restore" in clause_lower or "regain" in clause_lower:
-                amount = self._extract_first_int(clause)
-                if amount is not None:
-                    effects.append({"type": "gain_hp", "amount": amount})
-
-            if "gold" in clause_lower:
-                amount = self._extract_first_int(clause)
-                if amount is not None:
-                    if "lose" in clause_lower or "pay" in clause_lower or "spend" in clause_lower:
-                        effects.append({"type": "lose_gold", "amount": amount})
-                    else:
-                        effects.append({"type": "gain_gold", "amount": amount})
-
-            if "relic" in clause_lower or "obtain" in clause_lower:
-                if "potion" not in clause_lower:
-                    if "random" in clause_lower:
-                        effects.append({"type": "obtain_relic", "relic_id": "Anchor"})
-                    else:
-                        relic_id = self._extract_bracket_label(clause)
-                        if relic_id:
-                            effects.append({"type": "obtain_relic", "relic_id": relic_id})
+            if re.search(r"\blose\s+your\s+(?:starting|starter)\s+relic\b", clause_lower):
+                if state is not None and state.relics:
+                    effects.append({"type": "lose_relic", "relic_id": state.relics[0].id})
+                else:
+                    effects.append({"type": "unknown_relic"})
+            if "relic" in clause_lower and re.search(r"\b(?:obtain|gain|receive)\b", clause_lower):
+                if "random" in clause_lower:
+                    pool = next((tier.upper() for tier in ("boss", "rare", "uncommon", "common")
+                                 if re.search(r"\b" + tier + r"\b", clause_lower)), "ANY")
+                    effects.append({"type": "random_relic", "pool": pool})
+                else:
+                    relic_id = named_item(clause, "relic")
+                    effects.append({"type": "obtain_relic", "relic_id": relic_id}
+                                   if relic_id else {"type": "unknown_relic"})
+            elif re.search(r"\b(?:obtain|gain|receive)\b", clause_lower) and "card" not in clause_lower:
+                relic_id = named_item(clause, "relic")
+                card_id = named_item(clause, "card")
+                if relic_id:
+                    effects.append({"type": "obtain_relic", "relic_id": relic_id})
+                elif card_id:
+                    effects.append({"type": "add_card", "card_id": card_id})
+            if re.search(r"\benemies\s+in\s+your\s+next\s+(?:three|3)\s+combats\s+have\s+1\s+hp\b", clause_lower):
+                effects.append({"type": "obtain_relic", "relic_id": "NeowsLament"})
 
             if "curse" in clause_lower or "cursed" in clause_lower:
                 curse_name = self._extract_curse_name(clause_lower)
-                effects.append({"type": "add_card", "card_id": curse_name or "Curse"})
+                effects.append({"type": "add_card", "card_id": curse_name}
+                               if curse_name in _event_content_catalog().cards
+                               else {"type": "random_curse"})
 
             if "card" in clause_lower:
                 if "remove" in clause_lower or "purge" in clause_lower:
-                    amount = self._extract_first_int(clause) or 1
+                    match = re.search(r"\b(?:remove|purge)\s+(\d+)\s+cards?\b", clause_lower)
+                    amount = int(match.group(1)) if match else 1
                     matched_card = self._find_card_for_choice(state, choice_text) if state else None
                     if matched_card:
                         effects.append({"type": "remove_card", "card_id": matched_card.reference, "amount": amount})
                     else:
-                        effects.append({"type": "remove_card", "card_id": "unknown_card", "amount": amount})
+                        effects.append({"type": "select_cards", "purpose": "purge", "count": amount})
                 elif "transform" in clause_lower:
                     matched_card = self._find_card_for_choice(state, choice_text) if state else None
                     if matched_card:
                         effects.append({"type": "remove_card", "card_id": matched_card.reference})
                     else:
-                        amount = self._extract_first_int(clause) or 1
-                        effects.append({"type": "remove_card", "amount": amount})
+                        match = re.search(r"\b(?:transform|change|mutate)\s+(\d+)\s+cards?\b", clause_lower)
+                        amount = int(match.group(1)) if match else 1
+                        effects.append({"type": "select_cards", "purpose": "transform", "count": amount})
                 elif "upgrade" in clause_lower:
                     if "random" in clause_lower or "randomly" in clause_lower:
                         amount = self._extract_first_int(clause) or 1
@@ -176,16 +201,21 @@ class DecisionMixin:
                         matched_card = self._find_card_for_choice(state, choice_text) if state else None
                         if matched_card:
                             effects.append({"type": "upgrade_card", "card_id": matched_card.reference})
+                        else:
+                            effects.append({"type": "select_cards", "purpose": "upgrade", "count": 1})
                 elif "duplicate" in clause_lower or "copy" in clause_lower:
                     matched_card = self._find_card_for_choice(state, choice_text) if state else None
                     if matched_card:
                         effects.append({"type": "duplicate", "card_id": matched_card.reference})
                     else:
-                        effects.append({"type": "duplicate", "card_id": "unknown_card"})
+                        effects.append({"type": "select_cards", "purpose": "duplicate", "count": 1})
                 else:
-                    card_id = self._extract_bracket_label(clause)
-                    if card_id:
-                        effects.append({"type": "add_card", "card_id": card_id})
+                    card_id = named_item(clause, "card")
+                    effects.append({"type": "add_card", "card_id": card_id}
+                                   if card_id else {"type": "random_card"})
+
+        if not effects and not re.search(r"\b(?:skip|leave|cancel|continue|talk)\b", choice_text_clean, re.I):
+            effects.append({"type": "unknown_effect"})
 
         return choice_text_clean, effects
 
@@ -279,6 +309,7 @@ class DecisionMixin:
 
     def _get_model_card_decision(self, state: GameState) -> Optional[GameAction]:
         current_state = value_state_payload(state)
+        generated_grid = state.screen_type == "GRID"
 
         choices = []
         reward_cards = getattr(state, "card_reward_cards", None) or []
@@ -289,9 +320,10 @@ class DecisionMixin:
         }
         unified_choices = self._build_unified_choices(state)
         for i, (choice_text, _) in enumerate(unified_choices):
-            if "skip" in choice_text.lower() or "cancel" in choice_text.lower() or "leave" in choice_text.lower():
+            text = choice_text.lower()
+            if not generated_grid and ("skip" in text or "cancel" in text or "leave" in text):
                 choices.append({"action": "skip", "target": None, "index": i})
-            elif "bowl" in choice_text.lower() or "singing bowl" in choice_text.lower():
+            elif not generated_grid and "bowl" in text:
                 choices.append({"action": "singing_bowl", "target": None, "index": i})
             else:
                 card_id = choice_text
@@ -306,7 +338,10 @@ class DecisionMixin:
                     if matched_card:
                         card_id = matched_card.reference
 
-                choices.append({"action": "pick_card", "target": card_id, "index": i})
+                if generated_grid:
+                    choices.append({**generated_card_choice(card_id, current_state), "index": i})
+                else:
+                    choices.append({"action": "pick_card", "target": card_id, "index": i})
 
         # Ordinary card rewards are optional. Generated-card GRID choices such
         # as The Library are mandatory after entering the selection screen,
@@ -660,6 +695,16 @@ class DecisionMixin:
             self._log_event_fallback(state, "unknown_semantics")
             return None
 
+        action_index = fight_event_choice_index(state)
+        if action_index is not None:
+            self._remember_event_followup(state, action_index)
+            log_event(
+                event="event_decided", event_id=event.id, phase=event.phase,
+                decision_kind=event.decision_kind, floor=state.floor,
+                choice_index=action_index, policy="combat_hp_threshold",
+            )
+            return GameAction(type=ActionType.CHOOSE, choice_index=action_index)
+
         if event.class_name == "GremlinMatchGame" and event.phase == "PLAY":
             return self._get_match_game_decision(state)
         if event.class_name == "CursedTome":
@@ -928,44 +973,33 @@ class DecisionMixin:
         return GameAction(type=ActionType.CHOOSE, choice_index=target[1])
 
     def _get_model_event_decision(self, state: GameState) -> Optional[GameAction]:
-        current_state = value_state_payload(state)
-
-        # Detect transform choices and collect curse IDs for transform filtering
-        transform_indices = set()
-        curse_ids = {card.reference for card in state.deck if card.type == "CURSE"}
-
         choices = []
         unified_choices = self._build_unified_choices(state)
         for i, (choice_text, _) in enumerate(unified_choices):
             choice_text_clean, effects = self._parse_event_effects(choice_text, state)
-            choice_text_lower = choice_text_clean.lower()
-
-            # Detect transform keywords in choice text
-            if any(kw in choice_text_lower for kw in ("transform", "change", "mutate")):
-                transform_indices.add(i)
-
-            if "skip" in choice_text_lower or "leave" in choice_text_lower or "cancel" in choice_text_lower:
-                choices.append({"action": "skip", "target": None, "index": i, "cost": 0})
-            elif len(effects) > 0:
-                choices.append({"action": "composite_event", "effects": effects, "index": i, "raw_text": choice_text_clean})
-            else:
-                choices.append({"action": "skip", "target": None, "index": i, "cost": 0})
+            choices.append({
+                "button_index": i, "action_index": i, "enabled": True,
+                "label": choice_text_clean, "kind": "EFFECT" if effects else "LEAVE",
+                "outcomes": [{"probability": 1.0, "effects": effects}],
+            })
 
         if len(choices) == 0:
             return None
 
-        # For transform choices, skip curse cards (curse→curse is no benefit)
-        exclude_ids = curse_ids if transform_indices else None
-
-        best = self.value_engine.recommend_choice(current_state, choices, exclude_purge_ids=exclude_ids)
-        if best:
-            best_idx = best.get("index")
-            if best_idx in transform_indices:
-                best["_is_transform"] = True
+        # Reuse the structured scorer: random relics are real weighted pools,
+        # while unresolved card/relic rewards stay unscored, not fake no-ops.
+        parsed = state.model_copy(update={"event": EventState(
+            id="legacy_text", class_name="LegacyText", phase="MENU",
+            semantics_status="KNOWN", decision_kind="COMPLEX", choices=choices,
+        )})
+        result = decide_event(parsed, self.value_engine)
+        if result is not None:
+            action, best = result
             self._store_grid_intent_from_choice(best, state)
-            return self._map_unified_choice_to_action(state, best_idx)
+            return action
 
-        return GameAction(type=ActionType.WAIT)
+        self._log_event_fallback(state, "text_effects_unresolved")
+        return None
 
     def _store_grid_intent_from_choice(self, best_choice: dict, state) -> None:
         """Extract and store pending GRID card selection intent from a recommended choice.
@@ -983,8 +1017,9 @@ class DecisionMixin:
         target_ids = []
 
         # Detect purge/transform from _purge_intent_id
-        if "_purge_intent_id" in best_choice:
-            target_card = best_choice["_purge_intent_id"]
+        if "_purge_intent_id" in best_choice or best_choice.get("_purge_intent_ids"):
+            target_ids = list(best_choice.get("_purge_intent_ids") or
+                              [best_choice["_purge_intent_id"]])
             if is_transform:
                 purpose = "transform"
             elif action == "composite_event":
@@ -993,12 +1028,11 @@ class DecisionMixin:
                     purpose = "transform"
                 else:
                     purpose = "purge"
-                for ef in effects:
-                    if ef.get("type") == "remove_card":
-                        num_to_select = ef.get("amount", 1)
+                num_to_select = sum(ef.get("amount", 1) for ef in effects
+                                    if ef.get("type") == "remove_card") or 1
             elif action in ("remove_card", "tosh"):
                 purpose = "purge"
-            target_ids = [target_card]
+            num_to_select = best_choice.get("_grid_num_cards", max(num_to_select, len(target_ids)))
 
         # Detect upgrade from _smith_intent_id
         if "_smith_intent_id" in best_choice:

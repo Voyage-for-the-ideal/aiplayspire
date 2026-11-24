@@ -17,6 +17,7 @@ from .combat import HeadlessCombatBridge, verify_combat_effect, is_native_combat
 from .interaction import IroncladInteractionBridge, verify_effect
 from .layout import module_path, runtime_files
 from .policy import HeadlessValuePolicy
+from .receipt import verify_driver
 from ..models import GameAction
 
 ROLES = ("IRONCLAD", "THE_SILENT", "DEFECT", "WATCHER")
@@ -51,12 +52,6 @@ def save_json(path, value):
         directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
         try: os.fsync(directory)
         finally: os.close(directory)
-
-
-def verify_driver(before, after, method, args):
-    receipt = after["state"].get("driver_receipt", {})
-    if (receipt.get("source_state_token"), receipt.get("sequence"), receipt.get("request_id"), receipt.get("method"), receipt.get("args")) != (before["state_token"], before["sequence"]+1, after["request_id"], method, list(args)):
-        raise ValueError("Driver receipt does not bind the single requested action")
 
 
 def resource_sample(engine, cpp):
@@ -234,6 +229,7 @@ class HeadlessCollector:
                     plan = combat.prepare(before, native)
                     if not combat.validate_before(plan, before): raise ValueError("Stale combat plan")
                     method, args = plan.native_method, plan.native_args
+                    context.update(method=method,args=args)
                     policy = {"policy": self.combat_policy, "metrics": native.get("metrics", {})}
                     after = require(engine.execute({"operation": "action", "expected_state_token": current["state_token"], "method": method, "args": args}, 15000))
                     context["after"] = after
@@ -255,6 +251,7 @@ class HeadlessCollector:
                     plan = menus.prepare(before, selected.api_action)
                     if not menus.validate_before(plan, before): raise ValueError("Stale menu plan")
                     method, args = selected.native_method, selected.native_args
+                    context.update(method=method,args=args)
                     if method=='openChest' and raw['phase']=='BOSS_CHEST':
                         location=(raw['act'],raw['floor'])
                         if location in opened_boss_chests: raise ValueError('Boss chest reopen loop')

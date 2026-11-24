@@ -1,5 +1,31 @@
 # 非战斗 Set Transformer 策略
 
+## A15+ 历史策略与旧版对照
+
+本轮只训练四角色 A15–A20 普通胜局中的 `CARD_REWARD` 和 `BOSS_REWARD`。和 `pilot-121289` 一样是选择前 BC，不训练事件、不使用 format-12 权重初始化，也不启用 AWR。只可用 `sbatch` 的服务器直接提交：
+
+```bash
+cd /home/scc/pb23151808/Desktop/selectcard
+# 固定整局哈希 1%，8 轮：先核对导出、覆盖与训练链路。
+sbatch train_policy_a15plus.sbatch pilot
+# 另行显式提交：全量合格 train/val，从头 10 轮。
+sbatch train_policy_a15plus.sbatch confirm
+```
+
+这个文件在同一个作业里先导出再训练，固定 A15+，不嵌套提交。结果写入 `experiment_results/run_policy/<stage>-a15plus-<jobid>/`。默认在项目内找 `STS_DATA` 或 `STS Data`；路径不同可用 `--export=ALL,STS_RAW_DATA_DIR=/绝对路径`（放在文件名之前），Conda 根目录可用 `RUN_POLICY_CONDA_ROOT`。正式作业需要更长时间时，用服务器允许的 `sbatch --time` 覆盖默认 24 小时。需要分开申请 CPU 和 GPU 时，可用旧提交助手 `bash submit_run_policy.sh --stage <pilot或confirm> --min-ascension 15`。
+
+也可在仓库根直接给 `python -m selectcard.policy.from_runs` 增加 `--min-ascension 15`，为新数据目录生成分片，再用原 `train --data-dir` 入口训练。进阶筛选发生在抽样／重放前，写入数据指纹及 checkpoint 的训练配置；换阈值使用新目录。原混合数据训练入口的筛选逻辑保持原样。A15+ 导出在 `coverage.json` 的 `ascension_coverage` 报告 train／val × A15–A19／A20 × 四角色 × 两项任务的决策数、局数和种子组数。Confirm 任一格为空时保留报告并停止，训练不会启动；不下调进阶或重抽。架构与超参沿用首版，以 A15+ 验证 NLL 选 `best.pt`。
+
+要在同一个 Slurm 作业内追加旧模型对照，可通过 `--export=ALL,POLICY_BASELINE_CHECKPOINT=/旧模型/best.pt` 指定旧 checkpoint；也可同时提供 `POLICY_BASELINE_DATA_DIR` 核验旧训练种子。对照写入作业结果目录的 `comparison.json`。单独对照则从仓库根运行：
+
+```powershell
+conda run --no-capture-output -n spire python -m selectcard.policy.compare_bc --data-dir <A15+候选数据目录> --baseline <旧pilot/best.pt> --candidate <A15+模型/best.pt> --output <新对照报告.json>
+```
+
+可加 `--baseline-data-dir <旧模型原始数据归档目录>`，只需其中与旧 checkpoint 指纹匹配的 `manifest.json` 及校验通过的 `index.sqlite`。比对旧 train 与新 val 的种子组后，报告 `verified_disjoint`、`overlap` 或 `unverified`；后两者仅作描述性对照。两模型用各自冻结的词表对同一批合法候选评分，报告按任务和进阶段分组的 NLL、Top‑1、预测／标签跳过率及合法候选全部 token 的词表覆盖率。主指标 `a20_paired` 为候选减基线的平均 NLL 差，负数更好；区间按种子组整组重采样，少于两组时省略区间。比较只读 val，不削弱普通 `train --evaluate` 的数据指纹校验。
+
+旧 pilot 的样本量和训练轮数也不同，离线差异不单独归因于进阶筛选。模型先做影子评分；如要替换现有实战策略，只显式启用上述两类决策并按下文整局配对标准验证 A20 碎心率。
+
 ## 混合历史与实机数据的下一版
 
 新增 `mixed-observable-v1` 输入规范，历史样本与已有确认轨迹共同训练直接选择策略；历史未记录的药水、钥匙、商店和事件状态标为 unknown，实机已提供的数据保留。混合时将历史十进制种子映射为 CommunicationMod 的 UUID 分组后重新划分，避免同一种子跨来源进入不同 split。旧数据和 checkpoint 不修改。历史 `.run` 新增可选 `--include-map`，仅导出当前位置及下一节点均可唯一确定、无飞靴且候选完整的地图分叉；未证明的营火和事件菜单不生成标签。商店只从已有实机轨迹读取，不推测库存。

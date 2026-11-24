@@ -3,12 +3,15 @@ import os
 import sys
 import unittest
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from sts_ai_framework.llm_agent_parts.action_mixin import ActionMixin
 from sts_ai_framework.llm_agent_parts.choice_mixin import ChoiceMixin
 from sts_ai_framework.llm_agent_parts.decision_mixin import DecisionMixin
+from sts_ai_framework.llm_agent_parts.event_expectimax import decide_event, event_state_payload, score_choice
 from sts_ai_framework.llm_agent_parts.info_prompt_mixin import InfoPromptMixin
-from sts_ai_framework.models import ActionType, Card, GameState, RewardChoice
+from sts_ai_framework.models import ActionType, Card, GameState, RelicState, RewardChoice
+from sts_ai_framework.policy_runtime import PolicyAgent
 from sts_ai_framework.__main__ import _is_action_effective
 
 
@@ -78,6 +81,18 @@ def cursed_tome_event(phase, choices, status="KNOWN"):
         "semantics_status": status,
         "decision_kind": "COMPLEX",
         "choices": choices,
+    }
+
+
+def library_event(offers):
+    return {
+        "id": "The Library", "class_name": "TheLibrary", "phase": "0",
+        "semantics_status": "KNOWN", "decision_kind": "COMPLEX",
+        "choices": [
+            choice(0, [{"type": "choose_generated_card", "count": 1, "card_ids": offers}],
+                   "GENERATED_CARD_GRID"),
+            choice(1, [{"type": "gain_hp", "amount": 20}]),
+        ],
     }
 
 
@@ -287,6 +302,94 @@ class StructuredEventTests(unittest.TestCase):
         action = Harness(engine)._get_structured_event_decision(state)
         self.assertEqual(1, action.choice_index)
 
+    def test_knowing_skull_compares_hp_and_the_exact_card_with_gold(self):
+        from selectcard.src.inference import STSInferenceEngine
+
+        options = event("COMPLEX", [
+            choice(0, [{"type": "lose_hp", "amount": 7}, {"type": "random_potion"}], "EVENT"),
+            choice(1, [{"type": "lose_hp", "amount": 7}, {"type": "gain_gold", "amount": 90}], "EVENT"),
+            choice(2, [{"type": "lose_hp", "amount": 8}, {
+                "type": "random_card", "pool": "COLORLESS_UNCOMMON", "card_id": "Panacea",
+            }], "EVENT"),
+            choice(3, [{"type": "lose_hp", "amount": 7}]),
+        ])
+        options.update(id="Knowing Skull", class_name="KnowingSkull", phase="ASK")
+        state = make_state(options)
+        state.deck = [Card(**card("Bash"))]
+        state.relics = [RelicState(id=rid, name=rid) for rid in ("Toxic Egg 2", "CeramicFish")]
+        current = event_state_payload(state)
+        engine = STSInferenceEngine.__new__(STSInferenceEngine)
+        engine.evaluate_state = lambda after: (
+            after["hp"] + 0.1 * after["gold"] + 20 * ("Panacea+1" in after["deck"])
+        )
+        card_choice = state.event.choices[2]
+        score, _, effects = score_choice(state, card_choice, engine, current)
+        self.assertAlmostEqual(72.9, score)  # 42 HP + 10.9 gold value + 20 for upgraded Panacea.
+        self.assertEqual(["lose_hp", "add_card", "gain_gold"], [effect["type"] for effect in effects])
+        self.assertEqual(["Bash"], current["deck"])
+        self.assertEqual(50, current["hp"])
+        self.assertEqual(2, Harness(engine)._get_structured_event_decision(state).choice_index)
+        for preview in ("Trip", None):
+            with self.subTest(preview=preview):
+                card_choice.outcomes[0].effects[1].card_id = preview
+                self.assertEqual(1, Harness(engine)._get_structured_event_decision(state).choice_index)
+
+    def test_library_compares_best_single_card_with_capped_heal(self):
+        offers = [f"card-{i}" for i in range(20)]
+        state = make_state(library_event(offers), hp=50, choice_list=["read", "sleep"])
+        observed_decks = []
+
+        class Engine(FakeValueEngine):
+            def evaluate_state(self, state):
+                observed_decks.append(tuple(state["deck"]))
+                return state["hp"] + (15 if state["deck"] == ["card-17"] else 0)
+
+        engine = Engine()
+        self.assertEqual(1, Harness(engine).choose_action(state).choice_index)
+        self.assertEqual([deck for deck in observed_decks if deck], [(c,) for c in offers])
+        self.assertEqual([], state.deck)
+
+        state.player.current_hp = 70  # Sleeping is now worth only 10 HP.
+        action, best = decide_event(state, engine)
+        self.assertEqual(0, action.choice_index)
+        self.assertEqual(85, best["_score"])
+        self.assertEqual([{"type": "add_card", "card_id": "card-17", "amount": 1}], best["effects"])
+        agent = Harness(engine)
+        self.assertEqual(0, agent.choose_action(state).choice_index)
+        self.assertEqual("GENERATED_CARD_GRID", agent._pending_event["followup"])
+
+    def test_library_draft_has_no_skip_candidate_and_requires_full_preview(self):
+        offers = [f"card-{i}" for i in range(20)]
+        state = make_state(library_event(offers), hp=50)
+
+        class Engine(FakeValueEngine):
+            def evaluate_state(self, state):
+                return state["hp"] - len(state["deck"])
+
+        engine = Engine()
+        read = state.event.choices[0]
+        score, _, _ = score_choice(state, read, engine, event_state_payload(state))
+        self.assertEqual(49, score)
+        for invalid in ([], offers[:-1], [offers[0]] * 20):
+            state.event = type(state.event).model_validate(library_event(invalid))
+            current = event_state_payload(state)
+            self.assertIsNone(score_choice(state, state.event.choices[0], engine, current))
+            self.assertEqual(1, decide_event(state, engine)[0].choice_index)
+
+    def test_library_simulated_card_obtain_uses_eggs_and_ceramic_fish(self):
+        from selectcard.src.inference import STSInferenceEngine
+
+        offers = ["Anger", "Inflame", "Shrug It Off"] + [f"card-{i}" for i in range(17)]
+        state = make_state(library_event(offers))
+        current = event_state_payload(state)
+        current["relics"] = ["Molten Egg 2", "CeramicFish"]
+        engine = STSInferenceEngine.__new__(STSInferenceEngine)
+        engine.evaluate_state = lambda payload: payload["gold"] + 10 * ("Anger+1" in payload["deck"])
+        score, _, effects = score_choice(state, state.event.choices[0], engine, current)
+        self.assertEqual(119, score)
+        self.assertEqual({"type": "add_card", "card_id": "Anger", "amount": 1}, effects[0])
+        self.assertEqual({"type": "gain_gold", "amount": 9}, effects[1])
+
     def test_stochastic_outcome_scores_probability_weighted_expectation(self):
         # ScrapOoze 型：0.5 出遗物 / 0.5 空，均 -3 HP；遗物值钱时挖，不值钱时走
         def dig_event():
@@ -341,8 +444,7 @@ class StructuredEventTests(unittest.TestCase):
         self.assertEqual(0, action.choice_index)
 
     def test_event_with_combat_alternative_never_reaches_llm(self):
-        # MaskedBandits 型：战斗选项不可打分，交钱选项不优于 no-op → 决策器放弃，
-        # choose_action 层安全回退选中交钱（index 0），全程不触碰 LLM。
+        # Other events with this shape still use the generic scorer.
         agent = Harness(FakeValueEngine())
         state = make_state(event("COMPLEX", [
             choice(0, [{"type": "lose_all_gold"}]),
@@ -351,6 +453,48 @@ class StructuredEventTests(unittest.TestCase):
         action = agent.choose_action(state)
         self.assertEqual(ActionType.CHOOSE, action.type)
         self.assertEqual(0, action.choice_index)
+
+    def test_named_event_combat_threshold_precedes_both_models(self):
+        bandits = event("COMPLEX", [
+            choice(0, [{"type": "lose_all_gold"}]),
+            dict(choice(1, [{"type": "start_combat", "encounter": "Masked Bandits"}], "COMBAT"), kind="COMBAT"),
+        ])
+        bandits.update(id="Masked Bandits", class_name="MaskedBandits")
+        sphere = event("COMPLEX", [
+            dict(choice(0, [{"type": "start_combat", "encounter": "2 Orb Walkers"},
+                            {"type": "random_relic", "pool": "RARE"}], "COMBAT"), kind="COMBAT"),
+            dict(choice(1), kind="LEAVE"),
+        ])
+        sphere.update(id="Mysterious Sphere", class_name="MysteriousSphere")
+        for menu, combat, noncombat in [(bandits, 1, 0), (sphere, 0, 1)]:
+            for hp, max_hp, expected in [
+                (7, 80, noncombat), (8, 80, combat), (9, 80, combat), (8, 81, noncombat),
+            ]:
+                with self.subTest(event=menu["id"], hp=hp, max_hp=max_hp):
+                    state = make_state(menu, hp=hp, choice_list=["甲", "乙"])
+                    state.player.max_hp = max_hp
+                    value_engine = Mock()
+                    agent = Harness(value_engine)
+                    policy = object.__new__(PolicyAgent)
+                    policy.baseline = agent
+                    policy.mode = "policy"
+                    policy.enabled_types = {"EVENT"}
+                    policy._score = Mock()
+                    action = policy.choose_action(state)
+                    self.assertEqual(ActionType.CHOOSE, action.type)
+                    self.assertEqual(expected, action.choice_index)
+                    self.assertEqual("combat_hp_threshold", policy.last_behavior["reason"])
+                    value_engine.evaluate_state.assert_not_called()
+                    policy._score.assert_not_called()
+
+    def test_sphere_fight_confirmation_remains_forced(self):
+        confirm = event("FORCED", [dict(choice(0, followup="COMBAT"), kind="CONTINUE")])
+        confirm.update(id="Mysterious Sphere", class_name="MysteriousSphere", phase="PRE_COMBAT")
+        agent = Harness()
+        action = agent.choose_action(make_state(confirm, hp=7, choice_list=["继续"]))
+        self.assertEqual(ActionType.CHOOSE, action.type)
+        self.assertEqual(0, action.choice_index)
+        self.assertEqual("COMBAT", agent._pending_event["followup"])
 
     def test_unknown_event_uses_safe_default_never_llm(self):
         # UNKNOWN 事件 + 无价值引擎：文本解析跳过，安全回退选中第一个安全选项
@@ -479,17 +623,20 @@ class StructuredEventTests(unittest.TestCase):
         self.assertEqual(2, agent._handle_grid_selection(state).choice_index)
 
     def test_generated_card_grid_uses_value_model_not_llm(self):
-        state = make_state(choice_list=["cloak and dagger"])
+        state = make_state(choice_list=["cloak and dagger", "cleave"])
         state.screen_type = "GRID"
         state.grid_purpose = "generated_card_reward"
         state.can_cancel = True
-        state.grid_cards = [Card.model_validate(card("CloakAndDagger", "Cloak and Dagger", choice_index=0))]
+        state.grid_cards = [
+            Card.model_validate(card("CloakAndDagger", "Cloak and Dagger", choice_index=0)),
+            Card.model_validate(card("Cleave", "Cleave", index=1, choice_index=1)),
+        ]
         agent = Harness(FakeValueEngine())
         action = agent.choose_action(state)
         self.assertEqual(ActionType.CHOOSE, action.type)
-        self.assertEqual(0, action.choice_index)
-        self.assertEqual("CloakAndDagger", agent.value_engine.choices[0]["target"])
-        self.assertEqual(1, len(agent.value_engine.choices))
+        self.assertEqual(1, action.choice_index)
+        self.assertEqual(["CloakAndDagger", "Cleave"],
+                         [c["effects"][0]["card_id"] for c in agent.value_engine.choices])
 
     def test_on_the_fly_purge_only_ranks_cards_offered_by_grid(self):
         state = make_state(choice_list=["Defend"])

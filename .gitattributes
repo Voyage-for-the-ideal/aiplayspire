@@ -1,0 +1,3 @@
+/battle_engine/*.sh text eol=lf
+/deploy/linux/** text eol=lf
+/deploy/headless/** text eol=lf

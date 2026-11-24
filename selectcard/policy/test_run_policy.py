@@ -5,6 +5,7 @@ import gzip
 import json
 from pathlib import Path
 import random
+import shutil
 import sqlite3
 import tempfile
 import unittest
@@ -13,6 +14,7 @@ import torch
 
 from selectcard.src.reconstructor import RunReconstructor
 from selectcard.src.map_context import forward_consistent_positions, split_act_segments
+from .compare_bc import a20_interval, check_baseline_seeds, compare_checkpoints
 from .contracts import CHARACTERS, split_for
 from .encoding import FEATURES, build_vocabulary, encode_batch, state_parts
 from .from_runs import archive_values, catalog, export_runs, process_file
@@ -300,6 +302,105 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(reports[-1]["status"],"duplicate_in_archive")
             path.write_text("{broken",encoding="utf-8")
             self.assertEqual(process_file((path,"confirm"))[1][0]["status"],"invalid_archive")
+
+    def test_a15_filter_coverage_and_checkpoint_comparison(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "raw"
+            source.mkdir()
+            seeds = {split: [s for s in range(1, 200) if split_for(str(s)) == split][:2]
+                     for split in ("train", "val", "test")}
+            runs = []
+            for split, group in seeds.items():
+                for seed in group:
+                    for char in CHARACTERS:
+                        for ascension in (14, 15, 20):
+                            row = dict(raw_run(seed, char), ascension_level=ascension)
+                            if ascension == 14 or split == "val":
+                                row["card_choices"][0]["not_picked"][0] = "Impervious"
+                            runs.append(row)
+            (source / "a.run").write_text(json.dumps(runs[:len(runs)//2]), encoding="utf-8")
+            (source / "b.run").write_text(json.dumps(runs[len(runs)//2:]), encoding="utf-8")
+            data = root / "a15"
+            manifest = export_runs(source, data, stage="confirm", min_ascension=15, workers=2)
+            self.assertEqual(manifest["min_ascension"], 15)
+            self.assertEqual(manifest["report"]["reasons"]["below_min_ascension_15"], 24)
+            self.assertEqual(manifest["report"]["ascension_coverage"]["val|IRONCLAD|20|BOSS_REWARD"],
+                             dict(decisions=2, runs=2, seed_groups=2))
+            groups = {}
+            for split in ("train", "val"):
+                dataset = ShardDataset(data, split)
+                try:
+                    rows = list(dataset)
+                finally:
+                    dataset.close()
+                self.assertEqual({row["pre_state"]["ascension"] for row in rows}, {15, 20})
+                groups[split] = {row["seed_group"] for row in rows}
+                self.assertEqual(groups[split], set(map(str, seeds[split])))
+            self.assertFalse(groups["train"] & groups["val"])
+            with self.assertRaisesRegex(ValueError, "existing output has incompatible"):
+                export_runs(source, data, stage="confirm", min_ascension=14)
+            with self.assertRaisesRegex(ValueError, "min_ascension"):
+                export_runs(source, root / "invalid", stage="confirm", min_ascension=21)
+
+            baseline_data = root / "baseline_data"
+            base_manifest = export_runs(source, baseline_data, stage="confirm")
+            self.assertNotEqual(base_manifest["fingerprint"], manifest["fingerprint"])
+            original_read = ShardDataset._read
+
+            def no_test(dataset, metadata):
+                self.assertNotEqual(dataset.split, "test")
+                return original_read(dataset, metadata)
+
+            with patch.object(ShardDataset, "_read", no_test):
+                train_shards(arguments(data, root / "candidate", epochs=1))
+                train_shards(arguments(baseline_data, root / "baseline", epochs=1))
+                baseline, candidate = root / "baseline/best.pt", root / "candidate/best.pt"
+                _, new = load_checkpoint(candidate, expected_profile=RUN_PROFILE)
+                self.assertEqual(new["training"]["min_ascension"], 15)
+                archive = root / "baseline_archive"
+                archive.mkdir()
+                for name in ("manifest.json", "index.sqlite"):
+                    shutil.copyfile(baseline_data / name, archive / name)
+                report = compare_checkpoints(data, baseline, candidate, baseline_data_dir=archive, batch_size=7)
+                self.assertEqual(report["evidence"], "train_disjoint_for_both")
+                a20 = report["groups"]["ascension_band:20"]
+                self.assertEqual(report["a20_paired"]["seed_groups"], 2)
+                self.assertAlmostEqual(report["a20_paired"]["delta_nll"], a20["candidate"]["nll"] - a20["baseline"]["nll"])
+                self.assertEqual(len(report["a20_paired"]["ci95"]), 2)
+                self.assertGreater(a20["baseline"]["legal_candidate_vocab_coverage"],
+                                   a20["candidate"]["legal_candidate_vocab_coverage"])
+                _, old = load_checkpoint(baseline)
+                self.assertEqual(check_baseline_seeds(archive, old["training"], groups["train"])["status"], "overlap")
+                with (archive / "index.sqlite").open("ab") as stream:
+                    stream.write(b"bad")
+                diagnostic = compare_checkpoints(data, baseline, candidate, baseline_data_dir=archive)
+                self.assertEqual(diagnostic["evidence"], "descriptive_only")
+                self.assertIn("fingerprint mismatch", diagnostic["baseline_seed_check"]["reason"])
+                with self.assertRaisesRegex(ValueError, "candidate checkpoint does not match"):
+                    compare_checkpoints(data, baseline, baseline)
+                with self.assertRaisesRegex(ValueError, "evaluation dataset differs"):
+                    train_shards(arguments(data, root / "wrong", evaluate=True, checkpoint=baseline))
+            self.assertIsNone(a20_interval({"only-one": [0.5, 2]})["ci95"])
+
+    def test_a15_confirm_requires_a20_in_each_train_val_cell(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "raw"
+            source.mkdir()
+            for split in ("train", "val"):
+                seed = next(s for s in range(1, 200) if split_for(str(s)) == split)
+                rows = [dict(raw_run(seed, char), ascension_level=15) for char in CHARACTERS]
+                (source / (split+".run")).write_text(json.dumps(rows), encoding="utf-8")
+            data = root / "data"
+            with self.assertRaisesRegex(ValueError, "val/IRONCLAD/20/BOSS_REWARD"):
+                export_runs(source, data, stage="confirm", min_ascension=15)
+            manifest = verify_dataset(data)
+            self.assertEqual(manifest["report"]["ascension_coverage"]["val|IRONCLAD|20|BOSS_REWARD"],
+                             dict(decisions=0, runs=0, seed_groups=0))
+            with self.assertRaisesRegex(ValueError, "missing required coverage"):
+                train_shards(arguments(data, root / "blocked"))
+            self.assertFalse((root / "blocked").exists())
 
     def test_gpu_unavailable_fails_before_allocating_outputs(self):
         with patch("torch.cuda.is_available",return_value=False):

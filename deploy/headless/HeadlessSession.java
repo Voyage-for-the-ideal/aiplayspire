@@ -111,6 +111,10 @@ public final class HeadlessSession {
                         }
                         sequence++;
                         lastExecuted=HeadlessInteractionExport.object("request_id",id,"sequence",sequence,"method",method,"args",a,"card_uuid",cardUuid,"source_state_token",request.get("expected_state_token").getAsString());
+                        var insertion=kernel.takeObservedInsertion();
+                        if(insertion!=null)lastExecuted.put("combat_card_insertion",insertion);
+                        var selection=kernel.takeObservedSelection();
+                        if(selection!=null)lastExecuted.put("combat_selection_commit",selection);
                     } else if(!operation.equals("state"))throw new IllegalArgumentException("unknown_operation");
                 } catch(Throwable error) { if(actionStarted)poisoned=true;throw error; }
                 Map<String,Object> observation=state(kernel);

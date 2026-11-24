@@ -318,8 +318,13 @@ Action Actions::DiscardCardAtIdx(int handIdx) {
         if (handIdx < 0 || handIdx >= bc.cards.cardsInHand) {
             return;
         }
-        const auto c = bc.cards.hand[handIdx];
+        auto c = bc.cards.hand[handIdx];
         bc.cards.removeFromHandAtIdx(handIdx);
+        // The discarded card's Soul clears turn-only modifiers before the
+        // next native decision is exported. This matters for Setup, Madness,
+        // Corruption and other temporary discounts discarded by Unload or a
+        // selection action.
+        if (bc.headlessRngKnown) c.costForTurn = c.cost;
         bc.cards.moveToDiscardPile(c);
         bc.onManualDiscard(c);
         ++bc.player.cardsDiscardedThisTurn;
@@ -572,8 +577,11 @@ Action Actions::RebootAction(int drawCount) {
             const int idx = bc.cardRandomRng.random(
                 bc.cards.cardsInHand - 1
             );
-            const auto c = bc.cards.hand[idx];
+            auto c = bc.cards.hand[idx];
             bc.cards.removeFromHandAtIdx(idx);
+            // PutOnDeckAction settles the returned instance before Reboot's
+            // shuffle/draw continuation becomes observable.
+            if (bc.headlessRngKnown) c.costForTurn = c.cost;
             bc.cards.moveToDrawPileTop(c);
         }
 
@@ -1269,7 +1277,8 @@ Action Actions::WhiteNoiseAction(int count) {
             const auto cardId = getTrulyRandomCardInCombat(bc.cardRandomRng, bc.player.cc, CardType::POWER);
             CardInstance c(cardId);
             c.setCostForTurn(0);
-            bc.addToBot(Actions::MakeTempCardInHand(c));
+            if (bc.headlessRngKnown) Actions::MakeTempCardInHand(c).actFunc(bc);
+            else bc.addToBot(Actions::MakeTempCardInHand(c));
         }
     }};
 }

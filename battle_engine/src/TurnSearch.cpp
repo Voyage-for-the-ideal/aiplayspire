@@ -180,8 +180,17 @@ Json stateKey(const BattleContext &b,const std::array<int,5> *sourceOrder) {
     const auto &p=b.player;
     const bool logical=b.headlessRngKnown && sourceOrder;
     Json out=Json::array();
+    auto misc=b.miscBits;
+    if (!p.hasStatus<PS::STORM>() || !p.hasStatus<PS::HEX>()) misc.reset(BattleContext::STORM_BEFORE_HEX);
+    if (!p.hasStatus<PS::MAGNETISM>() || !p.hasStatus<PS::HELLO_WORLD>()) misc.reset(BattleContext::MAGNETISM_BEFORE_HELLO);
+    if (!p.hasStatus<PS::HELLO_WORLD>() || !p.hasStatus<PS::CREATIVE_AI>()) misc.reset(BattleContext::HELLO_BEFORE_CREATIVE);
+    if (!p.hasStatus<PS::MAGNETISM>() || !p.hasStatus<PS::CREATIVE_AI>()) misc.reset(BattleContext::MAGNETISM_BEFORE_CREATIVE);
+    if (!p.hasStatus<PS::WRAITH_FORM>() || !p.hasStatus<PS::LOSE_STRENGTH>()) misc.reset(BattleContext::WRAITH_BEFORE_FLEX);
+    if (!p.hasStatus<PS::WRAITH_FORM>() || !p.hasStatus<PS::WELL_LAID_PLANS>()) misc.reset(BattleContext::WRAITH_BEFORE_RETAIN);
+    const int bombs[]{p.bomb1,p.bomb2,p.bomb3};
+    for (int i=0;i<3;++i) if (!bombs[i] || !p.hasStatus<PS::WELL_LAID_PLANS>()) misc.reset(BattleContext::BOMB_AFTER_RETAIN_1+i);
     out.push_back(Json::array({b.seed,b.floorNum,int(b.encounter),b.ascension,int(b.outcome),b.turn,
-        b.isBattleOver,b.endTurnQueued,b.turnHasEnded,b.skipMonsterTurn,6,b.potionCount,b.potionCapacity,b.powersPlayedThisCombat,b.mantraGained,int(b.lastCardType),b.miscBits.to_ullong()}));
+        b.isBattleOver,b.endTurnQueued,b.turnHasEnded,b.skipMonsterTurn,6,b.potionCount,b.potionCapacity,b.powersPlayedThisCombat,b.mantraGained,int(b.lastCardType),misc.to_ullong()}));
     out.push_back(Json::array({b.masterDeckKnown,b.cardRngKnown,b.cardRng.counter,b.cardRng.seed0,b.cardRng.seed1}));
     out.push_back(cardKey(b.nightmareCard));
     Json master=Json::array();for(const auto &card:b.masterDeck)master.push_back(cardKey(card));out.push_back(master);

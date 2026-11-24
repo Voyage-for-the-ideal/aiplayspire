@@ -111,6 +111,7 @@ std::pair<int,int> headlessBomb(const Json &power) {
 }
 Json convertPowers(const Json &powers,bool player,const std::string &owner="",bool headless=false) {
     Json result=Json::array();
+    int energized=0;
     for (const auto &p:powers) {
         auto id=p.at("power_id").get<std::string>();
         if(headless && player && id.rfind("TheBomb",0)==0 && id!="TheBomb") {
@@ -141,7 +142,13 @@ Json convertPowers(const Json &powers,bool player,const std::string &owner="",bo
             require(owner=="WrithingMass" && p.at("amount")==-1,"invalid_reactive_marker");
         }
         if(headless && player && id=="Heatsink")id="Heatsinks"; // Java power ID, distinct from its card ID.
-        if(headless && player && id=="EnergizedBlue")id="Energized"; // Defect's variant has the same energy-recharge effect.
+        if(headless && player && (id=="EnergizedBlue" || id=="Energized")) {
+            const auto &amount=p.at("amount");
+            require(amount.is_number_integer() && amount>0 && amount<=32767,"invalid_energized_amount");
+            energized+=amount.get<int>();
+            require(energized<=32767,"invalid_energized_total");
+            continue;
+        }
         if (id=="Explosive") {
             const auto &amount=p.at("amount");
             require(headless && !player && owner=="Exploder" && amount.is_number_integer()
@@ -183,6 +190,7 @@ Json convertPowers(const Json &powers,bool player,const std::string &owner="",bo
         }
         result.push_back(q);
     }
+    if (energized) result.push_back({{"id","Energized"},{"amount",energized}});
     return result;
 }
 void restoreCards(BattleContext &bc,const Json &p) {
@@ -277,12 +285,14 @@ void executeImported(Imported &imported,const search::Action &action) {
     action.execute(imported.battle);
 }
 
-Json gamblerSelection(const BattleContext &b,const std::map<int,Json> &identities,const std::array<int,5> &targets) {
+Json gamblerSelection(const BattleContext &b,const std::map<int,Json> &identities,const std::array<int,5> &targets,
+                      int headbuttDefeatedTarget=-1) {
     if(b.inputState!=InputState::CARD_SELECT)return nullptr;
     if(isHeadlessSingleHand(b.cardSelectInfo.cardSelectTask)) {
         const auto &s=b.cardSelectInfo;auto &q=b.curCardQueueItem;
-        require(!q.exhaustOnUse && !q.purgeOnUse && q.triggerOnUse && (b.cardQueue.isEmpty() || q.autoplay),"single_hand_pending_variant");
+        require(!q.purgeOnUse && q.triggerOnUse && (b.cardQueue.isEmpty() || q.autoplay),"single_hand_pending_variant");
         auto pending=cardView(q.card);pending["uuid"]=identities.at(q.card.uniqueId);
+        pending["exhaust"]=q.exhaustOnUse;
         Json selected=Json::array(),visible=Json::array(),hidden=Json::array();std::set<int> except;
         for(auto i:s.selected){auto c=s.options.at(i);selected.push_back(identities.at(c.uniqueId));except.insert(c.uniqueId);}
         for(auto c:s.hiddenHand){hidden.push_back(identities.at(c.uniqueId));except.insert(c.uniqueId);}
@@ -327,13 +337,17 @@ Json gamblerSelection(const BattleContext &b,const std::map<int,Json> &identitie
             auto pending=cardView(c);pending["uuid"]=uid(item);pending["exhaust"]=item.exhaustOnUse;
             if(item.purgeOnUse)pending["purge"]=true;
             Json result={{"schema","headless-fetch-grid-v1"},{"source",getCardStringId(source)},{"options",options},{"selected",selected},{"count",s.pickCount},{"pending_card",pending}};
-            if(omni && !b.cardQueue.isEmpty()) {
+            if(!b.cardQueue.isEmpty()) {
                 result["autoplay_queue"]=Json::array();
                 for(const auto &row:b.cardQueue.orderedItems()) {
-                    require(row.autoplay && row.randomTarget && !row.ignoreEnergyTotal && !row.isEndTurn &&
-                            (row.purgeOnUse || row.exhaustOnUse),"omniscience_queued_item");
+                    require(row.autoplay && row.randomTarget==omni && !row.ignoreEnergyTotal && !row.isEndTurn &&
+                            (omni?(row.purgeOnUse || row.exhaustOnUse):!row.purgeOnUse),"fetch_autoplay_queued_item");
                     auto next=cardView(row.card);next["uuid"]=uid(row);next["exhaust"]=row.exhaustOnUse;
                     next["purge"]=row.purgeOnUse;next["energy"]=row.energyOnUse;
+                    if(!omni) {
+                        require(row.target>=0 && row.target<5 && targets.at(row.target)>=0,"fetch_autoplay_target");
+                        next["target"]=targets.at(row.target);
+                    }
                     result["autoplay_queue"].push_back(next);
                 }
             }
@@ -343,8 +357,12 @@ Json gamblerSelection(const BattleContext &b,const std::map<int,Json> &identitie
             const auto &item=b.curCardQueueItem;const auto &c=item.card;
             require(c.id==CardId::HEADBUTT && !item.exhaustOnUse && (!item.purgeOnUse || item.autoplay) && item.triggerOnUse,"headbutt_cleanup_variant");
             require(identities.count(c.uniqueId) && identities.at(c.uniqueId).is_string(),"headbutt_pending_uuid");
-            require(item.target>=0 && item.target<5 && targets[item.target]>=0,"headbutt_pending_target");
-            auto pending=cardView(c);pending["uuid"]=identities.at(c.uniqueId);pending["target"]=targets[item.target];
+            int target=headbuttDefeatedTarget;
+            if(target<0) {
+                require(item.target>=0 && item.target<5 && targets[item.target]>=0,"headbutt_pending_target");
+                target=targets[item.target];
+            }
+            auto pending=cardView(c);pending["uuid"]=identities.at(c.uniqueId);pending["target"]=target;
             return {{"schema","headless-headbutt-selection-v1"},{"options",options},{"selected",selected},{"count",1},{"pending_card",pending}};
         }
         return {{"schema","headless-liquid-selection-v1"},{"options",options},{"selected",selected},{"count",s.pickCount},{"new_cost",0}};
@@ -407,6 +425,7 @@ Json gamblerGuardKey(const Imported &imported) {
     const auto &s=b.cardSelectInfo;
     if(s.sourceDraw || s.hexDazed || s.inkDraw)
         key.push_back(Json::array({"selection-skill-followup-v1",s.sourceDraw,s.hexDazed,s.inkDraw}));
+    if(s.orangePellets)key.push_back(Json::array({"selection-orange-pellets-v1"}));
     if(s.letterOpener)key.push_back(Json::array({"selection-letter-opener-v1",5}));
     if(s.juggernautDamage>0)key.push_back(Json::array({"selection-juggernaut-v1",s.juggernautDamage}));
     if(b.cardSelectInfo.ornithopterHeal)key.push_back(Json::array({"potion-heal-v1",-1,5}));
@@ -416,6 +435,12 @@ Json gamblerGuardKey(const Imported &imported) {
             c.freeToPlayOnce,c.retain,c.forcedExhaust,b.curCardQueueItem.exhaustOnUse,b.curCardQueueItem.purgeOnUse}));
         if(s.sharpHide)key.push_back(Json::array({"headbutt-sharp-hide-v1",s.sharpHide}));
         if(int rage=b.player.getStatus<PS::RAGE>();rage>0)key.push_back(Json::array({"headbutt-rage-block-v1",rage}));
+        if(s.headbuttPenNibRemove)key.push_back(Json::array({"headbutt-pen-nib-remove-v1"}));
+        if(s.inkDraw)key.push_back(Json::array({"headbutt-ink-bottle-v1",1}));
+        if(s.headbuttOrnamentalBlock)key.push_back(Json::array({"headbutt-ornamental-fan-v1",4}));
+        if(s.headbuttPenNibBuff)key.push_back(Json::array({"headbutt-pen-nib-buff-v1",1}));
+        if(s.headbuttNunchakuEnergy)key.push_back(Json::array({"headbutt-nunchaku-v1",1}));
+        if(s.headbuttDarklingRepeat)key.push_back(Json::array({"headbutt-darkling-repeat-v1"}));
         if(b.player.hasRelic<R::SHURIKEN>() && b.player.attacksPlayedThisTurn>0 && b.player.attacksPlayedThisTurn%3==0)
             key.push_back(Json::array({"headbutt-shuriken-v1",1}));
         if(b.player.hasRelic<R::KUNAI>() && b.player.attacksPlayedThisTurn>0 && b.player.attacksPlayedThisTurn%3==0)
@@ -716,9 +741,24 @@ Imported importSnapshot(const Json &s) {
                 bool armed=false;
                 for(const auto &power:pc.at("powers"))
                     if(power.at("power_id")=="Pen Nib" && power.at("amount")==1)armed=true;
-                require(armed,"pen_nib_armed_power_missing");
-                // Native uses -1 as the armed sentinel; Java exports counter 9.
-                bc.player.penNibCounter=-1;
+                bool pendingBuff=false,pendingRemove=false;
+                if(s.contains("grid_card_select_screen_state")) {
+                    const auto &grid=s.at("grid_card_select_screen_state");
+                    if(grid.contains("action_queue") && grid.at("action_queue").is_array())
+                        for(const auto &action:grid.at("action_queue")) {
+                            if(action.contains("state_class") && action.at("state_class")==
+                                    "savestate.actions.HeadbuttPenNibActionState")pendingBuff=true;
+                            if(action.value("state_class",std::string())==
+                                    "savestate.actions.RemoveSpecificPowerActionState" && action.contains("state") &&
+                                    action.at("state")==Json{{"ownerIndex",-1},{"powerId","Pen Nib"}})pendingRemove=true;
+                        }
+                }
+                require((armed && !pendingBuff) || (!armed && pendingBuff && !pendingRemove),
+                        "pen_nib_armed_power_missing");
+                // Native uses -1 for an armed or just-triggered Pen Nib. Java
+                // keeps counter 9 while the consuming attack's removal waits.
+                bc.player.penNibCounter=pendingRemove?0:-1;
+                if(pendingBuff)bc.player.setHasStatus<PS::PEN_NIB>(false);
             }
         }
         std::array<int,3> bombs{};std::set<std::string> identities;
@@ -803,6 +843,32 @@ Imported importSnapshot(const Json &s) {
     bc.cardRngKnown=rng.contains("card_rng_counter");
     if(bc.cardRngKnown)bc.cardRng=restore("card_rng_counter",seed);
     bc.headlessRngKnown=headless;
+    if (headless) {
+        int storm=-1, hex=-1, creative=-1, hello=-1, magnetism=-1, wraith=-1, flex=-1, retain=-1, index=0;
+        for (const auto &power:pc.at("powers")) {
+            const auto id=power.at("power_id").get<std::string>();
+            if(id=="Storm")storm=index;
+            else if(id=="Hex")hex=index;
+            else if(id=="Creative AI")creative=index;
+            else if(id=="Hello")hello=index;
+            else if(id=="Magnetism")magnetism=index;
+            else if(id=="Wraith Form v2")wraith=index;
+            else if(id=="Flex")flex=index;
+            else if(id=="Retain Cards")retain=index;
+            else if(retain>=0 && id.rfind("TheBomb",0)==0 && id!="TheBomb")
+                bc.miscBits.set(BattleContext::BOMB_AFTER_RETAIN_1+headlessBomb(power).first-1);
+            ++index;
+        }
+        // These bits record the source's stable Power-list order for callbacks
+        // that share an RNG stream. They participate in the native state key
+        // and therefore remain safe across search copies.
+        bc.miscBits.set(BattleContext::STORM_BEFORE_HEX,storm>=0 && hex>=0 && storm<hex);
+        bc.miscBits.set(BattleContext::MAGNETISM_BEFORE_HELLO,magnetism>=0 && hello>=0 && magnetism<hello);
+        bc.miscBits.set(BattleContext::HELLO_BEFORE_CREATIVE,hello>=0 && creative>=0 && hello<creative);
+        bc.miscBits.set(BattleContext::MAGNETISM_BEFORE_CREATIVE,magnetism>=0 && creative>=0 && magnetism<creative);
+        bc.miscBits.set(BattleContext::WRAITH_BEFORE_FLEX,wraith>=0 && flex>=0 && wraith<flex);
+        bc.miscBits.set(BattleContext::WRAITH_BEFORE_RETAIN,wraith>=0 && retain>=0 && wraith<retain);
+    }
     if (headless) {
         size_t i=0;
         for (const auto &relic:p.at("relics")) {
@@ -889,7 +955,7 @@ Json Session::search(const Json &request) {
     auto &bc=imported.battle;
     const bool headless=request.at("snapshot").contains("_headless_rng");
     if(request.value("operation","")=="fingerprint")return {{"supported",true},{"native_key",stateKey(bc,&imported.monsterMap)},
-        {"path_context",layeredPathContext(request.at("snapshot"),imported.monsterMap,headless)},{"projection",projection(imported)},{"exact_rng",exactRngView(bc)},{"selection",gamblerSelection(bc,imported.selectionIdentities,imported.monsterMap)},
+        {"path_context",layeredPathContext(request.at("snapshot"),imported.monsterMap,headless)},{"projection",projection(imported)},{"exact_rng",exactRngView(bc)},{"selection",gamblerSelection(bc,imported.selectionIdentities,imported.monsterMap,imported.headbuttDefeatedTarget)},
         {"selection_native_key",gamblerGuardKey(imported)},
         {"rng_restore_mode",headless?"exact_state":"legacy_counter"}};
     if(request.value("operation","")=="import") return {{"supported",true},{"projection",imported.before},
@@ -1079,9 +1145,8 @@ Json Session::search(const Json &request) {
     };
     const bool verifiesDesktopGrid=!headless && (desktopGrid(bc) ||
         (bc.inputState==InputState::CARD_SELECT && bc.cardSelectInfo.cardSelectTask==CardSelectTask::FORETHOUGHT));
-    const bool omniscienceScry=cmd.at("type")=="GRID_SELECT" &&
-        bc.cardSelectInfo.cardSelectTask==CardSelectTask::OMNISCIENCE &&
-        bc.cardSelectInfo.options.at(action.getSelectIdx()).id==CardId::CUT_THROUGH_FATE;
+    const bool omniscienceChoice=cmd.at("type")=="GRID_SELECT" &&
+        bc.cardSelectInfo.cardSelectTask==CardSelectTask::OMNISCIENCE;
     auto phase=[](const BattleContext &state){
                 Json result=Json::array();
                 for(int k=0;k<state.monsters.monsterCount;++k){const auto &m=state.monsters.arr[k];
@@ -1170,7 +1235,7 @@ Json Session::search(const Json &request) {
         response["rng_restore_mode"]="exact_state";
         const auto &select=bc.cardSelectInfo;
         if(bc.inputState==InputState::CARD_SELECT &&
-           (select.headlessShuffleScry || (omniscienceScry && select.cardSelectTask==CardSelectTask::SCRY) ||
+           (select.headlessShuffleScry || (omniscienceChoice && select.cardSelectTask==CardSelectTask::SCRY) ||
                 select.cardSelectTask==CardSelectTask::EXHAUST_MANY)) {
             const bool scry=select.cardSelectTask==CardSelectTask::SCRY;
             Json options=Json::array();
@@ -1188,7 +1253,7 @@ Json Session::search(const Json &request) {
         }
         response["expected_native_key"]=normal?stateKey(bc,&imported.monsterMap):Json();
         response["expected_exact_rng"]=exactRngView(bc);
-        response["expected_selection"]=gamblerSelection(bc,currentIds,imported.monsterMap);
+        response["expected_selection"]=gamblerSelection(bc,currentIds,imported.monsterMap,imported.headbuttDefeatedTarget);
         response["expected_selection_native_key"]=gamblerGuardKey(imported);
         response["expected_card_uuids"]=gamblerCardUuids(bc,currentIds);
         if(bc.outcome!=Outcome::UNDECIDED) {

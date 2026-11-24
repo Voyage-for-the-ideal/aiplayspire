@@ -12,7 +12,7 @@ AIPlaySpire 是一个混合架构 agent，可以独立完成整局游戏：规�
 
 1. **长时程、可枚举的决策** —— 选卡、购买、删牌、升级、Boss 遗物、事件分支。每个候选动作都可以作用在当前状态上打分，但其真正价值要数幕之后才显现。**学得的价值函数** V(S) —— 由 1340 万局通过校验的存档对局重放出的约 1.57 亿个决策状态训练而成 —— 提供长时程比较；候选通过"枚举 → 模拟 → argmax V" 的假设下一状态进行评估。
 2. **地图选路** —— **确定性 6 层有限视野规划器**枚举可见 DAG 路径，评估成长收益、强制风险、恢复能力、选择弹性与钥匙可达性；每次只执行一步并重新规划，MAP 状态绝不进入 LLM 链路。
-3. **战斗** —— 状态一旦序列化，转移是精确、确定且廉价的。**最佳优先树搜索**在加速后的真实游戏引擎上探索出牌/目标/药水的动作序列，每回合扩展预算最高 5 万分支。
+3. **战斗** —— 一套 C++ 核心模拟和搜索出牌、目标及用药。Windows 在游戏进程里通过 JNI 调用；Linux 无头采集器使用同源 worker。
 4. **其余非结构化情况** —— 罕见的非地图界面、旧版非地图 payload、新场景。**LLM** 以结构化输出契约为通用推理兜底；少数有确定最优解的决策（开宝箱、拿钥匙遗物）由硬编码规则处理。
 
 ## 系统架构
@@ -31,15 +31,15 @@ flowchart TB
         R["确定性 6 层地图规划器"] --> D
     end
     D -->|non-combat choices| Game
-    D -->|combat detected| Combat["BattleAiMod tree search<br/>(headless 2nd game instance, :5125)"]
-    Combat -->|winning command list| Game
+    D -->|combat detected| Combat["BattleAiMod → native planner (JNI)"]
+    Combat -->|guarded action| Game
 ```
 
 组件：
 
 - **CommunicationMod**（`StSCommunicationMod/`）—— Java mod，通过 HTTP 暴露实时游戏状态（`/state`、`/action`、`/card_info`）：完整状态 JSON，含结构化事件语义（约 50 个原版事件，分类为 forced/deterministic/complex）、选卡格与奖励元数据，以及经由真实游戏 UI 提交的可执行动作。
 - **sts_ai_framework/** —— Python agent 主循环：轮询状态 → 识别屏幕类型 → 选择决策路径 → 提交单个动作 → 校验动作是否生效（否则重试/回退）。
-- **BattleAiMod**（`scumthespire/`）—— 战斗 AI 由独立的无头游戏实例负责，通过 `STSStateSaver`（完整战斗状态序列化，含 RNG）与 `LudicrousSpeed`（阻塞式、去除动画的引擎执行）与可见客户端协同。仓库中的战斗 mod 源自 [boardengineer](https://github.com/boardengineer) 的开源同名 mod，并在本仓库中做了大量扩展（战术回合评估、搜索预算、重放校验）；完整设计见 [AUTOFIGHT.md](AUTOFIGHT.md)。
+- **BattleAiMod** 内置 Windows x64 C++ 搜索库。STSStateSaver 读快照，LudicrousSpeed 在真机执行已校验的动作。三个战斗 Mod 源自 [boardengineer](https://github.com/boardengineer)；见[安装与使用](AUTOFIGHT.md)。
 
 ## 学得的价值模型
 
@@ -87,7 +87,7 @@ hazard 组合 → 存活曲线 S(F) → E[终止楼层] + β·P(Heart)   （β =
 | 战斗奖励 | 固定优先级（遗物 > 金币 > 药水 > 卡牌）+ 结构化翡翠/蓝宝石钥匙认领，钥匙与遗物的取舍由价值模型决策 |
 | 宝箱 | 自动开启 |
 | **地图路由** | **确定性 6 层有限视野规划器**：在地图 DAG 上枚举路径，按 `RouteContext` 的 HP/金币/钥匙/`?` 状态评分，施加硬约束（Act 3 钥匙可达性、连续战斗生存安全）并按 `FULL_GRAPH` / `IMMEDIATE_ONLY` / `FIRST_LEGAL` / `WAIT` 四档 fallback 执行；`MAP` 决策不经过 LLM |
-| **战斗**（出牌、目标选择、药水、结束回合、战斗内选择） | **BattleAiMod 最佳优先树搜索**，跑在真实（快进）引擎上；回合节点由人工调校的战术评估器（威胁、生存区间、致死断点）排序；预算 5k–50k 次扩展；结果以命令序列逐条回放，并带逐步状态 diff 校验 |
+| **战斗** | 共享 C++ 模拟和有预算上限的回合搜索；每个动作执行前后核对真实游戏状态。 |
 | 陌生 / 非结构化界面 | LLM + JSON 输出契约 + 安全动作回退链 |
 
 设计准则：**能枚举且需要长时程价值 → 价值网络；精确且可回滚 → 搜索；模糊或前所未见 → LLM。** LLM 是最后的兜底，而不是默认大脑。
@@ -101,10 +101,10 @@ hazard 组合 → 存活曲线 S(F) → E[终止楼层] + β·P(Heart)   （β =
 | `StSCommunicationMod/` | Java mod：游戏内 HTTP 桥，暴露状态 JSON 并执行动作 |
 | `STSStateSaver/` | Java mod：完整战斗状态序列化/恢复（含 RNG）—— 搜索回滚的原语 |
 | `LudicrousSpeed/` | Java mod：无动画、阻塞式地执行真实游戏引擎 + 命令接口 |
-| `scumthespire/` | Java mod（"Battle Ai Mod"）：战斗树搜索、战术评估器、客户端/服务端网络 |
+| `scumthespire/` | BattleAiMod：游戏内开关、JNI 接入和命令回放 |
 | `cardcrawl/` | 反编译的原版游戏源码 —— 作为数据校验的只读内容目录 |
 
-战斗流水线（双游戏实例、搜索预算、`./build_all.sh` 的 mod 构建顺序）的架构与运行说明见 [AUTOFIGHT.md](AUTOFIGHT.md)。注：仓库部分文档为中文。
+Windows 三个战斗 JAR 的构建和安装见 [AUTOFIGHT.md](AUTOFIGHT.md)。
 
 ## 训练价值网络
 
@@ -148,7 +148,7 @@ python -m sts_ai_framework --interval 2.0
 
 对局自动连续：一局结束（死亡/胜利）后，agent 会自动返回主菜单，按配置重选角色（`CHARACTER`，默认 DEFECT/机器人）与进阶等级（`ASCENSION`，默认 15）并开始下一局 —— 完整选项见 [sts_ai_framework/README.md](sts_ai_framework/README.md)（需 CommunicationMod 1.4.0+）。
 
-战斗流水线（无头搜索实例、存档目录、战斗内激活 BattleAiMod）请按 [AUTOFIGHT.md](AUTOFIGHT.md) 操作。
+游戏内自动战斗操作见 [AUTOFIGHT.md](AUTOFIGHT.md)。
 
 ## 技术栈
 
@@ -158,4 +158,4 @@ python -m sts_ai_framework --interval 2.0
 
 实验性研究工程，处于持续迭代中；事件覆盖、战斗搜索健壮性与价值模型质量是当前主要工作方向。
 
-**署名与声明：**《杀戮尖塔》为 Mega Crit 开发的游戏 —— 本项目是未获官方授权的非官方研究项目。战斗搜索 mod（`STSStateSaver`、`LudicrousSpeed`、`scumthespire`）源自 [boardengineer](https://github.com/boardengineer) 的同名开源 mod，并在本仓库中做了扩展（战术评估器、搜索预算档位、重放/状态 diff 校验、服务端自动拉起、recall 支持）。
+**署名与声明：**《杀戮尖塔》为 Mega Crit 开发的游戏 —— 本项目是未获官方授权的非官方研究项目。战斗搜索 mod（`STSStateSaver`、`LudicrousSpeed`、`scumthespire`）源自 [boardengineer](https://github.com/boardengineer) 的同名开源 mod，并在本仓库中做了扩展（战术评估器、搜索预算档位、重放/状态 diff 校验、JNI 原生接入、recall 支持）。

@@ -59,6 +59,10 @@ def project_state(state, profile):
         result["visible_boss"] = None
     for node in result.get("map_nodes", []):
         node["burning"] = False  # account-wide Heart unlock is not in .run
+    # Floor-end gold and live grid counters are absent at the historical decision point.
+    for key in ("gold", "grid_selected_count", "grid_num_cards"):
+        result[key] = None
+        known[key] = False
     # These are intentionally outside the historical profile, even live.
     for key in ("potions", "shop_inventory", "grid_selected_cards"):
         result[key] = []

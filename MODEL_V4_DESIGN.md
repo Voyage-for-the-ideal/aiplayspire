@@ -8,11 +8,13 @@
 
 原始行保存 terminal_known、terminal_floor、heart_victory。删失轨迹只监督已证实到达的端点，停止位置和 Heart 结果保持未知。run 级 split、post-action 快照、角色和可见 Boss 规则不变。终局差分回放算法不在本轮修改，需后续用原始 run 抽查历史快照。
 
-全局 11 维顺序冻结为 act_1、act_2、act_3、act_4、act_progress、floor_normalized、hp_ratio、hp_absolute、max_hp_absolute、gold_log、ascension。四段按 `[0,17)`、`[17,34)`、`[34,51)`、`[51,57]` 划分，是与价值端点一致的进度段；训练/推理共同解析，不依赖未来结果。段内进度为 `(floor-start)/(end-start)`，绝对楼层为 floor/57。资源归一化继续仅从完整 training split 的 99.5% 分位数拟合。
+全局 11 维顺序冻结为 act_1、act_2、act_3、act_4、act_progress、floor_normalized、hp_ratio、hp_absolute、max_hp_absolute、gold_log、ascension。四段按 `[0,17)`、`[17,34)`、`[34,51)`、`[51,57]` 划分，是与价值端点一致的进度段；训练/推理共同解析，不依赖未来结果。段内进度为 `(floor-start)/(end-start)`，绝对楼层为 floor/57。通过共享字段名查找全局特征，尤其是进阶，避免硬编码列号。资源归一化继续仅从完整 training split 的 99.5% 分位数拟合。
 
-绿钥匙确认获得后跨幕保持 value=1、known=1，缺失后续地图不得清零；无法确认持有与否保持 unknown。Sapphire 在历史记录进入 Act IV 前仍为 unknown。
+钥匙使用 value 与 known mask。绿钥匙确认获得后跨幕保持 value=1、known=1，缺失后续地图不得清零；未确认的持有状态保持 unknown。Sapphire 在历史记录进入 Act IV 前仍为 unknown。
 
-105 格地图、浮点坐标 `[x/6,y/14]`、真实唯一边、出边方向、current_candidate、reachable 与八个已离开的 HISTORY 房间保持。归档当前位置仍只从已观测路径前缀推断。不改变地图生成 RNG/bookkeeping，不加入 router 计划。默认 192 维、5 层、4 heads、ReLU、Pre-LN、CLS，MHA `need_weights=False`。item 聚合/顺序及 73-item cap 保持。
+固定序列为 `[CLS]+[GLOBAL]+[CHARACTER]+[BOSS]+[KEYS]+[MAP×105]+[HISTORY×8]+item tokens`。角色编码为 IRONCLAD=0、THE_SILENT=1、DEFECT=2、WATCHER=3；缺失和未知角色报错。BOSS 使用可见信息。
+
+105 格地图使用浮点坐标 `[x/6,y/14]`、真实唯一边、三个方向的出边 mask、current_candidate 和 reachable；HISTORY 只保留当前幕最近八个已离开的房间。归档当前位置仅从已观测路径前缀推断。地图生成 RNG 和 bookkeeping 保持不变，输入不含 router 计划。默认 192 维、5 层、4 heads、ReLU、Pre-LN、early Global、CLS，MHA `need_weights=False`；可选骨干消融默认关闭。item 聚合/顺序及 73-item cap 保持。
 
 ## 标签、结构化输出与价值
 
@@ -57,6 +59,8 @@ Pilot 默认固定 1% run-hash、8 轮；确认默认完整 train/val、10 轮�
 - Format 11 及以前和旧数据明确拒绝加载；不得在原权重上重新解释目标或特征。
 - 模型冻结 resolution、架构、47 输出契约、全部权重、73-item cap、词表、caps、先验及可观测性。
 - evaluate_state 仍返回 [0,1] 标量；hazards/survival 仅返回有效端点。evaluate_state_distribution 增加 active_bins 的 kind/start/end/hazard/stop_mean/stop_probability/survival。不要为远期细桶补造概率。
+- 只读评估默认使用 `val`。布尔参数 `--test-only` 是 `--evaluate` 的别名；评估 test 集仍须明确传入 `--evaluation-split test`。评估写入新报告目录，源 checkpoint 原样保留。
+- HTTP 推理从 `selectcard/` 使用 `uvicorn src.api:app`，端点为 `POST /recommend/choice` 与 `POST /recommend/shop`。
 
 以下从 selectcard 执行，完整操作由用户在数据/GPU 机器独立运行：
 

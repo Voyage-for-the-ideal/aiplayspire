@@ -33,6 +33,12 @@ class ActionMixin:
         if state.room_phase == "COMBAT":
             return GameAction(type=ActionType.WAIT)
 
+        # 商店房间没有真正的选择：Java 侧只暴露一个 "shop" 选项，执行它才会
+        # 模拟点击商人并打开购买界面。这是确定动作，本地直接决定，不能为了
+        # 一个唯一答案等一次外部 LLM 网络往返（那会让进店多等数秒）。
+        if state.screen_type == "SHOP_ROOM":
+            return self._handle_shop_room(state)
+
         if state.screen_type == "REST":
             return self._handle_rest_room(state)
 

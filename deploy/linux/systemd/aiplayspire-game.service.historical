@@ -1,0 +1,30 @@
+[Unit]
+Description=AIPlaySpire one Java game inside Xvfb
+Requires=aiplayspire-gateway.service
+After=aiplayspire-gateway.service
+PartOf=aiplayspire.target
+ConditionPathExists=/home/ubuntu/aiplayspire-runtime/ALLOW_GAME
+StartLimitIntervalSec=900
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+Slice=aiplayspire.slice
+MemoryAccounting=yes
+WorkingDirectory=/home/ubuntu/aiplayspire
+ExecStart=/bin/bash /home/ubuntu/aiplayspire/battle_engine/start-game.sh
+ExecStartPost=/bin/bash /home/ubuntu/aiplayspire/deploy/linux/wait-ready.sh game --timeout 120
+Restart=on-failure
+RestartSec=15
+KillMode=control-group
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+# CommunicationMod listens on wildcard; cgroup filtering limits access to loopback.
+IPAddressDeny=any
+IPAddressAllow=localhost
+LogNamespace=aiplayspire

@@ -3,6 +3,7 @@ import copy
 import json
 from uuid import UUID
 from ..event_pools import chest_relic_pool
+from ..models import Card
 from .combat import HeadlessCombatBridge, validate_rng
 from .state import HeadlessContractError
 
@@ -67,6 +68,11 @@ def _streams(raw):
 def _controls(event):
     return [(c.button_index,c.enabled) for c in event.choices]
 
+def _opening_intent(intent, relics, paused):
+    # Only the public, pre-draw picker masks intent. Settled native combat
+    # exports the true intent independently of the Runic Dome UI.
+    return 'NONE' if paused and 'Runic Dome' in relics else intent
+
 
 _DIALOG={
     ("N'loth",'Nloth','0',2):'1',
@@ -83,6 +89,7 @@ _DIALOG={
     ('SecretPortal','SecretPortal','INTRO',0):'ACCEPT',
     ('SecretPortal','SecretPortal','INTRO',1):'LEAVE',
     ('The Joust','TheJoust','HALT',0):'EXPLANATION',
+    ('The Moai Head','MoaiHead','0',2):'1',
 }
 
 def _set_choice(choice,kind,followup,*effects):
@@ -238,9 +245,7 @@ def _bandits(before,after,a,b):
     for _ in range(3):ai.bounded(100)
     shuffle=Stream(streams['shuffle']);deck=_shuffle(shuffle.long(),left.deck)
     expected.update(misc=misc.state(),ai=ai.state(),shuffle=shuffle.state())
-    if toolbox and not _toolbox_offers(left, b, expected):return False
-    if not _opening_snecko_costs(left,right,expected,toolbox):return False
-    if expected!=_streams(b):return False
+    if not _event_opening_cards(left,right,b,deck,expected,toolbox):return False
     hp=Stream(streams['monster_hp'])
     if hp.counter!=3:return False
     hp.rewind_word();hp.rewind_word()
@@ -249,30 +254,165 @@ def _bandits(before,after,a,b):
             ('BanditBear',(40 if asc else 38)+hp.bounded(5),'STRONG_DEBUFF')]
     ids={r.id for r in left.relics}
     damage=3 if not toolbox and 'Mercury Hourglass' in ids else 0
-    if ([(m.id,m.max_hp,m.intent) for m in right.monsters]!=roster
+    if ([(m.id,m.max_hp,m.intent) for m in right.monsters]!=[
+            (i,h,_opening_intent(intent,ids,toolbox)) for i,h,intent in roster]
             or any(m.current_hp!=m.max_hp-damage for m in right.monsters)):return False
-    if not _opening_piles(left,right,deck,toolbox):return False
     healed=2 if 'Blood Vial' in ids and 'Mark of the Bloom' not in ids else 0
     # The ordinary EventRoom isn't marked elite and contains no bosses.
     energy=3+len(ids & {'Ectoplasm','Cursed Key','Coffee Dripper','Fusion Hammer','Sozu','Runic Dome',
                           'Velvet Choker',"Philosopher's Stone",'Busted Crown','Mark of Pain'})
     if 'Lantern' in ids:energy+=1
+    energy+=_opening_energy_bonus(left,toolbox)
     if right.relics!=_opening_relic_counters(left):return False
     return right.player==left.player.model_copy(update={'current_hp':min(left.player.max_hp,left.player.current_hp+healed),
-                    'energy':energy,'block':10 if 'Anchor'in ids and not toolbox else 0})
+                    'energy':energy,'block':10 if not toolbox and 'Anchor' in ids else 0})
+
+
+def _bandits_pay(left,right,a,b):
+    expected=dict(_streams(a))
+    targets=Stream(expected['headless'])
+    for _ in range(left.player.gold):targets.bounded(3)
+    expected['headless']=targets.state()
+    return (_room_context(a,b,'MaskedBandits') and a['phase']==b['phase']=='EVENT'
+            and a['roomPhase']==b['roomPhase']=='EVENT' and right.event is not None
+            and (right.event.id,right.event.class_name,right.event.phase)==
+                ('Masked Bandits','MaskedBandits','PAID_1')
+            and _controls(right.event)==[(0,True)] and expected==_streams(b)
+            and right.player==left.player.model_copy(update={'gold':0})
+            and right.deck==left.deck and right.relics==left.relics and right.potions==left.potions
+            and right.keys==left.keys)
+
+
+_DEAD_ADVENTURER_ROSTERS={
+    'Gremlin Nob':(('GremlinNob','BUFF',(82,5),(85,6)),),
+    'Lagavulin Event':(('Lagavulin','STRONG_DEBUFF',(109,3),(112,4)),),
+    '3 Sentries':tuple(('Sentry',intent,(38,5),(39,7)) for intent in ('DEBUFF','ATTACK','DEBUFF')),
+}
+
+
+def _dead_adventurer_fight(before,after,a,b):
+    left,right=before.state,after.state
+    toolbox=b['phase']=='CARD_PICK' and b['interaction'].get('card_reward',{}).get('source_action')=='ChooseOneColorless'
+    if (not _room_context(a,b,'DeadAdventurer') or a['phase']!='EVENT'
+            or a['roomPhase']!='EVENT' or (b['phase']!='PLAYER_TURN' and not toolbox) or b['roomPhase']!='COMBAT'
+            or left.deck!=right.deck or [r.id for r in left.relics]!=[r.id for r in right.relics]
+            or [p.id for p in left.potions]!=[p.id for p in right.potions]
+            or (left.player.max_hp,left.player.gold)!=(right.player.max_hp,right.player.gold)):
+        return False
+    choice=left.event.choices[0]
+    if len(choice.outcomes)!=1 or choice.outcomes[0].probability!=1:return False
+    effects=choice.outcomes[0].effects
+    if len(effects)!=1 or effects[0].type!='start_combat':return False
+    roster=_DEAD_ADVENTURER_ROSTERS.get(effects[0].encounter)
+    if roster is None:return False
+    receipt=b['combat_receipt']
+    if (receipt['turn'],receipt['active_monsters'],receipt['battle_over'],receipt['player_dead'],
+            receipt['played_card_uuids'],receipt['room_phase'],receipt['room_class'])!=(1,len(roster),False,False,[],'COMBAT','EventRoom'):
+        return False
+    streams=_streams(a)
+    hp=Stream(streams['monster_hp'])
+    if hp.counter<len(roster):return False
+    for _ in roster:hp.rewind_word();hp.counter-=1
+    ids={r.id for r in left.relics}
+    damage=3 if not toolbox and 'Mercury Hourglass' in ids else 0
+    enemies=[]
+    for monster,intent,normal,high in roster:
+        minimum,span=high if a['ascension']>=8 else normal
+        maximum=minimum+hp.bounded(span)
+        current=maximum*3//4 if 'PreservedInsect' in ids else maximum
+        enemies.append((monster,current-damage,maximum,_opening_intent(intent,ids,toolbox)))
+    if hp.state()!=streams['monster_hp'] or [(m.id,m.current_hp,m.max_hp,m.intent) for m in right.monsters]!=enemies:
+        return False
+    expected=dict(streams)
+    ai=Stream(streams['ai'])
+    for _ in roster:ai.bounded(100)
+    shuffle=Stream(streams['shuffle']);deck=_shuffle(shuffle.long(),left.deck)
+    metric=a['interaction'].get('dead_search_receipt') or {}
+    searches=metric.get('count')
+    base=35 if a['ascension']>=15 else 25
+    if type(searches)is not int or searches not in range(3) or metric.get('chance')!=base+25*searches:return False
+    misc=Stream(streams['misc'])
+    if misc.counter!=4+searches:return False
+    for _ in range(3+searches):misc.rewind_word()
+    seed=(misc.a+misc.b)&_MASK
+    if ('3 Sentries','Gremlin Nob','Lagavulin Event')[misc.bounded(3)]!=effects[0].encounter:return False
+    for i in range(searches):
+        if misc.bounded(100)<base+25*i:return False
+    if misc.bounded(100)>=base+25*searches:return False
+    misc.bounded(31 if a['runMode']['is_daily'] else 11)
+    if (misc.a,misc.b)!=(int(streams['misc']['state0'],16),int(streams['misc']['state1'],16)):return False
+    relic_remaining='RELIC' in _shuffle(seed,['GOLD','NOTHING','RELIC'])[searches:]
+    if not relic_remaining and not metric.get('relic_id'):return False
+    if relic_remaining and metric.get('relic_id') is not None:return False
+    relic=Stream(streams['relic'])
+    if relic_remaining:relic.bounded(100)
+    expected.update(ai=ai.state(),shuffle=shuffle.state(),relic=relic.state())
+    if not _event_opening_cards(left,right,b,deck,expected,toolbox):return False
+    energy=3+len(ids & {'Ectoplasm','Cursed Key','Coffee Dripper','Fusion Hammer','Sozu','Runic Dome',
+                        'Velvet Choker',"Philosopher's Stone",'Busted Crown','Mark of Pain'})+int('Lantern' in ids)
+    energy+=_opening_energy_bonus(left,toolbox)+int('SlaversCollar' in ids)
+    heal=2 if 'Blood Vial' in ids and 'Mark of the Bloom' not in ids else 0
+    return (right.relics==_opening_relic_counters(left)
+            and right.player==left.player.model_copy(update={
+                'current_hp':min(left.player.max_hp,left.player.current_hp+heal),
+                'energy':energy,'block':10 if not toolbox and 'Anchor' in ids else 0}))
 
 
 _OPENING_INNATE={'Backstab','BootSequence','Dramatic Entrance','Mind Blast','Writhe','Pride'}
 _OPENING_UPGRADED={'Brutality','Infinite Blades','After Image','Chill','Hello World','Storm',
                    'Machine Learning','BattleHymn','Alpha','Establishment'}
 _PREDRAW_CARDS={'PureWater':('Miracle',), 'HolyWater':('Miracle',)*3, 'Ninja Scroll':('Shiv',)*3}
-_OPENING_RELIC_COUNTERS={'Letter Opener':0,'Velvet Choker':0,'Pocketwatch':0,'HornCleat':1,
+_OPENING_RELIC_COUNTERS={'Letter Opener':0,'Velvet Choker':0,'Pocketwatch':0,'HornCleat':1,'CaptainsWheel':1,'StoneCalendar':1,
                          'Ornamental Fan':0,'Kunai':0,'Shuriken':0}
+_OPENING_RELIC_PERIODS={'Happy Flower':3,'Inserter':2,'Incense Burner':6}
 
 
 def _opening_relic_counters(state):
-    return [r.model_copy(update={'counter':_OPENING_RELIC_COUNTERS[r.id]})
-            if r.id in _OPENING_RELIC_COUNTERS else r for r in state.relics]
+    rows=[]
+    for relic in state.relics:
+        if relic.id in _OPENING_RELIC_COUNTERS:
+            relic=relic.model_copy(update={'counter':_OPENING_RELIC_COUNTERS[relic.id]})
+        elif relic.id in _OPENING_RELIC_PERIODS:
+            value=1 if relic.counter==-1 else relic.counter+1
+            relic=relic.model_copy(update={'counter':0 if value==_OPENING_RELIC_PERIODS[relic.id] else value})
+        elif relic.id=='Ancient Tea Set' and relic.counter==-2:
+            relic=relic.model_copy(update={'counter':-1})
+        rows.append(relic)
+    return rows
+
+
+def _opening_energy_bonus(state,paused):
+    return sum(2 if r.id=='Ancient Tea Set' and r.counter==-2 else
+               1 if r.id=='Happy Flower' and r.counter==2 and not paused else 0 for r in state.relics)
+
+
+def _opening_enchiridion(raw,observed,occupied,stream=None):
+    powers=raw['combat']['snapshot']['_combat_card_pools']['powers']
+    if (not powers or len(set(powers))!=len(powers) or observed.id not in powers or observed.type!='POWER'
+            or observed.uuid in occupied or not observed.uuid or observed.upgrades!=0
+            or observed.is_bottled or observed.cost_for_turn!=0 or observed.misc!=0):return False
+    return stream is None or powers[stream.bounded(len(powers))]==observed.id
+
+
+def _event_opening_cards(left,right,raw,deck,expected,paused):
+    if paused and not _toolbox_offers(left,raw,expected):return False
+    ids={r.id for r in left.relics}
+    if not paused and (ids & {'Mark of Pain','Enchiridion'} or any(c.id=='DeusExMachina' for c in deck)):
+        ordered=sorted(deck,key=_opening_card)
+        occupied={c.uuid for c in left.deck}
+        prebattle=[]
+        if 'Enchiridion' in ids:
+            rng=Stream(expected['card_random'])
+            if not right.hand or not _opening_enchiridion(raw,right.hand[0],occupied,rng):return False
+            expected['card_random']=rng.state()
+            prebattle.append(right.hand[0])
+            occupied.add(right.hand[0].uuid)
+        return (_opening_draw_batches(left,right,None,_predraw_cards(left.relics,False),occupied,expected,ids,
+                                      draw_pile=ordered,prebattle=prebattle)
+                and expected==_streams(raw))
+    temporary=_warped_tongs_upgrade(left,right,deck,expected,paused)
+    return (_opening_snecko_costs(left,right,expected,paused) and expected==_streams(raw)
+            and _opening_piles(left,right,deck,paused,temporary))
 
 
 def _predraw_cards(relics, paused):
@@ -294,19 +434,51 @@ def _opening_draw(deck,relics):
                +2*('Ring of the Snake' in ids)+('Ring of the Serpent' in ids))
 
 
-def _opening_piles(left,right,deck,paused):
+def _opening_piles(left,right,deck,paused,temporary_upgrade=None):
     deck=sorted(deck,key=_opening_card)
     generated=_predraw_cards(left.relics,paused)
     count=0 if paused else min(10-len(generated),_opening_draw(deck,left.relics))
     distinct={c.uuid for c in deck}
-    def facts(cards):return [(c.uuid,c.id,c.upgrades,c.misc) for c in cards]
+    def facts(cards, actual=False):
+        return [(c.uuid,c.id,c.upgrades-int(actual and c.uuid==temporary_upgrade),c.misc) for c in cards]
     actual=right.hand[:len(generated)]
+    expected_hand=deck[len(deck)-count:][::-1]
+    observed_hand=right.hand[len(generated):]
+    hand_matches=facts(observed_hand,True)==facts(expected_hand)
+    if not hand_matches and not paused:
+        ids={r.id for r in left.relics}
+        initial=min(len(deck),max(5+2*('Snecko Eye' in ids),sum(map(_opening_card,deck))))
+        agonies=[(i,c) for i,c in enumerate(expected_hand[:initial]) if c.id=='Endless Agony']
+        if len(agonies)==1 and len(observed_hand)==len(expected_hand)+1:
+            copy=observed_hand[initial];source=agonies[0][1]
+            hand_matches=(facts(observed_hand[:initial],True)==facts(expected_hand[:initial])
+                and facts(observed_hand[initial+1:],True)==facts(expected_hand[initial:])
+                and copy.uuid not in distinct and copy.uuid!=source.uuid and copy.reference==source.reference)
     return (facts(right.draw_pile)==facts(deck[:len(deck)-count])
-            and facts(right.hand[len(generated):])==facts(deck[len(deck)-count:][::-1])
+            and hand_matches
             and not right.exhaust_pile and not right.discard_pile
             and [c.id for c in actual]==generated
             and len({c.uuid for c in actual})==len(actual)
-            and all(c.uuid not in distinct and c.upgrades==0 and c.cost==c.cost_for_turn==0 for c in actual))
+            and all(c.uuid not in distinct and c.upgrades==int(c.uuid==temporary_upgrade)
+                    and c.cost==c.cost_for_turn==0 for c in actual)
+            and (temporary_upgrade is None or any(c.uuid==temporary_upgrade for c in right.hand)))
+
+
+def _warped_tongs_upgrade(left,right,deck,expected,paused):
+    """Bind Warped Tongs' post-draw shuffle and one temporary hand upgrade."""
+    if paused or not any(r.id=='WarpedTongs' for r in left.relics):return None
+    ordered=sorted(deck,key=_opening_card)
+    generated=_predraw_cards(left.relics,False)
+    count=min(10-len(generated),_opening_draw(ordered,left.relics))
+    # Generated opening cards have fresh UUIDs; _opening_piles separately
+    # proves their identity and freshness before this observed UUID is used.
+    hand=list(right.hand[:len(generated)])+ordered[len(ordered)-count:][::-1]
+    eligible=[c for c in hand if c.can_upgrade and c.type!='STATUS']
+    if not eligible:return None
+    shuffle=Stream(expected['shuffle'])
+    chosen=_shuffle(shuffle.long(),eligible)[0]
+    expected['shuffle']=shuffle.state()
+    return chosen.uuid
 
 
 def _opening_snecko_costs(left,right,expected,paused):
@@ -340,18 +512,109 @@ def _toolbox_offers(state,after,expected):
     return True
 
 
+def _opening_draw_batches(left, right, choice, queued, occupied, expected, ids, *, draw_pile=None, prebattle=()):
+    def generated(identity, cost=0, *, upgradable=True, exhaust=True):
+        return Card(index=0, uuid='', id=identity, name=identity, cost=cost, cost_for_turn=cost,
+                    can_upgrade=upgradable, exhausts=exhaust)
+
+    hand = list(prebattle) if choice is None else [*left.hand, generated(choice['id'], choice['cost'],
+            upgradable=choice.get('canUpgrade', False), exhaust=choice['exhaust']).model_copy(update={
+            'upgrades':choice['timesUpgraded'],'cost_for_turn':choice['costForTurn'],'misc':choice['misc']})]
+    hand.extend(generated(identity) for identity in queued)
+    draw_pile = list(left.draw_pile if draw_pile is None else draw_pile)
+    discard, exhaust = [], []
+    randomized = {c.uuid for c in prebattle}
+    if choice is not None and 'Enchiridion' in ids:randomized.add(left.hand[0].uuid)
+    rng = Stream(expected['card_random'])
+
+    def draw(amount):
+        batch = []
+        for _ in range(min(amount, 10 - len(hand), len(draw_pile))):
+            source = draw_pile.pop()
+            card = source
+            if 'Snecko Eye' in ids and card.cost >= 0:
+                cost = rng.bounded(4)
+                randomized.add(card.uuid)
+                card = card.model_copy(update={'cost': cost, 'cost_for_turn': cost})
+            hand.append(card)
+            batch.append((source, card))
+        # DrawCardAction finishes this batch before addToTop effects resolve, last drawn first.
+        for source, drawn in reversed(batch):
+            if source.id == 'DeusExMachina':
+                hand.remove(drawn)
+                exhaust.append(drawn)
+                copies = [generated('Miracle') for _ in range(2 + int(source.upgrades > 0))]
+            elif source.id == 'Endless Agony':
+                # triggerWhenDrawn copies the card before Confusion rerolls the original.
+                copies = [source.model_copy(update={'uuid': ''})]
+            else:
+                continue
+            room = 10 - len(hand)
+            hand.extend(copies[:room])
+            discard.extend(copies[room:])
+
+    initial = 5 + 2 * ('Snecko Eye' in ids) + ('Ring of the Serpent' in ids)
+    extra_innate = max(0, sum(map(_opening_card, draw_pile)) - initial)
+    draw(initial)
+    for relic in left.relics:
+        if relic.id in ('Bag of Preparation', 'Ring of the Snake'):
+            draw(2)
+        elif relic.id == 'Mark of Pain':
+            # At battle start, after the main draw. Later relics may draw the new Wounds.
+            for _ in range(2):
+                pos = rng.bounded(len(draw_pile)) if draw_pile else 0
+                draw_pile.insert(pos, generated('Wound', -2, upgradable=False, exhaust=False))
+
+    upgrade_index = None
+    if 'WarpedTongs' in ids:
+        eligible = [i for i, c in enumerate(hand) if c.can_upgrade and c.type != 'STATUS']
+        if eligible:
+            shuffle = Stream(expected['shuffle'])
+            upgrade_index = _shuffle(shuffle.long(), eligible)[0]
+            expected['shuffle'] = shuffle.state()
+    # Excess innate cards queue a separate pre-turn action after the battle-start actions.
+    draw(extra_innate)
+    expected['card_random'] = rng.state()
+
+    for planned, observed, upgrade in ((hand, right.hand, upgrade_index),
+                                       (draw_pile, right.draw_pile, None),
+                                       (discard, right.discard_pile, None),
+                                       (exhaust, right.exhaust_pile, None)):
+        if len(planned) != len(observed):
+            return False
+        for i, (want, got) in enumerate(zip(planned, observed)):
+            if (want.id, want.upgrades + int(i == upgrade), want.misc) != (got.id, got.upgrades, got.misc):
+                return False
+            if want.uuid:
+                if got.uuid != want.uuid:
+                    return False
+            else:
+                if not got.uuid or got.uuid in occupied or got.exhausts != want.exhausts:
+                    return False
+                occupied.add(got.uuid)
+            if not want.uuid or want.uuid in randomized:
+                if (want.cost, want.cost_for_turn) != (got.cost, got.cost_for_turn):
+                    return False
+    return True
+
+
+def _toolbox_opening_piles(left,right,choice,queued,occupied,expected,ids):
+    return _opening_draw_batches(left,right,choice,queued,occupied,expected,ids)
+
+
 def toolbox_event_pick_receipt(before,after,index):
     """Verify the Toolbox copy, queued opening draw and combat handoff."""
     a,b=json.loads(before.raw_json),json.loads(after.raw_json)
     left,right=before.state,after.state
-    event=a['interaction']['flow']['event_class']
     ids={r.id for r in left.relics}
-    if (not _room_context(a,b,event) or a['phase']!='CARD_PICK' or a['roomPhase']!=b['roomPhase']
+    stable=('seed','floor','act','ascension','room','roomPhase','map','history','observedKeys','runMode')
+    if (any(a[k]!=b[k] for k in stable) or a['phase']!='CARD_PICK'
             or a['roomPhase']!='COMBAT' or a['interaction']['card_reward'].get('source_action')!='ChooseOneColorless'
             or 'Toolbox' not in ids or left.deck!=right.deck or left.keys!=right.keys
             or b['phase'] not in ('PLAYER_TURN','CARD_SELECT')
             or b['phase']=='CARD_SELECT' and not after.native_combat_handoff
-            or left.discard_pile or left.exhaust_pile or right.discard_pile or right.exhaust_pile
+            or left.discard_pile or left.exhaust_pile
+            or len(left.draw_pile)!=len(left.deck)
             or [p.id for p in left.potions]!=[p.id for p in right.potions]):
         return False
     offered=a['cardRewardOptions']
@@ -361,40 +624,39 @@ def toolbox_event_pick_receipt(before,after,index):
     relic_to_card=_predraw_cards(left.relics,True)
     total=_predraw_cards(left.relics,False)
     queued=total[len(relic_to_card):]
-    if [c.id for c in left.hand]!=relic_to_card or len(total)+1>10:return False
-    kept=len(left.hand);picked=right.hand[kept]
-    choice=offered[index]
-    if (picked.id,picked.upgrades,picked.cost,picked.cost_for_turn,picked.misc,picked.exhausts)!=(
-            choice['id'],choice['timesUpgraded'],choice['cost'],choice['costForTurn'],choice['misc'],choice['exhaust']):
-        return False
+    prebattle=int('Enchiridion' in ids)
+    if prebattle and (not left.hand or not _opening_enchiridion(b,left.hand[0],
+            {c.uuid for c in left.deck+left.draw_pile}|{c['uuid'] for c in offered})):return False
+    if [c.id for c in left.hand[prebattle:]]!=relic_to_card or len(total)+1+prebattle>10:return False
     occupied={c.uuid for c in left.deck+left.draw_pile+left.hand}|{c['uuid'] for c in offered}
-    created=right.hand[kept:kept+1+len(queued)]
-    if (picked.uuid in occupied or [c.id for c in created[1:]]!=queued
-            or len({c.uuid for c in created})!=len(created) or any(c.uuid in occupied for c in created)
-            or any(c.upgrades or c.cost!=0 or c.cost_for_turn!=0 for c in created[1:])):
-        return False
-    def facts(cards):return [(c.uuid,c.id,c.upgrades,c.misc) for c in cards]
-    count=min(10-len(total)-1,_opening_draw(left.draw_pile,left.relics))
-    split=len(left.draw_pile)-count
-    if (len(left.draw_pile)!=len(left.deck) or facts(right.hand[:kept])!=facts(left.hand)
-            or facts(right.hand[kept+len(created):])!=facts(left.draw_pile[split:][::-1])
-            or facts(right.draw_pile)!=facts(left.draw_pile[:split])):
+    expected=dict(_streams(a))
+    if not _toolbox_opening_piles(left,right,offered[index],queued,occupied,expected,ids):
         return False
     ra,rb=a['combat_receipt'],b['combat_receipt']
     if ({k:v for k,v in ra.items() if k!='rng'}!={k:v for k,v in rb.items() if k!='rng'}
             or (rb['turn'],rb['battle_over'],rb['player_dead'],rb['played_card_uuids'])!=(1,False,False,[])
             or rb['active_monsters']!=len(right.monsters)):
         return False
-    expected=_streams(a)
-    if not _opening_snecko_costs(left,right,expected,False) or expected!=_streams(b):return False
+    if expected!=_streams(b):return False
+    snapshot=HeadlessCombatBridge().observe(b,run_id=after.run_id,sequence=after.sequence).snapshot
+    if snapshot is None or snapshot['turn']!=1 or snapshot['_headless_rng']!=rb['rng']:return False
+    plasma=0
+    if 'Nuclear Battery' in ids:
+        if [o for o in snapshot['player_state']['orbs'] if o['lookup_key']=='Plasma']!=[
+                dict(lookup_key='Plasma',evoke_amount=2,passive_amount=1)]:return False
+        plasma=1
     damage=3 if 'Mercury Hourglass' in ids else 0
-    if ([(m.id,m.current_hp,m.max_hp,m.intent) for m in right.monsters]!=[
-            (m.id,m.current_hp-max(0,damage-m.block),m.max_hp,m.intent) for m in left.monsters]
-            or right.player!=left.player.model_copy(update={'block':min(999,left.player.block+10*('Anchor' in ids))})
+    if ([(m.id,m.current_hp,m.max_hp,m.block) for m in right.monsters]!=[
+            (m.id,m.current_hp-max(0,damage-m.block),m.max_hp,max(0,m.block-damage)) for m in left.monsters]
+            or any(old.intent!=new.intent and not (old.intent=='NONE' and 'Runic Dome' in ids)
+                   for old,new in zip(left.monsters,right.monsters,strict=True))
+            # Blood Vial queues HealAction at the top, ahead of the Toolbox picker.
+            or right.player!=left.player.model_copy(update={
+                'energy':left.player.energy+plasma+int(any(r.id=='Happy Flower' and r.counter==0 for r in left.relics)),
+                'block':min(999,left.player.block+10*('Anchor' in ids))})
             or right.relics!=left.relics):
         return False
-    snapshot=HeadlessCombatBridge().observe(b,run_id=after.run_id,sequence=after.sequence).snapshot
-    return snapshot is not None and snapshot['turn']==1 and snapshot['_headless_rng']==rb['rng']
+    return True
 
 
 # Legacy archives did not export the Neow catalog. The frozen Silent profile's
@@ -444,7 +706,9 @@ def _opening_cards(rng,catalog):
 
 def _tiny_house(left,right,a,b):
     starter,potion_pool={'THE_SILENT':('Ring of the Snake',_SILENT_POTIONS),
-        'IRONCLAD':('Burning Blood',['BloodPotion','ElixirPotion','HeartOfIron',*_SILENT_POTIONS[3:]])}[left.character]
+        'IRONCLAD':('Burning Blood',['BloodPotion','ElixirPotion','HeartOfIron',*_SILENT_POTIONS[3:]]),
+        'DEFECT':('Cracked Core',['FocusPotion','PotionOfCapacity','EssenceOfDarkness',*_SILENT_POTIONS[3:]]),
+        'WATCHER':('PureWater',['BottledMiracle','StancePotion','Ambrosia',*_SILENT_POTIONS[3:]])}[left.character]
     if (a['floor']!=0 or a['act']!=1 or a['phase']!='NEOW' or b['phase']!='REWARD'
             or a['room']!='NeowRoom' or b['room']!='NeowRoom' or b['roomPhase']!='EVENT'
             or any(a[k]!=b[k] for k in ('seed','map','history','runMode','floor','act','ascension'))
@@ -464,7 +728,11 @@ def _tiny_house(left,right,a,b):
     changed=_shuffle(misc.long(),[c for c in deck if c['canUpgrade']])[0]
     increases={'Strike_G':{'baseDamage':3},'Defend_G':{'baseBlock':3},'Survivor':{'baseBlock':3},
                'Neutralize':{'baseDamage':1,'baseMagicNumber':1},
-               'Strike_R':{'baseDamage':3},'Defend_R':{'baseBlock':3},'Bash':{'baseDamage':2,'baseMagicNumber':1}}
+               'Strike_R':{'baseDamage':3},'Defend_R':{'baseBlock':3},'Bash':{'baseDamage':2,'baseMagicNumber':1},
+               'Strike_B':{'baseDamage':3},'Defend_B':{'baseBlock':3},
+               'Zap':{'cost':-1,'costForTurn':-1},'Dualcast':{'cost':-1,'costForTurn':-1},
+               'Strike_P':{'baseDamage':3},'Defend_P':{'baseBlock':3},
+               'Eruption':{'cost':-1,'costForTurn':-1},'Vigilance':{'baseBlock':4}}
     for stat,v in increases[changed['id']].items():changed[stat]+=v
     changed.update(name=changed['name']+'+',upgraded=True,timesUpgraded=1,canUpgrade=False)
     if deck!=b['player']['masterDeck']:return False
@@ -723,14 +991,12 @@ def _event_fight(before,after,a,b,name):
     expected.update(monster_hp=hp.state(),misc=misc.state(),ai=ai.state(),shuffle=shuffle.state())
     ids={r.id for r in left.relics}
     toolbox=b['phase']=='CARD_PICK' and b['interaction'].get('card_reward',{}).get('source_action')=='ChooseOneColorless'
-    if toolbox and not _toolbox_offers(left,b,expected):return False
-    if not _opening_snecko_costs(left,right,expected,toolbox or b['phase']=='EVENT'):return False
-    if expected!=_streams(b) or [(m.id,m.max_hp) for m in right.monsters]!=[(i,h) for i,h,_ in roster]:
+    if [(m.id,m.max_hp) for m in right.monsters]!=[(i,h) for i,h,_ in roster]:
         return False
     facts=lambda cards:[(c.uuid,c.id,c.upgrades,c.misc) for c in cards]
     if not sphere and b['phase']=='EVENT':
         # Pre-fix Mind Bloom was observable before turn-start actions.
-        return (right.event is not None and right.event.phase=='FIGHT'
+        return (expected==_streams(b) and right.event is not None and right.event.phase=='FIGHT'
                 and left.player==right.player and left.relics==right.relics
                 and not right.hand and not right.discard_pile and not right.exhaust_pile
                 and facts(right.draw_pile)==facts(sorted(deck,key=_opening_card))
@@ -749,9 +1015,11 @@ def _event_fight(before,after,a,b,name):
             return False
     heal=(2*('Blood Vial' in ids)+25*(not sphere and 'Pantograph' in ids)) if 'Mark of the Bloom' not in ids else 0
     if right.player.current_hp!=min(left.player.max_hp,left.player.current_hp+heal):return False
-    if toolbox and [(m.current_hp,m.intent) for m in right.monsters]!=[(h,i) for _,h,i in roster]:
+    if toolbox and [(m.current_hp,m.intent) for m in right.monsters]!=[
+            (h,_opening_intent(i,ids,True)) for _,h,i in roster]:
         return False
-    return _opening_piles(left,right,deck,toolbox)
+    return (_event_opening_cards(left,right,b,deck,expected,toolbox)
+            and right.relics==_opening_relic_counters(left))
 
 
 def _colosseum_slavers(before,after,a,b):
@@ -774,9 +1042,7 @@ def _colosseum_slavers(before,after,a,b):
     ai.bounded(100);intents.append('ATTACK')
     deck=_shuffle(shuffle.long(),left.deck)
     expected.update(monster_hp=hp.state(),ai=ai.state(),shuffle=shuffle.state())
-    if toolbox and not _toolbox_offers(left,b,expected):return False
-    if not _opening_snecko_costs(left,right,expected,toolbox or b['phase']=='EVENT'):return False
-    if expected!=_streams(b) or [(m.id,m.max_hp) for m in right.monsters]!=roster:
+    if [(m.id,m.max_hp) for m in right.monsters]!=roster:
         return False
     if (right.player.max_hp,right.player.gold)!=(left.player.max_hp,left.player.gold):return False
     deck.sort(key=_opening_card)
@@ -784,21 +1050,22 @@ def _colosseum_slavers(before,after,a,b):
     if b['phase']=='EVENT':
         # Old archives stop on a stale event flag before turn-start actions.
         # This is evidence of fight entry, not a runnable next decision.
-        return (right.event is not None and right.event.phase=='POST_COMBAT'
+        return (expected==_streams(b) and right.event is not None and right.event.phase=='POST_COMBAT'
                 and left.player==right.player and left.relics==right.relics and not right.hand
                 and not right.discard_pile and not right.exhaust_pile and facts(right.draw_pile)==facts(deck)
                 and all(m.current_hp==m.max_hp and m.intent=='NONE' for m in right.monsters))
     if b['phase']=='CARD_SELECT' and not after.native_combat_handoff:return False
     ids={r.id for r in left.relics}
     damage=3 if not toolbox and 'Mercury Hourglass' in ids else 0
-    if [(m.current_hp,m.intent) for m in right.monsters]!=[(hp-damage,intent) for (_,hp),intent in zip(roster,intents)]:
+    if [(m.current_hp,m.intent) for m in right.monsters]!=[
+            (hp-damage,_opening_intent(intent,ids,toolbox)) for (_,hp),intent in zip(roster,intents)]:
         return False
     if not toolbox:
         snapshot=HeadlessCombatBridge().observe(b,run_id=after.run_id,sequence=after.sequence).snapshot
         if snapshot is None or snapshot['turn']!=1 or snapshot['_headless_rng']!=receipt['rng']:return False
     healed=2 if 'Blood Vial' in ids and 'Mark of the Bloom' not in ids else 0
     if right.player.current_hp!=min(left.player.max_hp,left.player.current_hp+healed):return False
-    return b['phase']=='CARD_SELECT' or _opening_piles(left,right,deck,toolbox)
+    return _event_opening_cards(left,right,b,deck,expected,toolbox)
 
 
 def _colosseum_wave_deck(before,after,forecast,played):
@@ -1156,10 +1423,12 @@ def _verify(before,after,button):
     simple=key in _DIALOG
     designer=key==('Designer','Designer','INTRO',0)
     dead=key==('Dead Adventurer','DeadAdventurer','INTRO',0)
+    dead_fight=key==('Dead Adventurer','DeadAdventurer','FAIL',0)
     altar=key==('Forgotten Altar','ForgottenAltar','0',2) and any(r.id=='Darkstone Periapt' for r in left.relics)
     coin=key==('Neow','NeowEvent','3',2) and any(r.id=='Old Coin' for r in right.relics) and not any(r.id=='Old Coin' for r in left.relics)
     bandits=key==('Masked Bandits','MaskedBandits','INTRO',1) and any(r.id in ('Blood Vial','Toolbox') for r in left.relics)
-    house=key==('Neow','NeowEvent','3',3) and left.character in ('THE_SILENT','IRONCLAD') and any(r.id=='Tiny House' for r in right.relics)
+    bandits_pay=key==('Masked Bandits','MaskedBandits','INTRO',0)
+    house=key==('Neow','NeowEvent','3',3) and any(r.id=='Tiny House' for r in right.relics)
     amp=key[:3]==('Vampires','Vampires','0') and (button==0 or button==1 and len(e.choices)==3)
     colosseum=key==('Colosseum','Colosseum','FIGHT',0)
     skull=key==('Knowing Skull','KnowingSkull','ASK',1) and right.screen_type=='GAME_OVER'
@@ -1175,7 +1444,7 @@ def _verify(before,after,button):
     mushrooms=key==('Mushrooms','Mushrooms','0',1)
     blacksmith=key==('Accursed Blacksmith','AccursedBlacksmith','0',1)
     event_fight=key in {('Mysterious Sphere','MysteriousSphere','PRE_COMBAT',0),('MindBloom','MindBloom','INTRO',0)}
-    if not (golden or simple or designer or dead or altar or coin or bandits or house or amp or colosseum
+    if not (golden or simple or designer or dead or dead_fight or altar or coin or bandits or bandits_pay or house or amp or colosseum
             or skull or skull_potion or library or falling or sensory or fountain or tomb or joust
             or mushrooms or blacksmith or event_fight):return None
     a,b=json.loads(before.raw_json),json.loads(after.raw_json)
@@ -1185,6 +1454,8 @@ def _verify(before,after,button):
     if fountain:return _fountain(left,right,a,b)
     if joust:return _joust(left,right,a,b,button)
     if event_fight:return _event_fight(before,after,a,b,e.class_name)
+    if dead_fight:return _dead_adventurer_fight(before,after,a,b)
+    if bandits_pay:return _bandits_pay(left,right,a,b)
     if amp:return _vampires(left,right,a,b,button)
     if colosseum:return _colosseum_slavers(before,after,a,b)
     if skull:return _skull_fatal_gold(left,right,a,b)

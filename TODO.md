@@ -15,21 +15,21 @@
 
 AI bot 的 `choose_action` 决策链路对全部 14 个 `ChoiceType` screen_type 的拦截现状:
 
-**已拦截 (10 个)**:
+**已拦截 (11 个)**:
 - `NONE` (战斗) → WAIT,等待外部 BattleAiMod
 - `REST` → `_handle_rest_room` (价值网络)
 - `EVENT` → `_get_model_event_decision` (价值网络,需先正则解析选项效果)
 - `CHEST` → 硬编码自动打开
 - `COMBAT_REWARD` → 硬编码优先级: 遗物 > 金币 > 药水 > 卡牌
 - `SHOP_SCREEN` → `_get_model_shop_decision` (价值网络贪心搜索)
+- `SHOP_ROOM` → `_handle_shop_room` 直接 choose `shop` 打开商人界面（2026-11-10 起本地决定，不再走 LLM）
 - `CARD_REWARD` → `_get_model_card_decision` (价值网络)
 - `BOSS_REWARD` → `_get_model_boss_reward_decision` (价值网络) ✅
 - `GRID` → 通用拦截,支持 purge/upgrade/transform/duplicate ✅
 - `MAP` → 确定性 MAP 规划器（FULL_GRAPH / IMMEDIATE_ONLY / FIRST_LEGAL / WAIT），`MAP` 相关不走 LLM
 
-**未拦截/部分拦截 (4 个)**:
+**未拦截/部分拦截 (3 个)**:
 - `HAND_SELECT` → 掉到 LLM
-- `SHOP_ROOM` → 仅拦截从 `SHOP_SCREEN` 返回后自动 proceed;初次进入商店房间掉到 LLM
 - `GAME_OVER` → 掉到 LLM/fallback
 - `COMPLETE` → 掉到 LLM/fallback
 

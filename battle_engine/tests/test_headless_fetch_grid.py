@@ -75,6 +75,19 @@ class FetchGridTests(unittest.TestCase):
         self.assertEqual(played['expected_card_uuids']['exhaust_pile'][-2:],[p['card_in_use']['uuid'],picked])
         self.assertEqual(played['expected_after']['monsters'][0]['hp'],result['projection']['monsters'][0]['hp']-12)
 
+    def test_omniscience_vault_clears_the_pending_purge_copy(self):
+        s=fetch_grid('Omniscience')['combat']['snapshot'];p=s['player_state'];v=s['grid_card_select_screen_state']
+        target=v['group_cards'][0];uid=target['uuid']
+        for card in (target,next(c for c in p['draw_pile'] if c['uuid']==uid)):
+            card.update(card_id='Vault',cost=3,cost_for_turn=3,exhaust=True,target_enum_ordinal=2)
+        before=self.runop(s)
+        played=self.runop(s,'predict',0);self.assertTrue(played['supported'],played)
+        self.assertEqual(played['expected_exact_rng']['card_random']['counter'],
+                         before['exact_rng']['card_random']['counter']+1)
+        self.assertEqual(played['expected_card_uuids']['exhaust_pile'][-2:],
+                         [p['card_in_use']['uuid'],uid])
+        self.assertEqual(played['expected_after']['turn'],before['projection']['turn']+1)
+
     def test_nested_omniscience_binds_original_and_fresh_queued_copy(self):
         s=fetch_grid('Omniscience')['combat']['snapshot']
         player=s['player_state'];grid=s['grid_card_select_screen_state']
@@ -113,6 +126,24 @@ class FetchGridTests(unittest.TestCase):
         self.assertEqual(result['expected_card_uuids']['hand'][-1],grid['group_cards'][0]['uuid'])
         grid['action_queue'][0]['state']['amount']=6
         self.assertFalse(self.runop(s)['supported'])
+
+    def test_seek_plus_defers_letter_opener_until_the_second_pick(self):
+        raw=fetch_grid('Seek',True);s=raw['combat']['snapshot'];p=s['player_state']
+        grid=s['grid_card_select_screen_state']
+        p['relics'].append({'relic_id':'Letter Opener','counter':0,'_private':{}})
+        s['cards_played_this_turn_backup'][:0]=[
+            dict(p['card_in_use'],card_id='Defend_B',uuid=f'00000000-0000-0000-0000-00000000088{i}')
+            for i in (1,2)]
+        grid['action_queue'].insert(0,{'state_class':'savestate.actions.SelectionLetterOpenerActionState',
+                                       'state':{'amount':5}})
+        fp=self.runop(s)
+        self.assertTrue(fp['supported'],fp)
+        first=self.runop(s,'predict',0)
+        self.assertEqual(first['expected_after']['monsters'],fp['projection']['monsters'])
+        grid['selected_cards']=[grid['group_cards'][0]]
+        result=self.runop(s,'predict',1)
+        self.assertTrue(result['supported'],result)
+        self.assertEqual(result['expected_after']['monsters'][0]['hp'],fp['projection']['monsters'][0]['hp']-5)
 
     def test_secret_weapon_and_technique_use_randomized_matching_options(self):
         from uuid import UUID

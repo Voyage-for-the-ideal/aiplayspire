@@ -23,7 +23,7 @@ def _state(**overrides):
             MapNodeState(x=3, y=3, symbol="E", is_current=True),
             MapNodeState(x=3, y=4, symbol="R"),
         ],
-        keys=KeyState(),
+        keys=KeyState(ruby=False, emerald=False, sapphire=False),
     )
     for key, value in overrides.items():
         setattr(state, key, value)
@@ -85,6 +85,10 @@ class PayloadShapeTests(unittest.TestCase):
                                            "sapphire": False})
         self.assertEqual(len(payload["map_nodes"]), 3)
         self.assertIn("history", payload)
+
+    def test_missing_keys_stay_unknown_and_partial_keys_keep_known_mask(self):
+        self.assertEqual(map_context_fields(_state(keys=KeyState()))["keys"], {})
+        self.assertEqual(map_context_fields(_state(keys=KeyState(emerald=True)))["keys"], {"emerald": True})
 
 
 class ValuePayloadTests(unittest.TestCase):

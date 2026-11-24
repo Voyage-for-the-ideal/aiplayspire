@@ -108,6 +108,80 @@ public class ChoiceScreenUtils {
     }
 
     /**
+     * A boss relic picked through the bridge is obtained between two game
+     * updates, so vanilla lands it inside BossRelicSelectScreen.update():
+     * AbstractRelic.update() snaps the relic to the top panel and calls
+     * onEquip() while the boss-relic screen is still BOSS_REWARD. Relics whose
+     * onEquip opens a screen (Astrolabe, Empty Cage) open that screen, and the
+     * very same update immediately closes the boss-relic screen;
+     * closeCurrentScreen() then sees screen == GRID with
+     * previousScreen == BOSS_REWARD and restores the boss-relic screen, so the
+     * freshly opened GRID is discarded before a single frame is rendered.
+     * SuperFastMode's instant lerp turns that collision into the normal case.
+     *
+     * The landing is therefore deferred: the boss-relic screen keeps its own
+     * bookkeeping (metric entry, choseRelic, teardown), and onEquip() only runs
+     * afterwards with no screen up. That is the branch Astrolabe expects: it
+     * leaves previousScreen alone, so the GRID survives.
+     */
+    private static AbstractRelic deferredBossRelic = null;
+
+    /** Only a relic that bossObtainLogic() actually added to the player's
+     * relics needs the deferred landing. Holy Water / Black Blood / Ring of the
+     * Serpent / Frozen Core are instant-obtained by the screen's own pass and
+     * must keep that path. */
+    static boolean needsDeferredBossRelicLanding(boolean inPlayerRelicsBefore,
+                                                 boolean inPlayerRelicsAfter) {
+        return !inPlayerRelicsBefore && inPlayerRelicsAfter;
+    }
+
+    static void deferBossRelicLanding(AbstractRelic relic, boolean inPlayerRelicsBefore) {
+        if (!needsDeferredBossRelicLanding(
+                inPlayerRelicsBefore, AbstractDungeon.player.relics.contains(relic))) return;
+        // Suppress the landing inside AbstractRelic.update(); this deferred
+        // manager owns it now.
+        relic.isDone = true;
+        deferredBossRelic = relic;
+    }
+
+    /** Called once per game frame, after the game update; keeps a picked boss
+     * relic from equipping while its selection screen is still closing. */
+    public static void updateDeferredBossRelicLanding() {
+        AbstractRelic relic = deferredBossRelic;
+        if (relic == null) return;
+        if (AbstractDungeon.player == null
+                || !AbstractDungeon.player.relics.contains(relic)) {
+            // Run over or relic gone; nothing left to land.
+            deferredBossRelic = null;
+            return;
+        }
+        // Wait for BossRelicSelectScreen.update() to run its own teardown
+        // (metric entry, choseRelic, relics.clear(), closeCurrentScreen()).
+        if (AbstractDungeon.screen == AbstractDungeon.CurrentScreen.BOSS_REWARD) return;
+        deferredBossRelic = null;
+        landBossRelic(relic);
+    }
+
+    private static void landBossRelic(AbstractRelic relic) {
+        // Mirror AbstractRelic.update()'s arrival block, which is skipped now
+        // that the relic is marked done.
+        relic.currentX = relic.targetX;
+        relic.currentY = relic.targetY;
+        if (AbstractDungeon.topPanel != null) {
+            AbstractDungeon.topPanel.adjustRelicHbs();
+        }
+        relic.hb.move(relic.currentX, relic.currentY);
+        if (relic.tier == AbstractRelic.RelicTier.BOSS
+                && AbstractDungeon.getCurrRoom() instanceof TreasureRoomBoss) {
+            AbstractDungeon.overlayMenu.proceedButton.show();
+        }
+        if (AbstractDungeon.isScreenUp) {
+            System.err.println("Boss relic landing with a screen up: " + AbstractDungeon.screen);
+        }
+        relic.onEquip();
+    }
+
+    /**
      * Death/victory settlement screens: DEATH, VICTORY, and the UNLOCK /
      * NEOW_UNLOCK screens reached on the return-to-menu flow. These are
      * controllable in the in-run branch (victory, player still alive) AND in
@@ -341,7 +415,11 @@ public class ChoiceScreenUtils {
             case BOSS_REWARD:
                 if (!bossRewardSelectionSubmitted() && choice_index >= 0
                         && choice_index < AbstractDungeon.bossRelicScreen.relics.size()) {
-                    AbstractDungeon.bossRelicScreen.relics.get(choice_index).bossObtainLogic();
+                    AbstractRelic relic = AbstractDungeon.bossRelicScreen.relics.get(choice_index);
+                    boolean inPlayerRelicsBefore =
+                            AbstractDungeon.player.relics.contains(relic);
+                    relic.bossObtainLogic();
+                    deferBossRelicLanding(relic, inPlayerRelicsBefore);
                 }
                 break;
             case SHOP_SCREEN: makeShopScreenChoice(choice_index); break;

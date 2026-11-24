@@ -407,8 +407,12 @@ class ProtocolTests(unittest.TestCase):
             outcomes.add(pd.read_parquet(data / "train_valid_chunk_00000.parquet"))
             manifest["training_outcome_counts"] = outcomes.manifest_counts()
             (data / "dataset_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            # This protocol fixture has identical inputs with balanced endpoints:
+            # its exact MAE tie must not depend on a platform's batched GEMM tail.
+            # One-row validation forwards preserve that tie without relaxing the
+            # production checkpoint guard; MAE accumulation is tested separately.
             settings = dict(DATA_DIR=str(data), CHECKPOINT_DIR=str(output), D_MODEL=32,
-                            N_LAYERS=1, EPOCHS=4, BATCH_SIZE=8, RUN_FRACTION=1.,
+                            N_LAYERS=1, EPOCHS=4, BATCH_SIZE=1, RUN_FRACTION=1.,
                             COSINE_DECAY_EPOCHS=4, EARLY_STOPPING_PATIENCE=0,
                             EXPERIMENT_METADATA={"stage": "pilot", "settings": {"RUN_FRACTION": 1.}})
             with patch.multiple(Config, **settings), patch.dict("os.environ", {"STS_DATALOADER_WORKERS": "0"}):

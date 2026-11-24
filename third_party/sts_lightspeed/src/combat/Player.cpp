@@ -141,7 +141,7 @@ void Player::gainBlock(BattleContext &bc, int amount) {
         return;
     }
 
-    block += amount;
+    block = bc.headlessRngKnown ? std::min(999,block+amount) : block+amount;
 
     if (hasStatus<PS::JUGGERNAUT>()) {
         bc.addToBot(Actions::DamageRandomEnemy(getStatus<PS::JUGGERNAUT>()));
@@ -387,7 +387,7 @@ void Player::heal(int amount) {
     }
 
     if (hasRelic<RelicId::MAGIC_FLOWER>()) {
-        amount = amount * 3 / 2;
+        amount = (amount * 3 + 1) / 2;
     }
 
     bool wasBloodied = curHp <= maxHp/2;
@@ -603,13 +603,25 @@ void Player::wouldDie(BattleContext &bc) {
 }
 
 void Player::applyEndOfTurnPowers(BattleContext &bc) {
-    if (bomb1) {
+    const auto bombOrder=BattleContext::BOMB_AFTER_RETAIN_1;
+    const bool retain=hasStatus<PS::WELL_LAID_PLANS>() && !hasRelic<R::RUNIC_PYRAMID>() && !hasStatus<PS::EQUILIBRIUM>();
+    const auto afterRetain=bc.headlessRngKnown && retain && bc.miscBits.test(bombOrder)?bomb1:0;
+    if (bomb1 && !afterRetain) {
         bc.addToBot( Actions::DamageAllEnemy(bomb1) );
     }
     bomb1 = bomb2;
     bomb2 = bomb3;
     bomb3 = 0;
+    if(bc.headlessRngKnown) {
+        bc.miscBits.set(bombOrder,bc.miscBits.test(bombOrder+1));
+        bc.miscBits.set(bombOrder+1,bc.miscBits.test(bombOrder+2));
+        bc.miscBits.reset(bombOrder+2);
+    }
 
+    const bool wraithBeforeFlex=bc.headlessRngKnown && bc.miscBits.test(BattleContext::WRAITH_BEFORE_FLEX)
+        && hasStatus<PS::WRAITH_FORM>() && hasStatus<PS::LOSE_STRENGTH>();
+    const bool wraithBeforeRetain=bc.headlessRngKnown && retain && bc.miscBits.test(BattleContext::WRAITH_BEFORE_RETAIN)
+        && hasStatus<PS::WRAITH_FORM>() && !hasStatus<PS::LOSE_STRENGTH>();
     for (auto pair : statusMap) {
         if (!hasStatusRuntime(pair.first)) {
             continue;
@@ -657,6 +669,7 @@ void Player::applyEndOfTurnPowers(BattleContext &bc) {
                 break;
 
             case PS::LOSE_STRENGTH:
+                if (wraithBeforeFlex) bc.addToBot(Actions::DebuffPlayer<PS::DEXTERITY>(getStatus<PS::WRAITH_FORM>(),false));
                 bc.addToBot(Actions::DebuffPlayer<PS::STRENGTH>(-pair.second));
                 bc.addToBot(Actions::RemoveStatus<PS::LOSE_STRENGTH>());
                 break;
@@ -687,8 +700,11 @@ void Player::applyEndOfTurnPowers(BattleContext &bc) {
                 break;
 
             case PS::WELL_LAID_PLANS:
-                if(!hasRelic<R::RUNIC_PYRAMID>() && !hasStatus<PS::EQUILIBRIUM>())
+                if(retain) {
+                    if (wraithBeforeRetain) bc.addToBot(Actions::DebuffPlayer<PS::DEXTERITY>(getStatus<PS::WRAITH_FORM>(),false));
                     bc.addToBot({[count=pair.second](BattleContext &b){openCharacterSelection(b,CardSelectTask::RETAIN,count);}});
+                    if (afterRetain) bc.addToBot(Actions::DamageAllEnemy(afterRetain));
+                }
                 break;
 
             case PS::RITUAL:
@@ -698,7 +714,7 @@ void Player::applyEndOfTurnPowers(BattleContext &bc) {
 
             case PS::WRAITH_FORM:
                 // Vanilla WraithFormPower stores a signed loss; Artifact can block it.
-                bc.addToBot(Actions::DebuffPlayer<PS::DEXTERITY>(pair.second, false));
+                if (!wraithBeforeFlex && !wraithBeforeRetain) bc.addToBot(Actions::DebuffPlayer<PS::DEXTERITY>(pair.second, false));
                 break;
 
             default:
@@ -840,6 +856,45 @@ void Player::applyStartOfTurnRelics(BattleContext &bc) {
 
 void Player::applyStartOfTurnPowers(BattleContext &bc) {
     // ****** Player powers atStartOfTurn ******
+    // Creative AI, Hello World and Magnetism all consume cardRandomRng while
+    // Java invokes them in the stable source Power-list order. statusMap is
+    // enum-ordered, so reconstruct their relative source order from the bits
+    // imported with the snapshot and run the group at its first source member.
+    std::vector<PS> randomCardPowers;
+    for (const auto power : {PS::CREATIVE_AI, PS::HELLO_WORLD, PS::MAGNETISM})
+        if (hasStatusRuntime(power)) randomCardPowers.push_back(power);
+    auto sourceBefore=[&](PS a,PS b) {
+        if(a==PS::CREATIVE_AI && b==PS::HELLO_WORLD)return !bc.miscBits.test(3);
+        if(a==PS::HELLO_WORLD && b==PS::CREATIVE_AI)return bc.miscBits.test(3);
+        if(a==PS::CREATIVE_AI && b==PS::MAGNETISM)return !bc.miscBits.test(4);
+        if(a==PS::MAGNETISM && b==PS::CREATIVE_AI)return bc.miscBits.test(4);
+        if(a==PS::HELLO_WORLD && b==PS::MAGNETISM)return !bc.miscBits.test(2);
+        return bc.miscBits.test(2); // Magnetism before Hello World.
+    };
+    std::sort(randomCardPowers.begin(),randomCardPowers.end(),sourceBefore);
+    bool randomCardPowersApplied=false;
+    auto applyRandomCardPowers=[&] {
+        for(const auto power:randomCardPowers) {
+            const int amount=getStatusRuntime(power);
+            if(power==PS::CREATIVE_AI) {
+                for(int i=0;i<amount;++i)bc.addToBot(Actions::MakeTempCardInHand(
+                    getTrulyRandomCardInCombat(bc.cardRandomRng,cc,CardType::POWER)));
+            } else if(power==PS::HELLO_WORLD) {
+                if(bc.headlessRngKnown && bc.outcome!=Outcome::UNDECIDED)continue;
+                for(int i=0;i<amount;++i) {
+                    const auto &live=runtimeCombatPools.liveCommon;
+                    const auto cardId=bc.headlessRngKnown && !live.empty()
+                        ? live[bc.cardRandomRng.random(static_cast<int>(live.size())-1)]
+                        : getRandomClassCardOfRarity(bc.cardRandomRng,cc,CardRarity::COMMON);
+                    bc.addToBot(Actions::MakeTempCardInHand(cardId));
+                }
+            } else if(bc.headlessRngKnown && !bc.monsters.areMonstersBasicallyDead()) {
+                for(int i=0;i<amount;++i)bc.addToBot(Actions::MakeTempCardInHand(
+                    sts::getTrulyRandomColorlessCardInCombat(bc.cardRandomRng)));
+            }
+        }
+        randomCardPowersApplied=true;
+    };
     for (auto pair : statusMap) {
         if (!hasStatusRuntime(pair.first)) {
             continue;
@@ -862,12 +917,7 @@ void Player::applyStartOfTurnPowers(BattleContext &bc) {
                 break;
 
             case PS::CREATIVE_AI: {
-                // add a random Power card into the hand for each stack
-                for (int i = 0; i < pair.second; ++i) {
-                    bc.addToBot(Actions::MakeTempCardInHand(
-                        getTrulyRandomCardInCombat(bc.cardRandomRng, bc.player.cc, CardType::POWER)
-                    ));
-                }
+                if(!randomCardPowersApplied && randomCardPowers.front()==pair.first)applyRandomCardPowers();
                 break;
             }
 
@@ -893,19 +943,7 @@ void Player::applyStartOfTurnPowers(BattleContext &bc) {
                 break;
 
             case PS::HELLO_WORLD: {
-                // Each stack independently creates a random Common card.
-                if (bc.headlessRngKnown && bc.monsters.areMonstersBasicallyDead()) break;
-                for (int i = 0; i < pair.second; ++i) {
-                    const auto &live=runtimeCombatPools.liveCommon;
-                    const auto cardId = bc.headlessRngKnown && !live.empty()
-                        ? live[bc.cardRandomRng.random(static_cast<int>(live.size())-1)]
-                        : getRandomClassCardOfRarity(
-                        bc.cardRandomRng,
-                        bc.player.cc,
-                        CardRarity::COMMON
-                    );
-                    bc.addToBot(Actions::MakeTempCardInHand(cardId));
-                }
+                if(!randomCardPowersApplied && randomCardPowers.front()==pair.first)applyRandomCardPowers();
                 break;
             }
 
@@ -918,20 +956,27 @@ void Player::applyStartOfTurnPowers(BattleContext &bc) {
                 // triggers its passive, once per stack of Loop.
                 const int firstIdx = bc.player.getFirstOrbIdx();
                 if (firstIdx >= 0) {
-                    bc.addToBot(Actions::TriggerOrbPassive(firstIdx, pair.second));
+                    // Loop invokes the Orb callbacks immediately. Their
+                    // resulting actions capture the current Focus before a
+                    // queued BiasPower reduction resolves.
+                    for(int i=0;i<pair.second;++i)bc.player.triggerOrbPassive(bc,firstIdx);
                 }
                 break;
             }
 
             case PS::MAGNETISM:
-                if(bc.headlessRngKnown && !bc.monsters.areMonstersBasicallyDead())
-                    for(int i=0;i<pair.second;++i)
-                        bc.addToBot(Actions::MakeTempCardInHand(sts::getTrulyRandomColorlessCardInCombat(bc.cardRandomRng)));
+                if(!randomCardPowersApplied && randomCardPowers.front()==pair.first)applyRandomCardPowers();
                 break;
 
             case PS::MAYHEM:
                 for (int i = 0; i < pair.second; i++) {
-                    bc.addToBot( Actions::PlayTopCard(bc.monsters.getRandomMonsterIdx(bc.cardRandomRng), false) ); // todo fix target
+                    // MayhemPower queues a wrapper which later appends the
+                    // actual PlayTopCardAction. The normal start-turn draw is
+                    // already behind the wrapper by then, so it resolves first.
+                    bc.addToBot({[](BattleContext &b) {
+                        b.addToBot(Actions::PlayTopCard(
+                            b.monsters.getRandomMonsterIdx(b.cardRandomRng),false));
+                    }});
                 }
                 break;
 

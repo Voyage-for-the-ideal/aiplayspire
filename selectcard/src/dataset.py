@@ -8,6 +8,7 @@ import glob
 import hashlib
 import json
 import math
+import numbers
 import os
 from functools import lru_cache
 from pathlib import Path
@@ -590,9 +591,8 @@ class STSDataset(Dataset):
         key_states = self._column_list(row, "key_states") or [0, 0, 0]
         key_known_mask = self._column_list(row, "key_known_mask") or [0, 0, 0]
         act = row.get("act")
-        act = int(act) if isinstance(act, (int, float)) and not (
-            isinstance(act, float) and math.isnan(act)
-        ) else 0
+        act = int(act) if (isinstance(act, numbers.Real) and not isinstance(act, (bool, np.bool_))
+            and math.isfinite(float(act)) and float(act).is_integer() and 0 <= act <= 4) else 0
 
         map_rooms = self._column_list(row, "map_rooms")
         map_flags = self._column_list(row, "map_flags")

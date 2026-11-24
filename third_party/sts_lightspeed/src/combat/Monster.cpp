@@ -454,6 +454,9 @@ void Monster::die(BattleContext &bc) {
                 bc.addToTop(Actions::SuicideAction(i,false));
     }
 
+    const bool pendingRebirth=bc.headlessRngKnown && std::any_of(
+        bc.monsters.arr.begin(),bc.monsters.arr.begin()+bc.monsters.monsterCount,
+        [](const Monster &m){return m.id==MonsterId::AWAKENED_ONE && m.halfDead;});
     if (id == MonsterId::AWAKENED_ONE && !miscInfo) { // is awakened one stage 1 // todo change to status
         halfDead = true;
         removeDebuffs();
@@ -465,8 +468,8 @@ void Monster::die(BattleContext &bc) {
             bc.addToBot({[i=idx](BattleContext &b) { b.monsters.arr[i].setMove(MMID::AWAKENED_ONE_REBIRTH); }});
         }
 
-    } else if (bc.monsters.monstersAlive == 0 || (hasStatus<MS::MINION_LEADER>()
-            && !(bc.headlessRngKnown && id==MonsterId::REPTOMANCER))) {
+    } else if (!pendingRebirth && (bc.monsters.monstersAlive == 0 || (hasStatus<MS::MINION_LEADER>()
+            && !(bc.headlessRngKnown && id==MonsterId::REPTOMANCER)))) {
 //            bc.cleanCardQueue(); // todo should this really return like this?
         bc.outcome = Outcome::PLAYER_VICTORY;
         return;
@@ -574,20 +577,23 @@ void Monster::attackedUnblockedHelper(BattleContext &bc, int damage) { // todo, 
         }
 
     } else if (hasStatus<MS::MALLEABLE>() || hasStatus<MS::REACTIVE>()) {
+        bool queuedReactive=false;
         if (hasStatus<MS::MALLEABLE>()) {
             const auto malleable = getStatus<MS::MALLEABLE>();
             if (!bc.headlessRngKnown || (damage>0 && damage<curHp)) {
                 setStatus<MS::MALLEABLE>(malleable+1);
-                if (bc.headlessRngKnown && id==MonsterId::SNAKE_PLANT && bc.curCardQueueItem.card.id==CardId::HEADBUTT)
-                    bc.enqueueHeadbuttTail(idx,BattleContext::HeadbuttTail::MALLEABLE);
-                else bc.addToBot(Actions::MonsterGainBlock(idx,malleable));
+                if (bc.headlessRngKnown && bc.curCardQueueItem.card.id==CardId::HEADBUTT) {
+                    queuedReactive=id==MonsterId::WRITHING_MASS && hasStatus<MS::REACTIVE>();
+                    bc.enqueueHeadbuttTail(idx,queuedReactive?BattleContext::HeadbuttTail::MALLEABLE_REACTIVE:
+                                           BattleContext::HeadbuttTail::MALLEABLE);
+                } else bc.addToBot(Actions::MonsterGainBlock(idx,malleable));
             }
         }
         if (hasStatus<MS::REACTIVE>()) {
             if(bc.headlessRngKnown && id==MonsterId::WRITHING_MASS) {
                 // Compulsive is an amount-less sentinel. Each surviving
                 // unblocked NORMAL hit independently queues a source roll.
-                if(damage>0 && damage<curHp)bc.addToBot(Actions::RollMove(idx));
+                if(!queuedReactive && damage>0 && damage<curHp)bc.addToBot(Actions::RollMove(idx));
             } else if (getStatus<MS::REACTIVE>() == 0) {
                 setStatus<MS::REACTIVE>(1);
                 bc.addToBot( Actions::ReactiveRollMove() );

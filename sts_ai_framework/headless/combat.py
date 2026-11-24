@@ -95,11 +95,12 @@ def _liquid_potion(snapshot,command):
     return (command.get('type')=='POTION' and snapshot['player_state']['potions'][command['potion_index']]['id']=='LiquidMemories')
 
 
-def _selection_queue(view,allow_wait,expect_heal=False):
+def _selection_queue(view,allow_wait,expect_heal=False,*,opening_player=None):
     queue=view.get('action_queue')
-    if not isinstance(queue,list) or len(queue)>3 or view.get('card_queue_state')!=[]:
+    if not isinstance(queue,list) or len(queue)>(6 if opening_player else 3) or view.get('card_queue_state')!=[]:
         raise HeadlessContractError('Unexpected executable selection continuation')
     refresh=wait=heal=False
+    tongs=False; plasma_slots=set()
     for action in queue:
         if not isinstance(action,dict): raise HeadlessContractError('Invalid selection continuation row')
         kind=action.get('state_class')
@@ -119,6 +120,19 @@ def _selection_queue(view,allow_wait,expect_heal=False):
         elif kind=='savestate.actions.WaitActionState':
             if not allow_wait or wait: raise HeadlessContractError('Unexpected selection presentation wait')
             wait=True
+        elif kind=='savestate.actions.SelectionWarpedTongsActionState':
+            if (opening_player is None or tongs or action.get('state')!={}
+                    or not any(r['relic_id']=='WarpedTongs' for r in opening_player['relics'])):
+                raise HeadlessContractError('Unexpected Warped Tongs continuation')
+            tongs=True
+        elif kind=='savestate.actions.SelectionPlasmaEnergyActionState':
+            state=action.get('state',{});slot=state.get('orb_slot')
+            orbs=opening_player['orbs'] if opening_player is not None else []
+            if (type(slot) is not int or not 0<=slot<len(orbs) or slot in plasma_slots
+                    or orbs[slot]['lookup_key']!='Plasma' or type(state.get('amount')) is not int
+                    or state!={'orb_slot':slot,'amount':orbs[slot]['passive_amount']}):
+                raise HeadlessContractError('Unexpected Plasma continuation')
+            plasma_slots.add(slot)
         else: raise HeadlessContractError('Unexpected executable selection continuation')
     if heal!=expect_heal:raise HeadlessContractError('Missing Ornithopter heal')
 
@@ -136,7 +150,8 @@ def _gambler_evidence(snapshot, *, elixir=False):
             or h.get('can_pick_zero') is not True or h.get('were_cards_retrieved') is not False):
         raise HeadlessContractError('Invalid Gambler selection controls')
     _selection_queue(h,not elixir,(elixir or current['state']['notchip']) and
-                     any(r['relic_id']=='Toy Ornithopter' for r in snapshot['player_state']['relics']))
+                     any(r['relic_id']=='Toy Ornithopter' for r in snapshot['player_state']['relics']),
+                     opening_player=snapshot['player_state'] if not elixir and not current['state']['notchip'] else None)
     selected=[c['uuid'] for c in h['selected_cards']];remaining=[c['uuid'] for c in snapshot['player_state']['hand']]
     if len(set(selected+remaining))!=len(selected+remaining): raise HeadlessContractError('Duplicate Gambler selection UUID')
     return {'schema':'headless-elixir-selection-v1' if elixir else 'headless-gambler-selection-v1','selected':selected,'remaining':remaining,
@@ -179,34 +194,46 @@ def _fetch_evidence(s):
             or not (seek or omni or secret) and group!=pile or len(set(ids))!=len(ids)
             or len(selected)>=n or len(set(selected))!=len(selected) or any(row not in group for row in chosen)):
         raise HeadlessContractError('Invalid fetch source pile or selected UUID')
-    q=v['action_queue'];exhaust=seek or omni or c['times_upgraded']==0
+    q=v['action_queue'];intrinsic=seek or omni or c['times_upgraded']==0
+    exhaust=intrinsic or any(row['power_id']=='Corruption' for row in p['creature']['powers'])
     autoplay=v['card_queue_state'];purge=c.get('purge_on_use',False)
     active={x['uuid'] for k in _BATTLE_PILES for x in p[k]}
-    if (not isinstance(autoplay,list) or len(autoplay)>12 or not omni and (autoplay or purge)
+    if (not isinstance(autoplay,list) or len(autoplay)>(12 if omni else 5) or not omni and purge
             or p['limbo'] or q!=_skill_selection_queue(p,c,exhaust) or c.get('_private',{})!={}
-            or c['exhaust'] is not exhaust or c.get('dont_trigger_on_use_card') or c['uuid'] in active):
+            or c['exhaust'] is not intrinsic or c.get('dont_trigger_on_use_card') or c['uuid'] in active):
         raise HeadlessContractError('Invalid fetch cleanup or pending UUID')
     def view(card):
         return {'uuid':card['uuid'],'id':card['card_id'],'upgrades':card['times_upgraded'],'cost':card['cost'],
                 'turn_cost':card['cost_for_turn'],'free':card['free_to_play_once'],'retain':card['retain'],'exhaust':card['exhaust']}
-    pending=view(c)
+    pending=dict(view(c),exhaust=exhaust)
     if purge:pending['purge']=True
     seen=active|{c['uuid']}
     queued=[]
     for row in autoplay:
         next_card=row['card']
+        target=row['monster_index']
         if (row.get('autoplay_card') is not True or row.get('ignore_energy_total') is not False
-                or row.get('random_target') is not True or row['monster_index'] is not None
+                or row.get('random_target') is not omni
+                or (target is not None if omni else type(target) is not int or not 0<=target<len(s['cur_map_node_state']['monster_data']))
                 or next_card['dont_trigger_on_use_card'] is not False or next_card['uuid'] in seen
-                or not (next_card['exhaust'] is True or next_card['purge_on_use'] is True)):
-            raise HeadlessContractError('Invalid nested Omniscience queue')
+                or (not (next_card['exhaust'] or next_card['purge_on_use']) if omni else next_card['purge_on_use'])):
+            raise HeadlessContractError('Invalid fetch autoplay queue')
         seen.add(next_card['uuid'])
-        queued.append(dict(view(next_card),purge=next_card['purge_on_use'],
-                           energy=_int(row['energy_on_use'],'Omniscience queue energy',0)))
+        pending_row=dict(view(next_card),purge=next_card['purge_on_use'],
+                         energy=_int(row['energy_on_use'],'Fetch queue energy',0))
+        if not omni:pending_row['target']=target
+        queued.append(pending_row)
     evidence={'schema':'headless-fetch-grid-v1','source':source,'options':ids,'selected':selected,'count':n,
               'pending_card':pending}
     if queued:evidence['autoplay_queue']=queued
     return evidence
+
+def _orange_pellets_triggered(player):
+    relic=next((row for row in player['relics'] if row['relic_id']=='OrangePellets'),None)
+    if relic is None:return False
+    private=relic.get('_private',{})
+    return all(private.get('OrangePellets.'+kind) is False for kind in ('ATTACK','SKILL','POWER'))
+
 
 def _skill_selection_queue(player, card, exhaust=False):
     """Bind all known effects and their order around use-card cleanup."""
@@ -215,16 +242,23 @@ def _skill_selection_queue(player, card, exhaust=False):
         queue.append({'state_class':'savestate.actions.'+name,'state':state})
     if card['card_id']=='Burning Pact':
         append('SelectionDrawActionState',kind='burning_pact',amount=2+card['times_upgraded'])
-    hex_power=next((pw for pw in player['creature']['powers'] if pw['power_id']=='Hex'),None)
-    if hex_power is not None:
-        append('SelectionHexActionState',amount=_int(hex_power['amount'],'Hex Dazed count',1))
+    for power in player['creature']['powers']:
+        power_id=power['power_id']
+        if power_id=='Hex':
+            append('SelectionHexActionState',amount=_int(power['amount'],'Hex Dazed count',1))
+        elif power_id=='After Image':
+            append('SelectionAfterImageActionState',amount=_int(power['amount'],'After Image block',1))
+        elif power_id=='Panache' and power['amount']==5:
+            append('SelectionPanacheActionState',amount=_int(power['_private']['PanachePower.damage'],'Panache damage',1))
     if any(row['relic_id']=='InkBottle' and row['counter']==0 for row in player['relics']):
         append('SelectionDrawActionState',kind='ink_bottle',amount=1)
-    if card['card_id']=='Hologram' and any(row['relic_id']=='Letter Opener' and row['counter']==0 for row in player['relics']):
+    if _orange_pellets_triggered(player):
+        append('SelectionOrangePelletsActionState')
+    if any(row['relic_id']=='Letter Opener' and row['counter']==0 for row in player['relics']):
         append('SelectionLetterOpenerActionState',amount=5)
     append('UseCardActionState',card=card,targetIndex=-2,exhaustCard=exhaust,returnToHand=False,reboundCard=False)
     powers={power['power_id']:power['amount'] for power in player['creature']['powers']}
-    if card['card_id']=='True Grit' and card.get('block',0)>0 and 'NoBlockPower' not in powers and powers.get('Juggernaut',0)>0:
+    if card.get('block',0)>0 and 'NoBlockPower' not in powers and powers.get('Juggernaut',0)>0:
         append('SelectionJuggernautActionState',amount=_int(powers['Juggernaut'],'Juggernaut damage',1))
     return queue
 
@@ -242,14 +276,15 @@ def _single_hand_evidence(s):
     h=s['hand_select_screen_state'];a=h['current_action_state']['state'];p=s['player_state']
     c=p['card_in_use'];source=a['source'];up=c['times_upgraded'];copies=a['copies']
     forethought=source=='Forethought';any_number=forethought and up==1
+    exhaust=c['exhaust'] or any(power['power_id']=='Corruption' for power in p['creature']['powers'])
     count=99 if any_number else 1
-    if (set(a)!={'source','copies','owner_index','hidden'} or source not in ('Armaments','True Grit','Dual Wield','Burning Pact','Forethought') or c['card_id']!=source or up not in (0,1)
+    if (set(a)!={'source','copies','owner_index','hidden'} or source not in ('Armaments','True Grit','Dual Wield','Burning Pact','Forethought','Night Terror') or c['card_id']!=source or up not in (0,1)
             or up and source=='Armaments' or not up and source=='True Grit' or a['owner_index']!=-1
-            or copies!=(1+up if source=='Dual Wield' else 1) or h['num_cards_to_select']!=count
+            or copies!=(3 if source=='Night Terror' else 1+up if source=='Dual Wield' else 1) or h['num_cards_to_select']!=count
             or any(h.get(k) is not False for k in ('were_cards_retrieved','up_to'))
             or h.get('any_number') is not any_number or h.get('can_pick_zero') is not any_number
-            or c['exhaust'] or c.get('purge_on_use') or c.get('dont_trigger_on_use_card') or c.get('_private') or p['limbo']
-            or h['action_queue']!=_skill_selection_queue(p,c)):
+            or c.get('purge_on_use') or c.get('dont_trigger_on_use_card') or c.get('_private') or p['limbo']
+            or h['action_queue']!=_skill_selection_queue(p,c,exhaust)):
         raise HeadlessContractError('Invalid single-hand source, controls or cleanup')
     hidden=[x['uuid'] for x in a['hidden']];selected=[x['uuid'] for x in h['selected_cards']];remaining=[x['uuid'] for x in p['hand']]
     ids=hidden+selected+remaining+[c['uuid']]+[x['uuid'] for pile in ('draw_pile','discard_pile','exhaust_pile') for x in p[pile]]
@@ -271,11 +306,11 @@ def _single_hand_evidence(s):
                        'target':target,'energy':_int(item['energy_on_use'],'single-hand autoplay energy',0)})
     if (len(set(ids))!=len(ids) or len(selected)>(10 if any_number else 1)
             or len(selected)+len(remaining)<(1 if any_number else 2)
-            or source in ('True Grit','Burning Pact','Forethought') and hidden or forethought and autoplay):
+            or source in ('True Grit','Burning Pact','Forethought','Night Terror') and hidden or forethought and autoplay):
         raise HeadlessContractError('Invalid single-hand UUID lineage')
     return {'schema':'headless-single-hand-v1','remaining':remaining,'hidden':hidden,'selected':selected,'copies':copies,
             'pending_card':{'uuid':c['uuid'],'id':source,'upgrades':up,'cost':c['cost'],'turn_cost':c['cost_for_turn'],
-                            'free':c['free_to_play_once'],'retain':c['retain']},
+                            'free':c['free_to_play_once'],'retain':c['retain'],'exhaust':exhaust},
             **({'autoplay_queue':queued} if queued else {}),
             **({'count':count,'any_number':any_number} if forethought else {})}
 
@@ -292,36 +327,54 @@ def _headbutt_evidence(snapshot):
     copies=view['card_queue_state'];limbo=p['limbo']
     first=next(iter(snapshot['cur_map_node_state']['monster_data']),None)
     sharp=next((pw for pw in first['creature']['powers'] if pw['power_id']=='Sharp Hide'),None) if first else None
+    if not isinstance(queue,list):raise HeadlessContractError('Unexpected Headbutt executable continuation')
+    expected=set()
     if sharp is not None:
-        expected={'state_class':'savestate.actions.HeadbuttSharpHideActionState',
-                  'state':{'owner_index':0,'target_index':-1,'amount':_int(sharp['amount'],'Sharp Hide damage',1)}}
-        if first['creature']['id']!='TheGuardian' or copies or not isinstance(queue,list) or not queue or queue[0]!=expected:
-            raise HeadlessContractError('Invalid pending Headbutt Sharp Hide damage')
-        queue=queue[1:]
+        if first['creature']['id']!='TheGuardian':raise HeadlessContractError('Invalid pending Headbutt Sharp Hide damage')
+        _int(sharp['amount'],'Sharp Hide damage',1);expected.add('sharp')
+    powers={pw['power_id']:pw['amount'] for pw in p['creature']['powers']}
     if copies:
-        expected={'state_class':'savestate.actions.RemoveSpecificPowerActionState','state':{'ownerIndex':-1,'powerId':'Double Tap'}}
-        if (len(copies)!=1 or not isinstance(queue,list) or not queue or queue[0]!=expected or
-                not any(v['power_id']=='Double Tap' and v['amount']==0 for v in p['creature']['powers'])):
+        power=next((v for v in p['creature']['powers'] if v['power_id']=='Double Tap'),None)
+        if len(copies)!=1 or power is None or type(power.get('amount')) is not int or power['amount']<0:
             raise HeadlessContractError('Invalid pending Headbutt replay order or Double Tap owner')
-        queue=queue[1:]
-    rage=next((pw['amount'] for pw in p['creature']['powers'] if pw['power_id']=='Rage'),0)
-    if rage:
-        expected={'state_class':'savestate.actions.HeadbuttRageBlockActionState',
-                  'state':{'owner_index':-1,'amount':_int(rage,'Rage block',1)}}
-        if copies or not isinstance(queue,list) or not queue or queue[0]!=expected:
-            raise HeadlessContractError('Invalid pending Headbutt Rage block')
-        queue=queue[1:]
-    attack_relics={'savestate.actions.HeadbuttShurikenActionState':'Shuriken',
-                   'savestate.actions.HeadbuttKunaiActionState':'Kunai'}
-    prior_relic=-1
-    while isinstance(queue,list) and queue and queue[0].get('state_class') in attack_relics:
-        relic=attack_relics[queue[0]['state_class']]
-        order=next((i for i,r in enumerate(p['relics']) if r['relic_id']==relic and r['counter']==0),-1)
-        if (queue[0]['state']!={'owner_index':-1,'amount':1}
-                or order<=prior_relic):
-            raise HeadlessContractError('Invalid pending Headbutt attack relic buff')
-        prior_relic=order
-        queue=queue[1:]
+        if power['amount']==0:
+            expected.add('remove:Double Tap')
+    if powers.get('Pen Nib')==1:expected.add('remove:Pen Nib')
+    rage=powers.get('Rage',0)
+    if rage:_int(rage,'Rage block',1);expected.add('rage')
+    relics={row['relic_id']:row for row in p['relics']}
+    for relic,key in (('Kunai','kunai'),('Shuriken','shuriken'),('InkBottle','ink'),
+                      ('Nunchaku','nunchaku'),('Ornamental Fan','fan')):
+        if relic in relics and relics[relic]['counter']==0:expected.add(key)
+    if 'Pen Nib' in relics and relics['Pen Nib']['counter']==9 and 'Pen Nib' not in powers:expected.add('penbuff')
+    if _orange_pellets_triggered(p):expected.add('pellets')
+    seen=set();index=0
+    while index<len(queue) and queue[index].get('state_class')!='savestate.actions.UseCardActionState':
+        row=queue[index];kind=row.get('state_class');state=row.get('state');key=None
+        if kind=='savestate.actions.HeadbuttSharpHideActionState':
+            key='sharp';valid=state=={'owner_index':0,'target_index':-1,'amount':sharp['amount']} if sharp else False
+        elif kind=='savestate.actions.RemoveSpecificPowerActionState':
+            key='remove:'+str(state.get('powerId') if isinstance(state,dict) else None)
+            valid=state=={'ownerIndex':-1,'powerId':key[7:]}
+        elif kind=='savestate.actions.HeadbuttRageBlockActionState':
+            key='rage';valid=state=={'owner_index':-1,'amount':rage}
+        elif kind in ('savestate.actions.HeadbuttKunaiActionState','savestate.actions.HeadbuttShurikenActionState'):
+            key='kunai' if 'Kunai' in kind else 'shuriken';valid=state=={'owner_index':-1,'amount':1}
+        elif kind=='savestate.actions.SelectionDrawActionState':
+            key='ink';valid=state=={'kind':'ink_bottle','amount':1}
+        elif kind=='savestate.actions.SelectionOrangePelletsActionState':
+            key='pellets';valid=state=={}
+        elif kind=='savestate.actions.HeadbuttNunchakuActionState':
+            key='nunchaku';valid=state=={'amount':1}
+        elif kind=='savestate.actions.HeadbuttOrnamentalFanActionState':
+            key='fan';valid=state=={'amount':4}
+        elif kind=='savestate.actions.HeadbuttPenNibActionState':
+            key='penbuff';valid=state=={'owner_index':-1,'amount':1}
+        else:raise HeadlessContractError('Unexpected Headbutt executable continuation')
+        if key not in expected or key in seen or not valid:raise HeadlessContractError('Invalid pending Headbutt followup')
+        seen.add(key);index+=1
+    if seen!=expected:raise HeadlessContractError('Invalid pending Headbutt followup set')
+    queue=queue[index:]
     if not isinstance(queue,list) or len(queue) not in (1,2) or queue[0].get('state_class')!='savestate.actions.UseCardActionState':
         raise HeadlessContractError('Unexpected Headbutt executable continuation')
     data=queue[0].get('state',{});card=p.get('card_in_use')
@@ -349,9 +402,14 @@ def _headbutt_evidence(snapshot):
                 or facts['owner_index']!=target or not (
                     facts.get('kind')=='plated_armor_minus_one' and powers.get('Plated Armor',0)>0
                     or facts.get('kind')=='flight_minus_one' and m['creature']['id']=='Byrd' and powers.get('Flight',0)>0
-                    or facts.get('kind')=='malleable_block' and m['creature']['id']=='SnakePlant' and powers.get('Malleable',0)>3
+                    or facts.get('kind')=='malleable_block' and powers.get('Malleable',0)>3
+                    or facts.get('kind')=='malleable_then_reactive' and m['creature']['id']=='WrithingMass'
+                    and powers.get('Malleable',0)>3 and powers.get('Compulsive')==-1
                     or facts.get('kind')=='guardian_defensive_mode' and m['creature']['id']=='TheGuardian'
-                    and 'Mode Shift' in powers and powers['Mode Shift']<=0 and m['_private'].get('TheGuardian.closeUpTriggered') is True)):
+                    and 'Mode Shift' in powers and powers['Mode Shift']<=0 and m['_private'].get('TheGuardian.closeUpTriggered') is True
+                    or facts.get('kind')=='darkling_repeat_regrow' and m['creature']['id']=='Darkling'
+                    and m['creature']['current_health']<=0 and m['creature'].get('half_dead') is True
+                    and m.get('next_move')==4 and m.get('intent_name')=='UNKNOWN')):
             raise HeadlessContractError('Invalid pending Headbutt monster effect')
     options=[c['uuid'] for c in p['discard_pile']]
     matches=[(pile,c) for pile in ('hand','draw_pile','discard_pile','exhaust_pile') for c in p[pile] if c['uuid']==card['uuid']]
@@ -565,8 +623,15 @@ def _private_invariants(snapshot):
     return out
 
 
-def _private_match(expected, snapshot):
+def _private_match(expected, snapshot, command=None):
     actual = _private_invariants(snapshot)
+    if isinstance(command,dict) and command.get('type')=='END':
+        key='relic:HoveringKite';field='HoveringKite.triggeredThisTurn'
+        if key in expected or key in actual:
+            before=expected.get(key,{});after=actual.get(key,{})
+            if set(before)!={field} or set(after)!={field} or type(before[field]) is not bool or after[field] is not False:
+                return False
+            expected=dict(expected);actual=dict(actual);expected.pop(key);actual.pop(key)
     if any(actual.get(key) != value for key, value in expected.items()): return False
     for key in actual.keys()-expected.keys():
         # The checked native projection/roster/RNG proves these exact new slime
@@ -698,7 +763,8 @@ class HeadlessCombatBridge:
                 raise HeadlessContractError("Snapshot is not a normal combat decision")
             if single:
                 evidence=_single_hand_evidence(snapshot);choice=evidence['pending_card']['id']
-                purpose={'True Grit':'exhaust','Burning Pact':'exhaust','Armaments':'upgrade','Dual Wield':'duplicate_combat','Forethought':'forethought'}[choice]
+                purpose={'True Grit':'exhaust','Burning Pact':'exhaust','Armaments':'upgrade','Dual Wield':'duplicate_combat',
+                         'Forethought':'forethought','Night Terror':'nightmare'}[choice]
                 controls=raw['interaction']['selection'];ui=raw['cardSelection']
                 any_number=evidence.get('any_number',False)
                 single_confirm=any_number or bool(evidence['selected'])
@@ -915,15 +981,27 @@ def _omniscience_scry_source(raw, command, predicted):
         return None
     options=raw['cardSelection']['options']
     idx=command['card_index']
-    if 0<=idx<len(options) and options[idx]['id']=='CutThroughFate':
+    scry_limits={'CutThroughFate':(2,1),'ThirdEye':(3,2),'JustLucky':(1,1)}
+    if 0<=idx<len(options) and options[idx]['id'] in scry_limits:
         card=options[idx]
         player=raw['player']
-        count=2+card['timesUpgraded']+2*any(r['id']=='GoldenEye' for r in player['relics'])
-        draw=[c for c in reversed(player['drawPile']) if c['uuid']!=card['uuid']]
-        specs=[{'id':c['id'],'upgrades':c['timesUpgraded'],'uuid':c['uuid']} for c in draw[:count]]
-        if specs and type(target.get('count')) is int and target['count']==count and target.get('options')==specs:
+        base,increment=scry_limits[card['id']]
+        limit=base+increment*card['timesUpgraded']+2*any(r['id']=='GoldenEye' for r in player['relics'])
+        count=target.get('count');specs=target.get('options')
+        known={c['uuid']:(c['id'],c['timesUpgraded']) for pile in ('hand','drawPile','discardPile','exhaustPile') for c in player[pile]}
+        if (type(count) is int and 1<=count<=limit and isinstance(specs,list) and len(specs)==count
+                and all(set(spec)=={'id','upgrades','uuid'} and known.get(spec['uuid'])==(spec['id'],spec['upgrades']) for spec in specs)):
             return card['uuid']
     return None
+
+
+def _omniscience_scry_play(snapshot, source, played_uuid):
+    """Bind the one play that opened Scry after an Omniscience choice."""
+    if played_uuid==source:return True
+    queue=(snapshot.get('grid_card_select_screen_state') or {}).get('card_queue_state',[])
+    if queue and isinstance(queue[0].get('card'),dict) and played_uuid==queue[0]['card'].get('uuid'):
+        return True
+    return isinstance(played_uuid,str) and played_uuid not in _known_combat_uuids(snapshot)
 
 
 def _omniscience_victory(before, after, command, predicted, sequence):
@@ -942,18 +1020,30 @@ def _omniscience_victory(before, after, command, predicted, sequence):
     receipt=after.get('driver_receipt',{})
     forecast=predicted['expected_after']
     decks=(previous['masterDeck'],player['masterDeck'])
+    expected_deck=predicted.get('expected_master_deck',[])
+    expected_upgrades=sum(c['timesUpgraded']!=d['upgrades'] for c,d in zip(decks[0],expected_deck))
     bound=receipt.get('card_uuid')==selected['uuid']
     if (receipt.get('method')!='chooseGridCard' or receipt.get('args')!=[idx] or receipt.get('sequence')!=sequence
             or not bound and not (lesson and receipt.get('card_uuid') is None)
             or [c['uuid'] for c in decks[0]]!=[c['uuid'] for c in decks[1]]
             or any(c['id']!=d['id'] or c['misc']!=d['misc'] for c,d in zip(*decks))
-            or sum(c['timesUpgraded']!=d['timesUpgraded'] for c,d in zip(*decks))!=int(lesson)
+            or len(expected_deck)!=len(decks[0])
+            or sum(c['timesUpgraded']!=d['timesUpgraded'] for c,d in zip(*decks))!=expected_upgrades
             or not lesson and (decks[0]!=decks[1] or player['gold']!=previous['gold'])
             or (player['hp'],player['maxHp'])!=(forecast['hp'],forecast['max_hp'])
             or [p['id'] for p in player['potions']]!=forecast['potions']):return False
     actual=after['combat_receipt']['rng']['streams']
     exact=predicted['expected_exact_rng']
-    if any(actual[k]!=exact[k] for k in ('ai','card_random','headless','misc','monster_hp','shuffle')):return False
+    if any(actual[k]!=exact[k] for k in ('ai','card_random','headless','monster_hp','shuffle')):return False
+    if actual['misc']!=exact['misc']:
+        from .event_receipts import Stream
+        if (before.get('room')!='MonsterRoomBoss' or after.get('room')!=before['room']
+                or before.get('runMode',{}).get('is_daily')):return False
+        gold_rng=Stream(exact['misc']);gold=95+gold_rng.bounded(11)
+        if before['ascension']>=13:gold=(3*gold+2)//4
+        if any(r['id']=='Golden Idol' for r in previous['relics']):gold=(5*gold+2)//4
+        if (gold_rng.state()!=actual['misc'] or
+                [r['amount'] for r in after['interaction']['rewards'] if r['type']=='GOLD']!=[gold]):return False
     extras=predicted['unmodelled_rng']
     if any(actual[k]!=extras[k] for k in ('monster','map','event','merchant')):return False
     return [(c['id'],c['timesUpgraded'],c['cost'],c['costForTurn']) for c in decks[1]]==[
@@ -990,6 +1080,78 @@ def _menu_picker_match(plan, raw, predicted):
         for spec,choice,card in zip(expected,options,pile)))
 
 
+def _discovery_picker_match(plan, raw, predicted):
+    """Bind a menu-routed Discovery picker to the predicted combat state."""
+    forecast=predicted['expected_after'];p=raw['player']
+    if (raw['combat_receipt']['turn']!=forecast['turn']
+            or any(p[key]!=forecast[k] for key,k in
+                (('hp','hp'),('maxHp','max_hp'),('block','block'),('energy','energy')))
+            or [x['id'] for x in p['potions']]!=forecast['potions']):return False
+    if [(m['id'],m['hp'],m['maxHp'],m['block']) for m in raw['monsters'] if m['hp']>0]!=[
+            (m['id'],m['hp'],m['max_hp'],m['block']) for m in forecast['monsters'] if m['hp']>0]:return False
+    names=dict(zip(_BATTLE_PILES,('hand','drawPile','discardPile','exhaustPile')))
+    cards={k:p[v] for k,v in names.items()}
+    if not _normal_card_lineage(plan.before.snapshot,{'player_state':cards},predicted.get('expected_card_uuids')):
+        return False
+    return all([(c['id'],c['timesUpgraded'],c['cost'],c['costForTurn']) for c in cards[pile]]==[
+        (c['id'],c['upgrades'],c['cost'],c['turn_cost']) for c in forecast[pile]] for pile in _BATTLE_PILES)
+
+
+def _scry_picker_match(plan, raw, predicted):
+    """Bind a menu-routed native Scry boundary when no native snapshot is exported."""
+    controls=raw.get('interaction',{}).get('selection',{});view=raw.get('cardSelection',{})
+    if (controls.get('kind')!='grid' or controls.get('purpose')!='scry'
+            or controls.get('locked') is not False or controls.get('can_confirm') is not True
+            or controls.get('any_number') is not True or controls.get('can_pick_zero') is not True
+            or controls.get('auto_confirm') is not True or view.get('kind')!='grid' or view.get('selected')!=[]):
+        return False
+    forecast=predicted['expected_after'];p=raw['player']
+    if (raw['combat_receipt']['turn']!=forecast['turn']
+            or any(p[key]!=forecast[k] for key,k in
+                (('hp','hp'),('maxHp','max_hp'),('block','block'),('energy','energy')))
+            or [x['id'] for x in p['potions']]!=forecast['potions']):return False
+    if [(m['id'],m['hp'],m['maxHp'],m['block']) for m in raw['monsters'] if m['hp']>0]!=[
+            (m['id'],m['hp'],m['max_hp'],m['block']) for m in forecast['monsters'] if m['hp']>0]:return False
+    names=dict(zip(_BATTLE_PILES,('hand','drawPile','discardPile','exhaustPile')))
+    cards={k:p[v] for k,v in names.items()}
+    if not _normal_card_lineage(plan.before.snapshot,{'player_state':cards},predicted.get('expected_card_uuids')):
+        return False
+    if not all([(c['id'],c['timesUpgraded'],c['cost'],c['costForTurn']) for c in cards[pile]]==[
+            (c['id'],c['upgrades'],c['cost'],c['turn_cost']) for c in forecast[pile]] for pile in _BATTLE_PILES):
+        return False
+    count=controls.get('count');options=view.get('options',[])
+    if type(count) is not int or count<1 or len(options)!=min(count,len(cards['draw_pile'])):return False
+    top=cards['draw_pile'][::-1][:len(options)]
+    return all((choice.get('uuid'),choice.get('id'),choice.get('timesUpgraded'))==
+               (card['uuid'],card['id'],card['timesUpgraded']) for choice,card in zip(options,top))
+
+
+def _meditate_picker_match(plan, after, original, raw, command, predicted):
+    if command['type']!='CARD':return False
+    index=command['card_index']
+    source=plan.before.snapshot['player_state']['hand'][index]
+    card=original['player']['hand'][index]
+    if (source['card_id'],source['uuid'])!=('Meditate',card['uuid']) or card['id']!='Meditate':return False
+    receipt=raw['combat_receipt']
+    previous=original['combat_receipt']
+    driver=raw['driver_receipt']
+    if (driver.get('method'),driver.get('sequence'),driver.get('args'),driver.get('card_uuid'))!=(
+            'playCard',after.sequence,[index,command['monster_index']],source['uuid']):return False
+    if (receipt['played_card_uuids']!=previous['played_card_uuids']+[source['uuid']]
+            or receipt['room_class']!=previous['room_class'] or receipt['battle_over'] is not False):return False
+    count=1+int(card['timesUpgraded']>0)
+    controls=raw['interaction']['selection'];view=raw['cardSelection']
+    required=dict(kind='grid',purpose='meditate',count=count,locked=False,can_confirm=False,
+                  any_number=False,can_pick_zero=False,auto_confirm=True)
+    if (any(type(controls.get(k)) is not type(v) or controls[k]!=v for k,v in required.items())
+            or view.get('kind')!='grid' or view.get('selected')!=[]):return False
+    discard=raw['player']['discardPile']; options=view['options']
+    keys=('uuid','id','timesUpgraded','cost','costForTurn')
+    return (len(discard)>count and len(options)==len(discard)
+            and all(tuple(c[k] for k in keys)==tuple(d[k] for k in keys) for c,d in zip(options,discard))
+            and _discovery_picker_match(plan,raw,predicted))
+
+
 def verify_combat_effect(plan, after, fingerprint):
     """Fingerprint must come from importing this exact observed snapshot, not an ACK."""
     if after.run_id != plan.before.run_id or after.sequence <= plan.before.sequence: return "REJECTED"
@@ -1002,7 +1164,7 @@ def verify_combat_effect(plan, after, fingerprint):
         command=json.loads(plan.command_json)
         source=_omniscience_scry_source(original,command,predicted)
         raw = json.loads(after.raw_json); before = plan.before.state; state = after.state
-        if gambler and source is None:
+        if gambler and source is None and predicted.get('expected_screen')!='CARD_REWARD':
             try:
                 if not _omniscience_victory(original,raw,command,predicted,after.sequence):return 'UNVERIFIED'
             except (KeyError,TypeError,ValueError):return 'UNVERIFIED'
@@ -1013,7 +1175,13 @@ def verify_combat_effect(plan, after, fingerprint):
             cause = command["type"] != "CARD" or plan.before.snapshot["player_state"]["hand"][command["card_index"]]["uuid"] in receipt.get("played_card_uuids", [])
             if source is not None:
                 previous=original['combat_receipt']
-                cause=(receipt.get('played_card_uuids')==previous['played_card_uuids']+[source]
+                played=receipt.get('played_card_uuids')
+                driver=raw.get('driver_receipt',{});idx=command['card_index']
+                cause=(isinstance(played,list) and len(played)==len(previous['played_card_uuids'])+1
+                       and played[:-1]==previous['played_card_uuids']
+                       and _omniscience_scry_play(plan.before.snapshot,source,played[-1])
+                       and driver.get('method')=='chooseGridCard' and driver.get('args')==[idx]
+                       and driver.get('card_uuid')==source and driver.get('sequence')==after.sequence
                        and receipt.get('room_class')==previous['room_class'] and receipt.get('battle_over') is False)
             streams = receipt.get("rng", {}).get("streams", {})
             exact = {k: streams.get(k) for k in MODELLED}
@@ -1025,10 +1193,25 @@ def verify_combat_effect(plan, after, fingerprint):
             if predicted.get('expected_discovery') is not None:
                 d=predicted['expected_discovery'];reward=raw.get('interaction',{}).get('card_reward',{})
                 cards=raw.get('cardRewardOptions',[])
+                selection=original.get('interaction',{}).get('selection',{})
+                if selection.get('purpose')=='omniscience' and command['type']=='GRID_SELECT':
+                    idx=command['card_index'];options=original.get('cardSelection',{}).get('options',[])
+                    cause=(0<=idx<len(options) and receipt.get('played_card_uuids')==
+                           original['combat_receipt']['played_card_uuids']+[options[idx]['uuid']])
                 if (reward.get('source_action')!='DiscoveryAction' or reward.get('free_for_turn') is not True
                         or reward.get('copies')!=d['copies'] or [c.get('id') for c in cards]!=d['offers']
                         or len({c.get('uuid') for c in cards})!=3 or any(not c.get('uuid') for c in cards)
-                        or {k:streams.get(k) for k in STREAMS if k not in MODELLED}!=predicted['unmodelled_rng']):return 'UNVERIFIED'
+                        or {k:streams.get(k) for k in STREAMS if k not in MODELLED}!=predicted['unmodelled_rng']
+                        or not _discovery_picker_match(plan,raw,predicted)):return 'UNVERIFIED'
+            if (predicted.get('expected_screen')=='GRID' and predicted.get('expected_selection') is None
+                    and predicted.get('expected_menu_picker') is None and predicted.get('expected_discovery') is None):
+                extras={k:streams.get(k) for k in STREAMS if k not in MODELLED}
+                try:
+                    purpose=raw.get('interaction',{}).get('selection',{}).get('purpose')
+                    matched=(_meditate_picker_match(plan,after,original,raw,command,predicted) if purpose=='meditate'
+                             else _scry_picker_match(plan,raw,predicted))
+                except (KeyError,IndexError,TypeError,ValueError):matched=False
+                return 'APPLIED' if cause and exact==predicted['expected_exact_rng'] and extras==predicted['unmodelled_rng'] and matched else 'UNVERIFIED'
             return "APPLIED" if cause and exact == predicted["expected_exact_rng"] else "UNVERIFIED"
         if outcome == "victory":
             original = json.loads(plan.before.raw_json)
@@ -1076,7 +1259,8 @@ def verify_combat_effect(plan, after, fingerprint):
         and fingerprint.get("projection") == projection(s) == predicted["expected_after"]
         and fingerprint.get("exact_rng") == actual_rng == predicted["expected_exact_rng"]
         and fingerprint.get("native_key") == predicted["expected_native_key"]
-        and extras == predicted["unmodelled_rng"] and _private_match(predicted["source_private_invariants"], s)
+        and extras == predicted["unmodelled_rng"] and _private_match(
+            predicted["source_private_invariants"], s, json.loads(plan.command_json))
         and _lagavulin_progress(plan.before.snapshot, s, json.loads(plan.command_json))
         and _thief_progress(plan.before.snapshot, s, json.loads(plan.command_json))
         and _champ_progress(plan.before.snapshot, s, json.loads(plan.command_json))

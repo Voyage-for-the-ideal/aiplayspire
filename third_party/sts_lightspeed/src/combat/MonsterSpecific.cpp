@@ -2500,7 +2500,8 @@ MMID Monster::getMoveForRoll(BattleContext &bc, int &monsterData, const int roll
                     }
 
                 } else if (lastMove(MMID::GREMLIN_LEADER_STAB)) {
-                    const auto roll2 = bc.aiRng.random(0, 80);
+                    auto roll2 = bc.aiRng.random(0, 80);
+                    while (bc.headlessRngKnown && roll2==80) roll2=bc.aiRng.random(0, 80);
                     if (roll2 < 50) {
                         return (MMID::GREMLIN_LEADER_RALLY);
                     } else {

@@ -35,7 +35,7 @@ def value_state_payload(state: GameState) -> dict:
         "max_hp": state.player.max_hp,
         "gold": state.player.gold,
         "floor": state.floor,
-        "ascension": 20,
+        "ascension": state.ascension_level if state.ascension_level is not None else 20,
         "visible_boss": visible_boss_of(state),
         "character": state.character,
         **map_context_fields(state),

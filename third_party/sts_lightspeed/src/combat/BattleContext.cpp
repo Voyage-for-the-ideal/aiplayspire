@@ -845,6 +845,16 @@ void BattleContext::playCardQueueItem(CardQueueItem playItem) {
         item.target = monsters.getRandomMonsterIdx(cardRandomRng);
     }
 
+    if (headlessRngKnown && item.purgeOnUse && item.autoplay && item.triggerOnUse && c.requiresTarget()
+            && item.target>=0 && item.target<monsters.monsterCount && !monsters.arr[item.target].isTargetable()
+            && isCardPlayAllowed()) {
+        ++player.cardsPlayedThisTurn;
+        if(c.getType()==CardType::ATTACK)++player.attacksPlayedThisTurn;
+        if(c.getType()==CardType::SKILL)++player.skillsPlayedThisTurn;
+        lastCardType=c.getType();
+        return;
+    }
+
 //    bool canPlayCard = false; // not really sure what this is used for
     // A replay goes through the action manager's play limit again.
     const bool canUseCard = (!headlessRngKnown && item.purgeOnUse)
@@ -1784,7 +1794,8 @@ void BattleContext::useSkillCard() {
         case CardId::STEAM_BARRIER: {
             const int reduction = c.specialData;
             c.specialData = static_cast<std::int16_t>(reduction + 1);
-            addToBot( Actions::GainBlock(calculateCardBlock(std::max(0, (up ? 8 : 6) - reduction))) );
+            const int base=(up ? 8 : 6)-reduction;
+            addToBot(Actions::GainBlock(calculateCardBlock(headlessRngKnown?base:std::max(0,base))));
             break;
         }
 
@@ -2403,6 +2414,15 @@ void BattleContext::onUsePowerCard() {
         }
     }
 
+    // Java iterates powers in their stable list order. Preserve the only
+    // currently order-sensitive pair instead of grouping all generic powers
+    // ahead of Defect-specific powers.
+    const bool stormBeforeHex = headlessRngKnown && miscBits.test(STORM_BEFORE_HEX)
+        && p.hasStatus<PS::STORM>() && p.hasStatus<PS::HEX>();
+    if (stormBeforeHex) {
+        addToBot(Actions::ChannelOrb(Orb::LIGHTNING, p.getStatus<PS::STORM>()));
+    }
+
     if (p.hasStatus<PS::HEX>()) {
         addToBot( Actions::MakeTempCardInDrawPile(CardInstance(CardId::DAZED), 1, true) );
     }
@@ -2421,13 +2441,14 @@ void BattleContext::onUsePowerCard() {
     }
 
     // Storm: channel a Lightning orb whenever a Power card is played
-    if (p.hasStatus<PS::STORM>()) {
+    if (p.hasStatus<PS::STORM>() && !stormBeforeHex) {
         addToBot(Actions::ChannelOrb(Orb::LIGHTNING, p.getStatus<PS::STORM>()));
     }
 
     // Heatsinks: draw a card whenever a Power card is played
     if (p.hasStatus<PS::HEATSINKS>()) {
-        addToBot(Actions::DrawCards(p.getStatus<PS::HEATSINKS>()));
+        auto draw=Actions::DrawCards(p.getStatus<PS::HEATSINKS>());
+        if(headlessRngKnown)addToTop(draw);else addToBot(draw);
     }
 
     // ********* Relics onUseCard *********
@@ -2529,7 +2550,7 @@ void BattleContext::onUseStatusOrCurseCard() {
     } else if (c.getType() == CardType::STATUS) {
         if (p.hasRelic<R::MEDICAL_KIT>()) {
             item.exhaustOnUse = true;
-            if(headlessRngKnown)c.forcedExhaust=true; // MedicalKit modifies the actual Java card.
+            if(headlessRngKnown && !c.doesExhaust())c.forcedExhaust=true;
         }
     }
 
@@ -2727,7 +2748,6 @@ void BattleContext::onTurnEnding() {
     addToBot(Actions::ClearCardQueue());
     addToBot(Actions::DiscardAtEndOfTurn());
 
-    // todo reset card attributes here in draw, discard and hand
     cards.resetAttributesAtEndOfTurn();
 
     addToBot(Actions::UnnamedEndOfTurnAction());
@@ -2771,6 +2791,7 @@ void BattleContext::afterMonsterTurns() {
     }
 
     ++turn;
+    const bool skippedMonsterTurn = skipMonsterTurn;
     skipMonsterTurn = false;
     turnHasEnded = false;
 
@@ -2846,14 +2867,14 @@ void BattleContext::afterMonsterTurns() {
     player.cardsDiscardedThisTurn = 0;
 
     player.rechargeEnergy(*this); // this is called by the PlayerTurnEffect in game, I think it can be done here
-    if(headlessRngKnown)addToBot({[](BattleContext &b) {
+    if(headlessRngKnown && !skippedMonsterTurn)addToBot({[](BattleContext &b) {
         // Fixed GameKernel waits for the next PlayerTurnEffect (2s, 1s in
         // FAST_MODE) before exposing a decision. Earlier ExhaustCardEffect
         // instances (1s) have then completed resetAttributes, including cost.
         // This is presentation settlement, NOT AbstractRoom.endTurn's reset
         // loop (which excludes exhaust). Queue it after the new turn's work;
         // END interrupted by an earlier choice must keep its source values.
-        for(auto &c:b.cards.exhaustPile)c.costForTurn=c.cost;
+        for(auto &c:b.cards.exhaustPile)if(c.id!=CardId::VAULT)c.costForTurn=c.cost;
     }});
 }
 
@@ -3106,11 +3127,12 @@ void BattleContext::enqueueHeadbuttTail(int slot,HeadbuttTail kind) {
                 if(m.getStatus<MS::FLIGHT>()==1)m.setMove(MMID::BYRD_STUNNED);
                 m.decrementStatus<MS::FLIGHT>();
             }
-        } else if(kind==HeadbuttTail::MALLEABLE) {
+        } else if(kind==HeadbuttTail::MALLEABLE || kind==HeadbuttTail::MALLEABLE_REACTIVE) {
             // onAttacked has already increased the power. The queued action
             // uses its pre-increment amount.
             if (m.isTargetable() && m.hasStatus<MS::MALLEABLE>())
                 m.addBlock(m.getStatus<MS::MALLEABLE>()-1);
+            if (kind==HeadbuttTail::MALLEABLE_REACTIVE) Actions::RollMove(slot).actFunc(b);
         } else {
             m.removeStatus<MS::MODE_SHIFT>();m.miscInfo+=10;m.setMove(MMID::THE_GUARDIAN_DEFENSIVE_MODE);
             b.addToBot(Actions::MonsterGainBlock(slot,20));
@@ -3485,6 +3507,7 @@ int BattleContext::calculateCardBlock(int baseBlock) const {
         block = std::max(0, block + player.getStatus<PS::DEXTERITY>());
     }
 
+    if (headlessRngKnown) block=std::max(0,block);
     if (player.hasStatus<PS::FRAIL>()) {
         return block * 3 / 4;
     }
@@ -3501,6 +3524,32 @@ void BattleContext::queuePurgeCard(const CardInstance &c, int target) {
     item.ignoreEnergyTotal = true;
     item.autoplay = true;
     addPurgeCardToCardQueue(item);
+}
+
+void BattleContext::updatePowerOrderOnNewApplication(PlayerStatus added) {
+    if (added==PS::STORM) miscBits.reset(STORM_BEFORE_HEX);
+    if (added==PS::HEX) miscBits.set(STORM_BEFORE_HEX,player.hasStatus<PS::STORM>());
+    if (added==PS::MAGNETISM) {
+        miscBits.reset(MAGNETISM_BEFORE_HELLO);
+        miscBits.reset(MAGNETISM_BEFORE_CREATIVE);
+    }
+    if (added==PS::HELLO_WORLD) {
+        miscBits.set(MAGNETISM_BEFORE_HELLO,player.hasStatus<PS::MAGNETISM>());
+        miscBits.reset(HELLO_BEFORE_CREATIVE);
+    }
+    if (added==PS::CREATIVE_AI) {
+        miscBits.set(HELLO_BEFORE_CREATIVE,player.hasStatus<PS::HELLO_WORLD>());
+        miscBits.set(MAGNETISM_BEFORE_CREATIVE,player.hasStatus<PS::MAGNETISM>());
+    }
+    if (added==PS::WRAITH_FORM) {
+        miscBits.reset(WRAITH_BEFORE_FLEX);
+        miscBits.reset(WRAITH_BEFORE_RETAIN);
+    }
+    if (added==PS::WELL_LAID_PLANS) {
+        miscBits.set(WRAITH_BEFORE_RETAIN,player.hasStatus<PS::WRAITH_FORM>());
+        for(int i=0;i<3;++i)miscBits.reset(BOMB_AFTER_RETAIN_1+i);
+    }
+    if (added==PS::LOSE_STRENGTH) miscBits.set(WRAITH_BEFORE_FLEX,player.hasStatus<PS::WRAITH_FORM>());
 }
 
 void BattleContext::addPurgeCardToCardQueue(const CardQueueItem &item) {

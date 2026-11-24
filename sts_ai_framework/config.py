@@ -20,7 +20,7 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 DEBUG_PROMPT_FILE = os.getenv("DEBUG_PROMPT_FILE", "debug/latest_prompt.txt")
 RUN_LOG_DIR = os.getenv("RUN_LOG_DIR", "debug")  # 运行日志目录(每次运行生成 run_YYYYMMDD_HHMMSS.log)
 ROUTE_POLICY = os.getenv("ROUTE_POLICY", "planner").strip().lower()
-if ROUTE_POLICY not in ("planner", "legacy"):
+if ROUTE_POLICY not in ("planner", "resource_v2", "legacy"):
     ROUTE_POLICY = "planner"
 
 # Event decision policy: "expectimax" = per-choice expected-value scoring (no LLM for

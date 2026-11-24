@@ -91,6 +91,45 @@ class HeadlessRngTests(unittest.TestCase):
         r = self.request(operation="fingerprint"); self.assertTrue(r["supported"], r)
         self.assertIsInstance(r["native_key"], list); self.assertEqual(r["rng_restore_mode"], "exact_state")
 
+    def test_chosen_hex_preserves_order_after_existing_storm(self):
+        for artifact in (0,1):
+            with self.subTest(artifact=artifact):
+                s=copy.deepcopy(self.snapshot)
+                powers=[{"power_id":"Storm","amount":1}]
+                if artifact:powers.append({"power_id":"Artifact","amount":artifact})
+                s["player_state"]["creature"]["powers"]=powers
+                monster=s["cur_map_node_state"]["monster_data"][0]
+                monster["creature"].update(id="Chosen",powers=[])
+                monster.update(next_move=4,intent_name="STRONG_DEBUFF",move_history=[4],_private={})
+                r=self.worker.execute(dict(snapshot=s,operation="predict",command={"type":"END"}),1000)
+                self.assertTrue(r["supported"],r)
+                landed=copy.deepcopy(s)
+                landed["player_state"]["creature"]["powers"]=[{"power_id":"Storm","amount":1}]
+                if not artifact:landed["player_state"]["creature"]["powers"].append({"power_id":"Hex","amount":1})
+                observed=self.request(landed,"fingerprint")
+                self.assertTrue(observed["supported"],observed)
+                self.assertEqual(r["expected_native_key"][0][16],observed["native_key"][0][16])
+
+    def test_endless_agony_copies_the_cost_before_confusion(self):
+        from sts_ai_framework.headless.event_receipts import Stream
+        s=copy.deepcopy(self.snapshot);p=s['player_state']
+        p['chosen_class_name']='THE_SILENT'
+        p['potions'][0]['id']='Swift Potion'
+        p['creature']['powers'].append({'power_id':'Confusion','amount':-1})
+        roll=Stream(s['_headless_rng']['streams']['card_random']).bounded(4)
+        old=(roll+1)%4
+        base=p['draw_pile'][0]
+        p['draw_pile']=[dict(base,card_id='Strike_G',uuid=f'00000000-0000-0000-0000-0000000009{i}1')
+                       for i in (1,2)]
+        agony=dict(base,card_id='Endless Agony',cost=old,cost_for_turn=old,exhaust=True,
+                  uuid='00000000-0000-0000-0000-000000000999')
+        p['draw_pile'].append(agony)
+        reply=self.worker.execute(dict(snapshot=s,operation='predict',
+                   command=dict(type='POTION',potion_index=0,monster_index=-1)),1000)
+        self.assertTrue(reply['supported'],reply)
+        copies=[(c['cost'],c['turn_cost']) for c in reply['expected_after']['hand'] if c['id']=='Endless Agony']
+        self.assertEqual(copies,[(roll,roll),(old,old)])
+
     def test_headless_thief_restores_actual_gold_not_turn_times_thievery(self):
         s = copy.deepcopy(self.snapshot); m = s["cur_map_node_state"]["monster_data"][0]
         m["creature"].update(id="Looter", powers=[{"power_id": "Thievery", "amount": 15}])

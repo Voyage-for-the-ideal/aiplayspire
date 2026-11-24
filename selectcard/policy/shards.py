@@ -1,11 +1,13 @@
 """Disk-backed examples; SQLite stores offsets, never sample payloads in RAM."""
 from collections import OrderedDict, defaultdict
+from contextlib import closing
 import hashlib
 import json
 from pathlib import Path
 import sqlite3
 
 DATA_FORMAT = "run-policy-shards-v1"
+REWARD_TASKS = ("CARD_REWARD", "BOSS_REWARD")
 
 
 def file_hash(path):
@@ -25,15 +27,28 @@ def group_key(row):
     return "|".join((state["character"], ascension_band(state["ascension"]), row["decision_type"]))
 
 
-def verify_dataset(root):
+def validate_min_ascension(value):
+    if type(value) is not int or not 0 <= value <= 20:
+        raise ValueError("min_ascension must be an integer in 0..20")
+    return value
+
+
+def read_dataset_manifest(root):
+    """Verify the manifest envelope without requiring every archived member."""
     from .contracts import digest
-    root = Path(root)
-    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    manifest = json.loads((Path(root) / "manifest.json").read_text(encoding="utf-8"))
     if manifest["format"] != DATA_FORMAT:
         raise ValueError("incompatible sharded data")
     specification = {k:v for k,v in manifest.items() if k not in ("source_fingerprint", "fingerprint", "report", "files")}
     if digest(specification) != manifest["source_fingerprint"] or digest([manifest["source_fingerprint"], manifest["files"]]) != manifest["fingerprint"]:
         raise ValueError("dataset manifest fingerprint mismatch")
+    validate_min_ascension(manifest.get("min_ascension", 0))
+    return manifest
+
+
+def verify_dataset(root):
+    root = Path(root)
+    manifest = read_dataset_manifest(root)
     for name, expected in manifest["files"].items():
         if file_hash(root / name) != expected:
             raise ValueError("dataset fingerprint mismatch: " + name)
@@ -104,13 +119,37 @@ class ShardDataset:
         self.connection.close()
 
 
-def check_coverage(root):
+def _required_cells(min_ascension):
     from .contracts import CHARACTERS
-    connection = sqlite3.connect(Path(root) / "index.sqlite")
-    try:
-        observed = set(connection.execute("SELECT DISTINCT split,character,task FROM examples"))
-    finally:
-        connection.close()
-    missing = ["/".join((s,c,t)) for s in ("train", "val") for c in CHARACTERS for t in ("CARD_REWARD", "BOSS_REWARD") if (s,c,t) not in observed]
+    bands = ("15-19", "20") if min_ascension < 20 else ("20",)
+    return [(s, "|".join((c, b, t))) for s in ("train", "val")
+            for c in CHARACTERS for b in bands for t in REWARD_TASKS]
+
+
+def ascension_coverage(root, min_ascension):
+    """Count decisions, runs and seed groups for each train/val reward cell."""
+    cells = _required_cells(min_ascension)
+    index = (Path(root) / "index.sqlite").resolve()
+    with closing(sqlite3.connect(index.as_uri()+"?mode=ro", uri=True)) as connection:
+        observed = {(s, g): dict(decisions=n, runs=runs, seed_groups=seeds)
+                    for s, g, n, runs, seeds in connection.execute(
+                        """SELECT split,group_key,COUNT(*),COUNT(DISTINCT run_id),COUNT(DISTINCT seed_group)
+                           FROM examples WHERE split IN ('train','val') GROUP BY split,group_key""")}
+    return {f"{s}|{g}": observed.get((s, g), dict(decisions=0, runs=0, seed_groups=0))
+            for s, g in cells}
+
+
+def check_coverage(root, *, min_ascension=0):
+    from .contracts import CHARACTERS
+    index = (Path(root) / "index.sqlite").resolve()
+    with closing(sqlite3.connect(index.as_uri()+"?mode=ro", uri=True)) as connection:
+        if min_ascension >= 15:
+            observed = set(connection.execute("SELECT DISTINCT split,group_key FROM examples WHERE split IN ('train','val')"))
+            missing = [f"{s}/{g.replace('|', '/')}" for s, g in _required_cells(min_ascension)
+                       if (s, g) not in observed]
+        else:
+            observed = set(connection.execute("SELECT DISTINCT split,character,task FROM examples WHERE split IN ('train','val')"))
+            missing = ["/".join((s,c,t)) for s in ("train", "val") for c in CHARACTERS
+                       for t in REWARD_TASKS if (s,c,t) not in observed]
     if missing:
         raise ValueError("missing required coverage: " + ", ".join(missing))

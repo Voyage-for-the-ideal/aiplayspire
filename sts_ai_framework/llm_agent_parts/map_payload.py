@@ -1,10 +1,9 @@
-"""Map-context fields for value-network payloads (v3 map-conditioned model).
+"""Shared map/history/key payloads for the format-12 value model.
 
 The v3 value network accepts optional ``act`` / ``map_nodes`` /
 ``current_node`` / ``keys`` / ``history`` keys in its state
 dictionaries (see ``selectcard/src/map_context.py``). This helper derives
-them from the framework ``GameState``. Checkpoint format 10 requires the
-matching map-context schema, so legacy checkpoints are rejected at load time.
+them from the framework ``GameState``. Missing key fields remain unknown.
 """
 
 from typing import Any, Dict, List
@@ -72,16 +71,14 @@ def map_context_fields(state: GameState) -> Dict[str, Any]:
 
     keys = getattr(state, "keys", None)
     act = int(state.act)
+    known_keys = getattr(keys, "model_fields_set", set())
     payload: Dict[str, Any] = {
         "act": act,
         "floor_in_act": _floor_in_act(act, state.floor or 1),
         "current_node": current,
         "map_nodes": packed_nodes,
-        "keys": {
-            "ruby": bool(getattr(keys, "ruby", False)),
-            "emerald": bool(getattr(keys, "emerald", False)),
-            "sapphire": bool(getattr(keys, "sapphire", False)),
-        },
+        "keys": {color: bool(getattr(keys, color))
+                 for color in ("ruby", "emerald", "sapphire") if color in known_keys},
         "history": _act_history_symbols(state, act),
     }
     return payload

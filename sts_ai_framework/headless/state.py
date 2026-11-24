@@ -168,6 +168,10 @@ def _history(raw, floor):
             raise HeadlessContractError("Duplicate history floor")
         selected = entry.get("selected_symbol") or "?"
         resolved = entry["resolved_symbol"]
+        # The scripted transition into VictoryRoom records the final map node
+        # as BOSS; ordinary map choices and history use its compact B symbol.
+        if selected == "BOSS" and resolved == "B":
+            selected = "B"
         if selected not in _SYMBOLS or resolved not in _SYMBOLS:
             raise HeadlessContractError("Invalid historical room symbol")
         result[at] = {"floor": at, "selected_symbol": selected, "resolved_symbol": resolved}

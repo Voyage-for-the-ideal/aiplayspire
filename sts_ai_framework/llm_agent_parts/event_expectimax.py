@@ -16,11 +16,15 @@ score(choice) = Σ pᵢ·V(S′ᵢ)。随机效果（random_relic / random_upgra
 - random_transform 按 remove_card 计（沿用既有 transform 打分近似）。
 - random_potion / random_card_reward / colorless_card_reward 对 V 无对应输入特征，
   按 0 收益处理，只计同一选项中的确定性代价。
+- 图书馆根据桥接层预演的牌面，取强制选一张后的最高 V，而不是取抽牌的平均值。
+- Knowing Skull 按预演出的单张无色牌直接入组；老桥接层只计 HP 代价。
 """
 
+import copy
+import math
 from typing import Dict, List, Optional, Tuple
 
-from ..event_pools import relic_pool
+from ..event_pools import chest_relic_pool, relic_pool
 from ..models import ActionType, GameAction, GameState
 from .value_payload import relic_state_payload, value_state_payload
 
@@ -35,14 +39,16 @@ SUPPORTED_EFFECT_TYPES = {
 
 # 由本模块展开为 realization 分支的随机效果
 RANDOM_EFFECT_TYPES = {
-    "random_relic", "random_upgrade", "random_transform", "select_cards",
+    "random_relic", "random_upgrade", "random_transform", "select_cards", "random_card",
 }
 
 # V 无对应输入特征、按 0 收益近似的效果
 ZERO_VALUE_EFFECT_TYPES = {
     "random_potion", "random_card_reward", "colorless_card_reward",
-    "choose_generated_card",
 }
+
+GENERATED_CARD_EFFECT = "choose_generated_card"
+PREDICTED_COLORLESS_POOL = "COLORLESS_UNCOMMON"
 
 # 本期不做精确打分：战斗走保守规则
 COMBAT_EFFECT_TYPES = {"start_combat"}
@@ -66,36 +72,63 @@ def event_state_payload(state: GameState) -> dict:
 
 
 def guaranteed_hp_loss(choice) -> Optional[int]:
-    """确定性单 outcome 选项的保证 HP 损失；多 outcome / 非确定返回 None（视为未知）。"""
-    if len(choice.outcomes) != 1 or choice.outcomes[0].probability not in (None, 1, 1.0):
+    """确定性有效 outcome 的保证 HP 损失；多 outcome / 非确定返回 None。"""
+    outcomes = _weighted_outcomes(choice)
+    if outcomes is None or len(outcomes) != 1:
         return None
     return sum(
         effect.amount or 0
-        for effect in choice.outcomes[0].effects
+        for effect in outcomes[0][0].effects
         if effect.type == "lose_hp"
     )
 
 
+def _weighted_outcomes(choice):
+    """Validate the distribution, omitting impossible branches before expansion."""
+    outcomes = []
+    for outcome in choice.outcomes:
+        probability = outcome.probability
+        if probability is None:
+            if len(choice.outcomes) != 1:
+                return None
+            probability = 1.0
+        if not math.isfinite(probability) or not 0.0 <= probability <= 1.0:
+            return None
+        if probability > 0.0:
+            outcomes.append((outcome, probability))
+    if not outcomes or not math.isclose(
+        sum(weight for _, weight in outcomes), 1.0, rel_tol=0.0, abs_tol=1e-6
+    ):
+        return None
+    return outcomes
+
+
 def classify_choice(choice) -> str:
     """按选项全部 outcome 的效果类型集合判定可模拟性。"""
+    outcomes = _weighted_outcomes(choice)
+    if outcomes is None:
+        return UNSUPPORTED
     # An explicit relic id is required to model obtain_relic accurately. Some
     # event payloads may report the effect without identifying the relic; do
     # not score that choice as if acquiring a known relic had no downside.
     if any(
-        effect.type == "obtain_relic" and not effect.relic_id
-        for outcome in choice.outcomes
+        (effect.type == "obtain_relic" and not effect.relic_id)
+        or (effect.type == "random_card" and effect.pool != PREDICTED_COLORLESS_POOL)
+        for outcome, _ in outcomes
         for effect in outcome.effects
     ):
         return UNSUPPORTED
     effect_types = {
         effect.type
-        for outcome in choice.outcomes
+        for outcome, _ in outcomes
         for effect in outcome.effects
     }
     if effect_types & COMBAT_EFFECT_TYPES:
         return COMBAT
     if effect_types & UNSUPPORTED_EFFECT_TYPES:
         return UNSUPPORTED
+    if effect_types == {GENERATED_CARD_EFFECT}:
+        return SCOREABLE
     if effect_types <= SUPPORTED_EFFECT_TYPES | RANDOM_EFFECT_TYPES | ZERO_VALUE_EFFECT_TYPES:
         return SCOREABLE
     return UNSUPPORTED
@@ -117,20 +150,29 @@ def _select_card_effects(state: GameState, engine, effect, current: dict) -> Opt
     """
     purpose = (effect.purpose or "").lower()
     count = effect.count or 1
-    if purpose == "purge":
-        targets = engine.rank_cards_for_purpose(
-            current, "purge", count, exclude_ids=_purge_exclusion_ids(state))
-        engine_effects = [{"type": "remove_card", "card_id": targets[0], "amount": count}] if targets else []
-        intent = {"_purge_intent_id": targets[0]} if targets else {}
-        return engine_effects, intent
-    if purpose == "transform":
-        curse_ids = {card.reference for card in state.deck if card.type == "CURSE"}
-        targets = engine.rank_cards_for_purpose(
-            current, "transform", count, exclude_ids=curse_ids)
-        engine_effects = [{"type": "remove_card", "card_id": targets[0], "amount": count}] if targets else []
-        intent = {"_purge_intent_id": targets[0]} if targets else {}
-        if targets:
-            intent["_is_transform"] = True
+    if purpose in ("purge", "transform"):
+        excluded = _purge_exclusion_ids(state)
+        if purpose == "transform":
+            excluded.update(card.reference for card in state.deck if card.type == "CURSE")
+        working = copy.deepcopy(current)
+        targets, engine_effects = [], []
+        for _ in range(count):
+            legal = {card for card in working["deck"]
+                     if card not in excluded and card.split("+")[0] not in excluded}
+            if not legal:
+                return None
+            ranked = engine.rank_cards_for_purpose(
+                working, purpose, 1, exclude_ids=excluded)
+            target = next((card for card in ranked if card in legal), None)
+            if target is None:
+                return None
+            removal = {"type": "remove_card", "card_id": target, "amount": 1}
+            targets.append(target)
+            engine_effects.append(removal)
+            # Remove exactly one instance, even when several cards share an ID.
+            working["deck"].remove(target)
+        intent = {"_purge_intent_id": targets[0], "_purge_intent_ids": targets,
+                  "_grid_num_cards": count, "_is_transform": purpose == "transform"}
         return engine_effects, intent
     if purpose == "upgrade":
         targets = engine.rank_cards_for_purpose(current, "upgrade", count)
@@ -157,6 +199,11 @@ def _expand_effects(state: GameState, engine, effects, current: dict
         effect_type = effect.type
         if effect_type in ZERO_VALUE_EFFECT_TYPES:
             continue
+        if effect_type == "random_card" and effect.pool == PREDICTED_COLORLESS_POOL:
+            if effect.card_id:
+                obtained = generated_card_choice(effect.card_id, current)["effects"]
+                branches = [(effects_list + obtained, weight) for effects_list, weight in branches]
+            continue
         if effect_type in ("select_cards", "random_transform"):
             expanded = _select_card_effects(state, engine, effect, current)
             if expanded is None:
@@ -166,8 +213,9 @@ def _expand_effects(state: GameState, engine, effects, current: dict
             branches = [(effects_list + engine_effects, weight) for effects_list, weight in branches]
             continue
         if effect_type == "random_relic":
-            pool = relic_pool(effect.pool, getattr(state, "character", None),
-                              [relic.id for relic in state.relics])
+            pool_fn = chest_relic_pool if effect.pool in ("COMMON", "UNCOMMON") else relic_pool
+            pool = pool_fn(effect.pool, getattr(state, "character", None),
+                           [relic.id for relic in state.relics])
             if not pool:
                 return None
             branches = [
@@ -194,18 +242,42 @@ def _expand_effects(state: GameState, engine, effects, current: dict
     return branches, intent
 
 
+def generated_card_choice(card_id: str, current: dict) -> dict:
+    # add_card uses the same acquisition logic (including eggs) as pick_card.
+    effects = [{"type": "add_card", "card_id": card_id, "amount": 1}]
+    if "CeramicFish" in current["relics"]:
+        effects.append({"type": "gain_gold", "amount": 9})
+    return {"action": "composite_event", "effects": effects}
+
+
 def score_choice(state: GameState, choice, engine, current: dict) -> Optional[Tuple[float, dict, List[dict]]]:
     """期望值打分：score = Σ pᵢ·V(S′ᵢ)。
 
     返回 (expected_value, grid_intent, 首个分支的引擎效果列表)；任何 outcome 不可模拟
     或概率和为 0 时返回 None。
     """
-    if not choice.outcomes:
+    outcomes = _weighted_outcomes(choice)
+    if outcomes is None:
         return None
+    if len(outcomes) == 1 and len(outcomes[0][0].effects) == 1:
+        effect = outcomes[0][0].effects[0]
+        if effect.type == GENERATED_CARD_EFFECT:
+            # An older bridge does not report offers. Do not score a missing or
+            # incomplete preview as if the player could skip the draft.
+            if effect.count != 1 or len(effect.card_ids) != 20 or len(set(effect.card_ids)) != 20:
+                return None
+            candidates = (generated_card_choice(card_id, current) for card_id in effect.card_ids)
+            score, best = max(
+                ((engine.evaluate_state(engine._apply_choice(current, candidate)), candidate)
+                 for candidate in candidates),
+                key=lambda item: item[0],
+            )
+            return score, {}, best["effects"]
+
     weighted_scores = []
     first_intent: dict = {}
     first_effects: List[dict] = []
-    for outcome in choice.outcomes:
+    for outcome, probability in outcomes:
         expanded = _expand_effects(state, engine, outcome.effects, current)
         if expanded is None:
             return None
@@ -217,9 +289,6 @@ def score_choice(state: GameState, choice, engine, current: dict) -> Optional[Tu
                 engine._apply_choice(current, {"action": "composite_event", "effects": effects_list}))
             for effects_list, weight in branches
         )
-        probability = outcome.probability if outcome.probability is not None else 1.0
-        if probability <= 0:
-            probability = 1.0
         weighted_scores.append(probability * branch_score)
         if not first_effects:
             first_effects = branches[0][0]
@@ -229,13 +298,12 @@ def score_choice(state: GameState, choice, engine, current: dict) -> Optional[Tu
 
 
 def _is_leave_choice(choice) -> bool:
+    outcomes = _weighted_outcomes(choice)
+    if outcomes is None:
+        return False
     if getattr(choice, "kind", "") == "LEAVE":
         return True
-    return (
-        len(choice.outcomes) == 1
-        and choice.outcomes[0].probability in (None, 1, 1.0)
-        and not choice.outcomes[0].effects
-    )
+    return len(outcomes) == 1 and not outcomes[0][0].effects
 
 
 def decide_event(state: GameState, value_engine

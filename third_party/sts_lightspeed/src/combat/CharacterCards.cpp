@@ -160,7 +160,7 @@ bool sts::useCharacterCard(BattleContext &bc) {
         bc.addToBot(Actions::BuffPlayer<PS::INTANGIBLE>(up?3:2));
         bc.addToBot(Actions::DebuffPlayer<PS::WRAITH_FORM>(-1,false));break;
     case CardId::BULLET_TIME:
-        bc.addToBot(Actions::BuffPlayer<PS::NO_DRAW>(1));
+        bc.addToBot(Actions::DebuffPlayer<PS::NO_DRAW>(1,false));
         bc.addToBot({[](BattleContext &b){for(int i=0;i<b.cards.cardsInHand;++i)if(b.cards.hand[i].cost>=0)b.cards.hand[i].costForTurn=0;}});break;
     case CardId::SKEWER: {
         int n=bc.curCardQueueItem.energyOnUse+(bc.player.hasRelic<R::CHEMICAL_X>()?2:0);
@@ -209,7 +209,7 @@ bool sts::useCharacterCard(BattleContext &bc) {
     case CardId::RUSHDOWN:bc.addToBot(Actions::BuffPlayer<PS::RUSHDOWN>(2));break;
     case CardId::DEVOTION:bc.addToBot(Actions::BuffPlayer<PS::DEVOTION>(up?3:2));break;
     case CardId::MASTER_REALITY:bc.addToBot(Actions::BuffPlayer<PS::MASTER_REALITY>(bc.headlessRngKnown?-1:1));break;
-    case CardId::ESTABLISHMENT:bc.addToBot(Actions::BuffPlayer<PS::ESTABLISHMENT>(up?2:1));break;
+    case CardId::ESTABLISHMENT:bc.addToBot(Actions::BuffPlayer<PS::ESTABLISHMENT>(bc.headlessRngKnown?1:(up?2:1)));break;
     case CardId::STUDY:bc.addToBot(Actions::BuffPlayer<PS::STUDY>(1));break;
     case CardId::WREATH_OF_FLAME:bc.addToBot(Actions::BuffPlayer<PS::VIGOR>(up?8:5));break;
     case CardId::SCRAWL:bc.addToBot({[](BattleContext &b){b.addToTop(Actions::DrawCards(10-b.cards.cardsInHand));}});break;
@@ -284,6 +284,10 @@ bool sts::useCharacterCard(BattleContext &bc) {
         hit(std::max(0,(up?12:8)+c.specialData));hit(std::max(0,(up?12:8)+c.specialData));
         bc.addToBot({[id=c.uniqueId](BattleContext &b){
             if(b.curCardQueueItem.card.uniqueId==id)b.curCardQueueItem.card.specialData-=2;
+            // Double Tap/Duplication copies share the UUID and wait in the
+            // card queue, so ModifyDamageAction also reaches the next replay.
+            if(!b.cardQueue.isEmpty() && b.cardQueue.front().card.uniqueId==id)
+                b.cardQueue.front().card.specialData-=2;
             for(int i=0;i<b.cards.cardsInHand;++i)if(b.cards.hand[i].uniqueId==id)b.cards.hand[i].specialData-=2;
             for(auto *pile:{&b.cards.drawPile,&b.cards.discardPile,&b.cards.exhaustPile})
                 for(auto &x:*pile)if(x.uniqueId==id)x.specialData-=2;
@@ -327,7 +331,13 @@ bool sts::useCharacterCard(BattleContext &bc) {
     }
     case CardId::VAULT:
         bc.addToBot({[](BattleContext &b){b.skipMonsterTurn=true;}});
-        bc.addToBot({[](BattleContext &b){if(!b.endTurnQueued)b.endTurn();}});break;
+        bc.addToBot({[](BattleContext &b){
+            if (b.endTurnQueued) return;
+            if (b.headlessRngKnown && b.player.hasRelic<R::UNCEASING_TOP>()
+                    && !b.cards.cardsInHand && b.cardQueue.isEmpty())
+                b.addToBot(Actions::DrawCards(1));
+            b.endTurn();
+        }});break;
     case CardId::ALPHA:bc.addToBot(Actions::MakeTempCardInDrawPile(CardInstance(CardId::BETA),1,true));break;
     case CardId::BETA:bc.addToBot(Actions::MakeTempCardInDrawPile(CardInstance(CardId::OMEGA),1,true));break;
     case CardId::OMEGA:bc.addToBot(Actions::BuffPlayer<PS::OMEGA>(up?60:50));break;
@@ -345,7 +355,7 @@ bool sts::useCharacterCard(BattleContext &bc) {
         bc.addToBot({[beforeDraw,amount](BattleContext &b){if(b.cardsDrawn>beforeDraw && b.lastDrawnCardType==CardType::SKILL)b.addToTop(Actions::GainBlock(amount));}});
         break;
     }
-    case CardId::NIGHTMARE:select(CardSelectTask::NIGHTMARE,3);break;
+    case CardId::NIGHTMARE:select(bc.headlessRngKnown?CardSelectTask::NIGHTMARE_HAND:CardSelectTask::NIGHTMARE,3);break;
     case CardId::DEVA_FORM:
         bc.addToBot({[](BattleContext &b){++b.player.devaFormEnergyPerTurn;b.player.buff<PS::DEVA>(1);}});break;
     case CardId::OMNISCIENCE:select(CardSelectTask::OMNISCIENCE,2);break;

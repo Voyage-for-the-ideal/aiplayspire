@@ -1,5 +1,7 @@
 """Opt-in structured policy adapter; default agent behavior stays unchanged."""
 import logging
+
+from .event_rules import fight_event_choice_index
 from .models import ActionType, GameAction
 
 LOG = logging.getLogger(__name__)
@@ -132,6 +134,9 @@ class PolicyAgent:
     def choose_action(self, state):
         self.last_comparison = None
         self.last_behavior = {"source": "baseline"}
+        if fight_event_choice_index(state) is not None:
+            self.last_behavior["reason"] = "combat_hp_threshold"
+            return self.baseline.choose_action(state)
         try:
             result = self._score(state)
         except Exception:

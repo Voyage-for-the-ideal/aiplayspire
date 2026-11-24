@@ -1,11 +1,14 @@
 package com.example.communicationmod;
 
+import com.badlogic.gdx.math.MathUtils;
+import com.badlogic.gdx.math.RandomXS128;
 import com.megacrit.cardcrawl.ui.buttons.LargeDialogOptionButton;
 import com.megacrit.cardcrawl.events.AbstractEvent;
 import org.junit.Test;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -85,6 +88,61 @@ public class EventStateExtractorTest {
         assertEquals("KNOWN", result.get("semantics_status"));
         List<Map<String, Object>> choices = (List<Map<String, Object>>) result.get("choices");
         assertEquals("GENERATED_CARD_GRID", choices.get(0).get("followup"));
+    }
+
+    @Test
+    public void libraryPredictsArchivedDefectOfferInGridOrderWithoutAdvancingRng() {
+        long s0 = 0xd4918c24c8c09813L, s1 = 0x4ee34a2a21e55228L;
+        RandomXS128 source = new RandomXS128(s0, s1);
+        RandomXS128 global = (RandomXS128) MathUtils.random;
+        long g0 = global.getState(0), g1 = global.getState(1);
+        List<String> common = pool("Steam|Cold Snap|Leap|Beam Cell|Hologram|Conserve Battery|Sweeping Beam|Coolheaded|Gash|Stack|Barrage|Compile Driver|Redo|Streamline|Ball Lightning|Go for the Eyes");
+        List<String> uncommon = pool("Doom and Gloom|Defragment|Capacitor|White Noise|Skim|Scrape|Lockon|Reprogram|Auto Shields|Reinforced Body|Double Energy|Darkness|Rip and Tear|FTL|Force Field|Tempest|Heatsinks|Static Discharge|BootSequence|Chill|Loop|Self Repair|Melter|Chaos|Blizzard|Aggregate|Fusion|Consume|Glacier|Hello World|Steam Power|Genetic Algorithm|Storm");
+        List<String> rare = pool("Multi-Cast|Thunder Strike|Biased Cognition|Machine Learning|Electrodynamics|Buffer|Rainbow|Seek|All For One|Reboot|Amplify|Creative AI|Fission");
+        List<String> expected = Arrays.asList("FTL", "Heatsinks", "Melter", "Doom and Gloom", "Capacitor",
+            "Skim", "Compile Driver", "Ball Lightning", "Fusion", "Barrage", "Blizzard", "Self Repair",
+            "Hologram", "Beam Cell", "Scrape", "Gash", "Force Field", "Steam", "Sweeping Beam", "Conserve Battery");
+        for (int poll = 0; poll < 2; poll++) {
+            assertEquals(expected, EventStateExtractor.predictLibraryCards(source, 4, 3, 37, common, uncommon, rare));
+        }
+        assertEquals(s0, source.getState(0));
+        assertEquals(s1, source.getState(1));
+        assertEquals(g0, global.getState(0));
+        assertEquals(g1, global.getState(1));
+    }
+
+    private static List<String> pool(String reversedOrder) {
+        List<String> cards = Arrays.asList(reversedOrder.split("\\|"));
+        Collections.reverse(cards);
+        return cards;
+    }
+
+    @Test
+    public void knowingSkullPredictsRepeatedVanillaDrawsWithoutMutatingPoolOrRng() {
+        com.megacrit.cardcrawl.random.Random live = new com.megacrit.cardcrawl.random.Random(527L);
+        RandomXS128 global = (RandomXS128) MathUtils.random;
+        long g0 = global.getState(0), g1 = global.getState(1);
+        List<String> livePool = new ArrayList<>(Arrays.asList(
+            "rare:Hand of Greed", "Trip", "Flash of Steel", "rare:Apotheosis", "Panacea"));
+        for (int draw = 0; draw < 5; draw++) {
+            List<String> before = new ArrayList<>(livePool);
+            long s0 = live.random.getState(0), s1 = live.random.getState(1);
+            String preview = EventStateExtractor.firstAfterColorlessShuffle(
+                live.random, livePool, card -> !card.startsWith("rare:"));
+            assertEquals(preview, EventStateExtractor.firstAfterColorlessShuffle(
+                live.random, livePool, card -> !card.startsWith("rare:")));
+            assertEquals(draw, live.counter);
+            assertEquals(s0, live.random.getState(0));
+            assertEquals(s1, live.random.getState(1));
+            assertEquals(before, livePool);
+
+            // The vanilla draw consumes the real seed and leaves the pool shuffled.
+            Collections.shuffle(livePool, new java.util.Random(live.randomLong()));
+            String actual = livePool.stream().filter(card -> !card.startsWith("rare:")).findFirst().get();
+            assertEquals(actual, preview);
+        }
+        assertEquals(g0, global.getState(0));
+        assertEquals(g1, global.getState(1));
     }
 
     @Test
