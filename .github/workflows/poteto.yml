@@ -4,6 +4,12 @@ permissions:
   contents: read
 
 jobs:
+  formal:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - run: python3 tools/formal_headless.py
+      - run: python3 -m unittest tools.test_runtime_invariants -v
   pickers:
     runs-on: ubuntu-24.04
     steps:
@@ -12,6 +18,16 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/spire"
           "$RUNNER_TEMP/spire/bin/pip" install 'pydantic>=2,<3'
           "$RUNNER_TEMP/spire/bin/python" -m unittest tools.test_picker_phase sts_ai_framework.tests.test_headless_state sts_ai_framework.tests.test_headless_event_opening sts_ai_framework.tests.test_headless_scry_replay -v
+  sqlite:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - run: |
+          python3 -m venv "$RUNNER_TEMP/spire"
+          "$RUNNER_TEMP/spire/bin/pip" install 'pydantic>=2,<3' numpy
+          "$RUNNER_TEMP/spire/bin/pip" install --index-url https://download.pytorch.org/whl/cpu torch==2.7.1
+          "$RUNNER_TEMP/spire/bin/python" -m unittest tools.test_storage_e2e.SQLiteE2E -v
   release:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -20,6 +36,14 @@ jobs:
       - run: python3 tools/test_commit_scope.py
       - run: bash battle_engine/build.sh 2
       - run: python3 deploy/headless/release_worker.py verify battle_engine/bin/battle-engine-worker
+      - name: Replay through the real Release worker
+        shell: bash
+        run: |
+          python3 -m venv "$RUNNER_TEMP/spire"
+          "$RUNNER_TEMP/spire/bin/pip" install 'pydantic>=2,<3'
+          BATTLE_ENGINE_WORKER="$PWD/battle_engine/bin/battle-engine-worker" "$RUNNER_TEMP/spire/bin/python" -m unittest \
+            tools.test_storage_e2e.ReplayE2E \
+            battle_engine.tests.test_layered_search.LayeredNativeTests.test_headless_suffix_checks_rng_outside_the_native_key -v
       - name: Reject swapped worker and historical unoptimized build
         shell: bash
         run: |
@@ -27,6 +51,7 @@ jobs:
           worker=battle_engine/bin/battle-engine-worker
           cp "$worker" "$worker.release.json" "$RUNNER_TEMP/"
           printf x >> "$RUNNER_TEMP/battle-engine-worker"
+          chmod -x "$RUNNER_TEMP/battle-engine-worker"
           if python3 deploy/headless/release_worker.py verify "$RUNNER_TEMP/battle-engine-worker" 2> "$RUNNER_TEMP/rejected"; then exit 1; fi
           grep -q 'BUILD_HEADLESS_WITH_RELEASE_PRESET: worker and manifest differ' "$RUNNER_TEMP/rejected"
           cmake -S battle_engine -B "$RUNNER_TEMP/unoptimized" -DCMAKE_BUILD_TYPE=Debug "-DBATTLE_ENGINE_OUTPUT_DIR=$RUNNER_TEMP/unoptimized/bin"

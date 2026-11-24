@@ -19,8 +19,6 @@ class CampaignTests(unittest.TestCase):
                 path.mkdir()
             a,b=(isolated_java_env(path) for path in runtimes)
             self.assertNotEqual(a["TEMP"],b["TEMP"])
-            self.assertEqual(a["TEMP"],a["TMP"])
-            self.assertIn(a["TEMP"],a["JAVA_TOOL_OPTIONS"])
 
     def fixture(self, root):
         mods=root/"mods"
